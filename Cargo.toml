@@ -1,0 +1,72 @@
+[package]
+name = "benchy-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "An agent workbench for time-series analytics over the data you already have: SQL over a sealed DuckDB workspace, loaded before the first call"
+license = "MIT"
+publish = false
+
+[workspace]
+exclude = ["spike"]
+
+[dependencies]
+# Links DuckDB's official release library, which carries Parquet, JSON and ICU:
+# `.cargo/config.toml` has the first build fetch it. Set DUCKDB_LIB_DIR and DUCKDB_INCLUDE_DIR to
+# link a copy of your own instead.
+duckdb = { version = "1.10505", features = ["appender-arrow"] }
+# Only so build.rs is told where libduckdb-sys put the library; always the same crate duckdb uses.
+libduckdb-sys = "=1.10505.0"
+# Pinned to what duckdb already resolves, for the `ipc` feature alone: an exec connector speaks
+# Arrow streaming IPC on stdout (docs/EXEC-CONNECTOR-PROTOCOL.md), and duckdb's arrow feature
+# set does not turn the reader on. Feature unification means this is the same crate, not a second
+# copy — `cargo tree -d` is the check.
+arrow = { version = "58.4", default-features = false, features = ["ipc"] }
+# LZ4-framed IPC bodies, which ClickHouse's `FORMAT ArrowStream` sends by default. The same crate
+# arrow uses, for the feature alone; lz4_flex is pure Rust. zstd is not turned on: src/ipc.rs
+# checks a compressed buffer's claimed size with LZ4 only, so a zstd body is refused naming the
+# setting that turns it off.
+arrow-ipc = { version = "58.4", default-features = false, features = ["lz4"] }
+# What arrow-ipc decodes LZ4 with, used directly to check a buffer's stated size before arrow
+# allocates it (src/ipc.rs). The same crate and version arrow-ipc resolves.
+lz4_flex = { version = "0.13", default-features = false, features = ["std", "frame"] }
+libc = "0.2"
+rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "io-std"] }
+toml = "0.8"
+# The ClickHouse source's HTTP client (src/sources/clickhouse.rs): small, blocking, and rustls
+# with ring for https, so no OpenSSL and no CMake on any platform the release builds. Its own
+# decompression is left off: src/decompress.rs decodes a body, as far as the reader's cap pulls it.
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+# zstd responses (src/decompress.rs), through C libzstd 1.5.7, built from the crate's bundled
+# sources by `cc`, which ring already needs: no new toolchain, and no file read at runtime. It
+# replaced ruzstd (pure Rust): on a 10M-row ClickHouse response (41.5 MB of zstd, 240 MB of Arrow,
+# aarch64 Neoverse-N1), libzstd took 1.64 G instructions and 0.29 s of CPU to ruzstd's 5.99 G and
+# 0.75 s (spike/decompress). The cost: a cold build about 75 s longer at 2 jobs, peaking at 241 MB.
+# No default features: no legacy formats, no dictionary builder. Cargo.lock holds zstd-sys at
+# 2.0.16, a release with a year of use behind it.
+zstd = { version = "0.13.3", default-features = false }
+# The HTTP source (src/sources/http/). JSON pages are decoded by arrow-json, the same version the
+# rest of arrow resolves: a page's rows decode straight into a list of structs whose child is the
+# batch, in half serde_json's instructions (docs/HTTP-SOURCE.md).
+arrow-json = { version = "58.4", default-features = false }
+# gzip bodies (src/decompress.rs), on zlib-rs: 20% less CPU than miniz_oxide for the same
+# instructions (docs/PERFORMANCE.md, item 3).
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
+[profile.release]
+strip = true
+# Measured and not adopted (bench/ingest.py on a8ffc3e, docs/PERFORMANCE.md, 2026-10-11, aarch64
+# Neoverse-N1): more than 85% of a load's instructions are in DuckDB's prebuilt library, which no
+# Rust flag reaches, so the whole-session changes stayed inside the run-to-run spread.
+# - lto = "fat" with codegen-units = 1: the ClickHouse fetch (ruzstd then, Arrow decode) -2%
+#   instructions, process start -0.6%, the binary 14.2 -> 10.8 MB; whole sessions -2.5% to +5.4%, within spread.
+#   The build went from 4 to 26 minutes and peaked at 2.6 GB of memory.
+# - the same with -C target-cpu=native: the ClickHouse fetch -5% instructions and -10% CPU;
+#   sessions -2% to +6%, within spread; and the binary then needs this CPU's features.
+# - panic = "abort": not possible. src/ipc.rs catches arrow's panic on a hostile schema and refuses
+#   the stream (`a_hostile_schema_is_refused_not_a_panic`); aborting would crash the loader.

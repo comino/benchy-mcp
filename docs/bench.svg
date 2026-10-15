@@ -1,0 +1,132 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" width="880" height="300" role="img" aria-label="A small robot stands at a workbench and says LOAD DATA. A stack of data blocks drops onto the bench. The robot says SELECT, two small green blocks lift out of the stack, and the robot walks off carrying them while the bench empties.">
+  <style>
+    .t { fill:#24292f; } .m { fill:#6e7781; }
+    .stage { fill:#f6f8fa; stroke:#d0d7de; }
+    .wood  { fill:#8b949e; }
+    .bot   { fill:#4c8dff; }
+    .eye   { fill:#ffffff; }
+    .pup   { fill:#1f2328; }
+    .bub   { fill:#ffffff; stroke:#d0d7de; }
+    @media (prefers-color-scheme: dark) {
+      .t { fill:#e6edf3; } .m { fill:#8b949e; }
+      .stage { fill:#12171d; stroke:#30363d; }
+      .wood  { fill:#6e7781; }
+      .bub   { fill:#12171d; stroke:#30363d; }
+      .pup   { fill:#0d1117; }
+    }
+    text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+
+    /* one 5.56s story: say LOAD DATA -> data drops -> SELECT -> lift two blocks out -> walk off */
+    .blk { animation: fall 5.56s infinite; opacity:0 }
+    .b2{animation-delay:.061s} .b3{animation-delay:.122s} .b4{animation-delay:.183s}
+    .b5{animation-delay:.244s} .b6{animation-delay:.306s}
+    @keyframes fall {
+      0%,10%   { transform:translateY(-330px); opacity:0; animation-timing-function:cubic-bezier(.55,.06,.68,.19) }
+      11%      { opacity:1 }
+      20%      { transform:translateY(0); opacity:1 }
+      22%      { transform:translateY(-7px) }
+      25%,54%  { transform:translateY(0); opacity:1 }
+      64%,100% { transform:translateY(0); opacity:0 }
+    }
+
+    .bubble { animation: bub 5.56s infinite; }
+    @keyframes bub { 0%,44%{ opacity:1 } 48%,96%{ opacity:0 } 100%{ opacity:1 } }
+    .say1 { animation: say1 5.56s steps(1,end) infinite; }
+    @keyframes say1 { 0%,27%{ opacity:1 } 28%,100%{ opacity:0 } }
+    .say2 { animation: say2 5.56s steps(1,end) infinite; }
+    @keyframes say2 { 0%,27%{ opacity:0 } 28%,100%{ opacity:1 } }
+
+    .spk { animation: spk 5.56s ease-in-out infinite; opacity:0 }
+    .k2{animation-delay:.1s} .k3{animation-delay:.2s} .k4{animation-delay:.3s}
+    @keyframes spk { 0%,30%{ opacity:0 } 34%{ opacity:1 } 40%{ opacity:.25 } 44%{ opacity:1 } 50%,100%{ opacity:0 } }
+
+    .walk { animation: walk 5.56s infinite; }
+    @keyframes walk {
+      0%,58%    { transform:translateX(0) }
+      72%,80%   { transform:translateX(660px) }
+      80.5%     { transform:translateX(-270px) }
+      100%      { transform:translateX(0) }
+    }
+    .bob { animation: bob 5.56s infinite; }
+    @keyframes bob {
+      0%,58%{ transform:translateY(0) } 61%{ transform:translateY(-4px) } 64%{ transform:translateY(0) }
+      67%{ transform:translateY(-4px) } 70%{ transform:translateY(0) }
+      72%,80%{ transform:translateY(0) } 84%{ transform:translateY(-4px) } 88%{ transform:translateY(0) }
+      92%{ transform:translateY(-4px) } 96%{ transform:translateY(0) } 100%{ transform:translateY(0) }
+    }
+
+    .takeA { animation: takeA 5.56s infinite; opacity:0 }
+    @keyframes takeA {
+      0%,42%   { transform:translate(0,0); opacity:0 }
+      44%      { transform:translate(0,0); opacity:1 }
+      48%      { transform:translate(-36px,-6px); opacity:1 }
+      56%,58%  { transform:translate(-226px,-4px); opacity:1 }
+      72%      { transform:translate(434px,-4px); opacity:1 }
+      76%,100% { transform:translate(434px,-4px); opacity:0 }
+    }
+    .takeB { animation: takeB 5.56s infinite; opacity:0 }
+    @keyframes takeB {
+      0%,45%   { transform:translate(0,0); opacity:0 }
+      47%      { transform:translate(0,0); opacity:1 }
+      51%      { transform:translate(-40px,-12px); opacity:1 }
+      57%,58%  { transform:translate(-230px,-50px); opacity:1 }
+      72%      { transform:translate(430px,-50px); opacity:1 }
+      76%,100% { transform:translate(430px,-50px); opacity:0 }
+    }
+  </style>
+
+  <rect class="stage" x="8" y="8" width="864" height="284" rx="16" stroke-width="1.5"/>
+
+  <!-- the bench -->
+  <rect class="wood" x="300" y="212" width="340" height="14" rx="3"/>
+  <rect class="wood" x="320" y="226" width="11" height="24" rx="2"/>
+  <rect class="wood" x="609" y="226" width="11" height="24" rx="2"/>
+
+  <!-- the data, dropping onto it -->
+  <g>
+    <rect class="blk"    x="390" y="199" width="170" height="13" rx="3" fill="#4c8dff" fill-opacity=".55"/>
+    <rect class="blk b2" x="396" y="184" width="158" height="13" rx="3" fill="#a855f7" fill-opacity=".55"/>
+    <rect class="blk b3" x="390" y="169" width="170" height="13" rx="3" fill="#f59e0b" fill-opacity=".55"/>
+    <rect class="blk b4" x="400" y="154" width="150" height="13" rx="3" fill="#4c8dff" fill-opacity=".55"/>
+    <rect class="blk b5" x="392" y="139" width="166" height="13" rx="3" fill="#a855f7" fill-opacity=".55"/>
+    <rect class="blk b6" x="398" y="124" width="154" height="13" rx="3" fill="#f59e0b" fill-opacity=".55"/>
+  </g>
+
+  <!-- working on it -->
+  <g fill="#f59e0b">
+    <circle class="spk"    cx="372" cy="150" r="3.5"/>
+    <circle class="spk k2" cx="576" cy="132" r="3"/>
+    <circle class="spk k3" cx="570" cy="186" r="3.5"/>
+    <circle class="spk k4" cx="378" cy="112" r="3"/>
+  </g>
+
+  <!-- the two blocks it takes away -->
+  <rect class="takeA" x="448" y="154" width="50" height="13" rx="3" fill="#10b981"/>
+  <rect class="takeB" x="452" y="184" width="50" height="13" rx="3" fill="#10b981"/>
+
+  <!-- the robot -->
+  <g class="walk"><g class="bob">
+    <line x1="250" y1="190" x2="250" y2="182" stroke="#4c8dff" stroke-width="2.5"/>
+    <circle class="bot" cx="250" cy="179" r="3.5"/>
+    <rect class="bot" x="233" y="190" width="34" height="28" rx="9"/>
+    <circle class="eye" cx="243" cy="204" r="4.5"/><circle class="pup" cx="243" cy="204" r="2.2"/>
+    <circle class="eye" cx="257" cy="204" r="4.5"/><circle class="pup" cx="257" cy="204" r="2.2"/>
+    <rect class="bot" x="237" y="222" width="26" height="20" rx="6"/>
+    <rect class="bot" x="229" y="223" width="7" height="14" rx="3.5"/>
+    <rect class="bot" x="264" y="223" width="7" height="14" rx="3.5"/>
+    <rect class="bot" x="241" y="242" width="7" height="8" rx="3"/>
+    <rect class="bot" x="252" y="242" width="7" height="8" rx="3"/>
+  </g></g>
+
+  <!-- what it says -->
+  <g class="bubble">
+    <rect class="bub" x="194" y="126" width="112" height="32" rx="9" stroke-width="1.4"/>
+    <path class="bub" d="M238 158 L248 172 L256 158 Z" stroke-width="1.4"/>
+    <text class="t mono say1" x="250" y="147" text-anchor="middle" font-size="12.5" font-weight="600">LOAD DATA</text>
+    <text class="t mono say2" x="250" y="147" text-anchor="middle" font-size="12.5" font-weight="600">SELECT &#8230;</text>
+  </g>
+
+  <line x1="40" y1="250" x2="840" y2="250" stroke="#8b949e" stroke-width="1.5" stroke-opacity=".45"/>
+  <text class="m" x="440" y="278" text-anchor="middle" font-size="12.5">Put data on the bench &#183; work on it with SQL &#183; take the answer with you</text>
+</svg>

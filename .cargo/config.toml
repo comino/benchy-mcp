@@ -1,0 +1,6 @@
+# Link DuckDB's official release library instead of compiling DuckDB from source. The crates.io
+# sources cannot build ICU, and without ICU a TIMESTAMPTZ column has no date_trunc, time_bucket
+# or interval arithmetic — the everyday operations on time series. The library is fetched once
+# per target into target/duckdb-download/. DUCKDB_LIB_DIR, when set, takes precedence.
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"

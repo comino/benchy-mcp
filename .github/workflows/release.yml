@@ -1,0 +1,119 @@
+name: Release
+
+# A `v*` tag builds, smoke-tests and publishes a release. `workflow_dispatch`, and a pull request
+# that touches packaging, run the same build and smoke test as a dry run: the bundles are kept as
+# workflow artifacts and nothing is published.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - install.sh
+      - build.rs
+      - .cargo/config.toml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on the oldest Ubuntu runner so the binary needs no newer glibc than 2.35;
+          # DuckDB's own library asks for 2.25.
+          - { platform: linux-x86_64, runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { platform: linux-aarch64, runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { platform: macos-arm64, runner: macos-14, target: aarch64-apple-darwin }
+          # Cross-built on Apple silicon: DuckDB's macOS library is universal, and an Intel
+          # runner costs more and builds slower. It is run on Intel in the smoke test.
+          - { platform: macos-x86_64, runner: macos-14, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      # Only $ORIGIN / @executable_path in the rpath: the library ships beside the binary.
+      BENCHY_BUNDLE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
+        with: { toolchain: stable, targets: "${{ matrix.target }}" }
+      # No build cache: a release is built the way a stranger's first build is, from nothing.
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: packaging/package.sh ${{ matrix.target }} ${{ matrix.platform }} dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchy-mcp-${{ matrix.platform }}
+          path: |
+            dist/benchy-mcp-${{ matrix.platform }}.tar.gz
+            dist/benchy-mcp-${{ matrix.platform }}.tar.gz.sha256
+          if-no-files-found: error
+
+  # Each bundle on a runner that never built anything: no target/, no Rust, no DuckDB elsewhere.
+  # Linux on the oldest and the newest Ubuntu; macOS on a newer release than it was built on.
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x86_64, runner: ubuntu-22.04 }
+          - { platform: linux-x86_64, runner: ubuntu-24.04 }
+          - { platform: linux-aarch64, runner: ubuntu-22.04-arm }
+          - { platform: linux-aarch64, runner: ubuntu-24.04-arm }
+          - { platform: macos-arm64, runner: macos-15 }
+          - { platform: macos-x86_64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchy-mcp-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dist
+      - run: packaging/smoke.sh "$RUNNER_TEMP/dist" ${{ matrix.platform }}
+
+  # The only job that can publish, and the only one that may sign: `id-token` and `attestations`
+  # are granted here and nowhere else. The `release` environment is where the repository's owner
+  # adds required reviewers (Settings → Environments → release), so a pushed tag waits for a
+  # person before anything is published.
+  release:
+    needs: smoke
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: benchy-mcp-*
+          merge-multiple: true
+          path: dist
+      - name: Put install.sh beside the bundles
+        run: cp install.sh dist/
+      # A signed statement, kept by GitHub, that each file was built by this workflow from this
+      # commit: `gh attestation verify <file> --repo <owner>/benchy-mcp` checks it (README).
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/install.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist && cat ./*.sha256 > SHA256SUMS && sha256sum install.sh >> SHA256SUMS)
+          # The release notes are this version's section of CHANGELOG.md.
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            /^## / { on = index($0, "[" v "]") > 0; next }
+            on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "CHANGELOG.md has no section for $GITHUB_REF_NAME" >&2; exit 1; }
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "benchy-mcp ${GITHUB_REF_NAME#v}" --notes-file notes.md

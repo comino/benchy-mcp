@@ -1,0 +1,21 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+/runs
+/scratch
+spike/vendor/
+spike/bin/
+
+# public data, cut by eval/fetch_uci.py — fetch rather than commit
+/eval/uci/
+
+# local working notes — never committed (the repo goes public)
+*.local.md
+__pycache__/
+
+# agent worktrees and local agent settings
+/.claude/
+
+# bundles packed locally (packaging/package.sh)
+/dist/

@@ -1,0 +1,181 @@
+# An operator's config. Point benchy at it with `--config`.
+#
+#   benchy-mcp --config examples/benchy.toml
+#
+# Paths resolve against *this file's* directory, never the working directory and never PATH.
+# Unknown keys are an error, not a warning.
+
+# What the whole session may fetch from its sources, across every load, optional. A fetch is
+# refused once it would pass what is left — refused, never truncated. A ceiling left out keeps
+# its default; zero is refused, since it would let nothing load.
+#
+#   [budget]
+#   rows  = 50_000_000            # the default
+#   bytes = 2147483648            # the default, 2 GiB
+#
+# For `benchy-mcp host --config`, a config holds [budget], [attach] — the most one of a host's
+# attachments may hold — [engine], [loader] and [helpers], and no sources: the host attaches them. A host
+# may lower any of these limits in its `hello`, never raise one (docs/HOST-PROTOCOL.md).
+#
+#   [attach]
+#   rows  = 10_000_000            # the default
+#   bytes = 268435456             # the default, 256 MiB
+
+# The most resident memory the engine may hold, planning included, as `--memory-ceiling` sets it,
+# never both: past it the engine is killed and rebuilt over the loaded data, and the agent is told.
+# For a server's config or a host's. Unset, `--memory` and half again, at least 256 MiB over it.
+#
+#   [engine]
+#   memory_ceiling = "1.5GB"
+
+# The most resident memory one loader may hold, with the connector it runs and whatever that
+# starts, as `--loader-memory-ceiling` sets it, never both: past it the load fails, nothing of it
+# is attached, and the log says why. For a server's config or a host's (a host may lower it from
+# protocol 6). Unset, 1GB: 10M-row loads peak at 94–410 MB.
+#
+#   [loader]
+#   memory_ceiling = "1GB"
+
+# SQL helpers: views and macros the agent calls like built-ins, listed in `describe` with the `--`
+# comment above each. A file of CREATE VIEW and CREATE MACRO statements, or the same inline as
+# `sql = """…"""`; one of the two. Read at startup and fixed for the session: the agent cannot
+# drop, change or shadow one, and no call adds one. A helper named like a DuckDB built-in, a macro
+# named like a word DuckDB's parser reads itself (`coalesce`, `try`), one that reads a file, the network or an extension, one that keeps an ENUM, or one that reads a table no
+# source here provides stops startup. With `benchy-mcp host --config`, a helper over a table the host has not attached
+# yet waits for it. Name tables unqualified. docs/DIALECT.md says how to write a table macro.
+[helpers]
+file = "./helpers.sql"
+
+# A local file, named explicitly. The zero-config `benchy-mcp ./data` path needs none of this.
+[[source]]
+name = "rooms"
+type = "file"
+path = "./data/rooms.csv"
+# A zone-less timestamp is read as UTC. If this source writes local time, name its zone, and
+# benchy reads it as that zone's local time — for a file or a connector's `timestamp` column:
+#   timezone = "Europe/Copenhagen"
+#
+# A file is sniffed by DuckDB's reader unless you declare it. Declared, it is read as declared —
+# a CSV or TSV in its stated dialect, its columns matched by the header's names — which skips most
+# of the sniffing; only the declared columns load, and a file that does not match stops the load.
+#   delimiter = ";"               # a .csv's or .tsv's, "," or a tab unless set
+#     [[source.schema]]
+#     name = "room"
+#     type = "string"
+#     [[source.schema]]
+#     name = "floor"
+#     type = "int64"
+
+# A time series, with its shape stated. `describe` tells the agent the time column, its range and
+# cadence, the series key and each series' quirks — dead, late, stopped, paused, gaps, repeats.
+# Left out, both are found by heuristic and called what they "look like". A stated column the
+# table does not have stops the load. Either key works on any source.
+[[source]]
+name = "meters"
+type = "file"
+path = "./data/meters.csv"
+time_column = "observed_at"   # a date or timestamp column
+series = ["meter"]            # one or more columns that tell the series apart
+
+# An exec connector: a subprocess benchy runs, which speaks Arrow IPC on stdout.
+# See docs/EXEC-CONNECTOR-PROTOCOL.md, and connectors/hello.sh for the smallest one that works.
+[[source]]
+name = "readings"
+type = "exec"
+command = "./connectors/hello.sh"
+
+# The schema is declared *here*, by you, and never taken from the connector.
+# A connector is a third party: if it named its own columns, those names would flow from a
+# network payload into what the model reads. A stream that does not match this is refused.
+# A column may arrive narrower than declared — an int32 for int64, ms timestamps for
+# timestamptz — and the table holds the same types a file's would (docs/EXEC-CONNECTOR-PROTOCOL.md,
+# "Types").
+  [[source.schema]]
+  name = "id"
+  type = "int64"
+  nullable = false
+
+  [[source.schema]]
+  name = "meter"
+  type = "string"
+  nullable = false
+
+  [[source.schema]]
+  name = "power_kw"
+  type = "float64"
+
+# Credentials go in `env`, and only in `env`. `${VAR}` reads benchy's own environment, and an
+# unresolvable one stops startup rather than quietly becoming an empty password.
+# The allowlist is per source: this connector cannot see another source's variables.
+#   env = { METERS_TOKEN = "${BENCHY_METERS_TOKEN}" }
+#
+# `config` is copied verbatim into the connector's input document — and into the operator log —
+# so it must never hold a secret. benchy refuses to start if it contains `${...}`.
+#   config = { base_url = "https://meters.internal/v2" }
+#
+# Per-source ceilings, all optional:
+#   max_rows = 5_000_000
+#   max_bytes = 134217728
+#   deadline_secs = 120
+
+# Narrowing: what this source may return at all. The cheapest admission control there is — a
+# load bounded to the last 30 days costs the upstream system a fraction of a full scan.
+#
+# It is sent to the connector *and* re-applied after ingest, at every declared level. A
+# connector may promise `enforced` and be wrong; re-filtering an already-materialised table
+# costs approximately nothing, and it means a buggy connector costs bytes rather than answers.
+#
+#   [source.narrow]
+#   column = "observed_at"        # the timestamp column the window applies to
+#   last   = "30d"                # or an explicit start / end, RFC 3339 — not both
+#   entity_column = "meter"       # an allowlist, if this source has one
+#   entity_ids    = ["lab", "office"]
+
+# ClickHouse, built in: no connector to write. Each listed table becomes a table of the same name,
+# its schema read and mapped to the bench's types, the narrowing sent as query parameters, and
+# the load estimated before a row is sent. `benchy-mcp check benchy.toml ch_readings` tries it
+# without a model; docs/SOURCES.md has every field and the type mapping. Commented out here, as
+# it needs a server:
+#
+#   [[source]]
+#   type = "clickhouse"
+#   url = "http://localhost:8123"          # http or https; never a user or password in it
+#   database = "default"
+#   tables = ["ch_readings", "ch_meters"]  # or `name = "x"` with `query = "SELECT ..."`;
+#                                          # not a name another source here has
+#   env = { CLICKHOUSE_USER = "${CH_USER}", CLICKHOUSE_PASSWORD = "${CH_PASSWORD}" }
+#   compression = "zstd"                   # unset: "none" on loopback, else "zstd"; or "lz4"
+#   max_rows = 5_000_000                   # caps, as for an exec source
+#     [source.narrow]                      # pushed down, and re-applied after ingest
+#     column = "ts"
+#     last = "30d"
+#     entity_column = "meter"
+#     entity_ids = ["MT_002", "MT_004"]
+#     [[source.schema]]                    # optional: load only these, as exactly these types
+#     name = "ts"
+#     type = "timestamptz"
+
+# HTTP, built in: a URL answering with Arrow, Parquet, CSV or NDJSON, gzip- or zstd-compressed, or
+# a JSON API in pages. Each loads as the same file would. `benchy-mcp check benchy.toml api_readings`
+# shows the request, the first page and the schema to pin; docs/SOURCES.md has every field.
+# Commented out here, as it needs a server:
+#
+#   [[source]]
+#   name = "api_readings"
+#   type = "http"
+#   url = "https://api.example.com/v1/readings"   # no user, password or query string in it
+#   format = "json"                                # "arrow", "parquet", "csv", "ndjson", "json"
+#   params = { site = "north" }
+#   env = { KEY = "${API_KEY}" }                   # the secret, from benchy's environment
+#   auth = { header = "X-Api-Key", env = "KEY" }   # or bearer, param, or user and password
+#     [source.pages]                               # {"data": [...], "meta": {"next_cursor": "..."}}
+#     rows = "data"
+#     next = "cursor"
+#     cursor = "meta.next_cursor"
+#     cursor_param = "cursor"
+#     [source.narrow]                              # re-applied after ingest, whatever the API did
+#     column = "ts"
+#     last = "30d"
+#     [source.pushdown]                            # and sent as these parameters
+#     start = "from"
+#     time_format = "unix"

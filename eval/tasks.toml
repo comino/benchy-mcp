@@ -1,0 +1,169 @@
+# The task set: thirteen questions over `readings`, the public meter data `eval/fetch_uci.py` cuts —
+# 24 meters, every 15 minutes of 2014, in kW. One table: `ts`, `meter`, `kw` (the average power
+# over the 15-minute interval). Every row is stamped in 2014, and no task depends on whether a
+# timestamp starts or ends its interval, which the source does not say.
+#
+# `sql` is the ground truth, evaluated once against the same data every arm sees, at the start of
+# each run. That is what "correct" means here — not that a model agreed with another model. A
+# number is right within its task's `tolerance` and no further; a name or date must be the one.
+#
+# Correctness is **recorded as a secondary signal and never claimed**. The primary measurement is
+# steps. Thirteen tasks cannot support a claim about accuracy.
+#
+# `trap` says what a plausible wrong answer looks like. None of the traps is planted: the data is
+# as the utility recorded it.
+#
+# `named_by_describe` marks the tasks whose answer benchy's `describe` states outright since the
+# time-series shape it reports (dead, late-starting and stopped series, the clock changes). On
+# those the bench arm is reading an answer, not computing one, and the shell arm has no single
+# command that says the same (`SUMMARIZE` gives per-column min, max and null share, not per-series
+# runs of zero), so the report shows them apart from the rest. The last two tasks were added with
+# that in mind: computations `describe` does not answer.
+
+[[task]]
+id = "total_mwh"
+question = """
+How much energy did all the meters together draw over every reading in the table — the year
+2014 — in MWh? Give one number."""
+sql = "SELECT round(sum(kw) / 4 / 1000, 3) FROM readings"
+type = "number"
+# Covers any rounding of the answer, and not leaving out the year's first or last interval of the
+# fleet (0.50 and 0.55 MWh).
+tolerance = 0.3
+trap = "kw is the average power over 15 minutes: energy is kw / 4 in kWh. A plain sum is 4x too large."
+
+[[task]]
+id = "top_meter"
+question = """
+Which meter drew the most energy in 2014? Give its name."""
+sql = "SELECT meter FROM readings GROUP BY meter ORDER BY sum(kw) DESC LIMIT 1"
+type = "string"
+trap = "none — a plumbing check."
+
+[[task]]
+id = "dead_meter"
+question = """
+One meter drew no power at all in 2014. Which one?"""
+sql = "SELECT meter FROM readings GROUP BY meter HAVING max(kw) = 0"
+type = "string"
+named_by_describe = true
+trap = "It has a row for every interval, all zero: missing data here is zeros, not missing rows."
+
+[[task]]
+id = "last_to_start"
+question = """
+Several meters read zero at the start of 2014. Whose first reading above zero comes latest in the
+year? Give the meter's name."""
+sql = """
+SELECT meter FROM readings WHERE kw > 0
+GROUP BY meter ORDER BY min(ts) DESC LIMIT 1"""
+type = "string"
+named_by_describe = true
+trap = "The latest is a meter back from a pause, not a new one; the meter that never reads has no first reading at all."
+
+[[task]]
+id = "stopped_date"
+question = """
+One meter stops drawing power before the year is out and never resumes. On what date does it
+draw power for the last time? Give the date as YYYY-MM-DD."""
+sql = """
+SELECT strftime(max(ts), '%Y-%m-%d') FROM readings WHERE kw > 0
+GROUP BY meter ORDER BY max(ts) LIMIT 1"""
+type = "string"
+named_by_describe = true
+trap = "Earlier runs of zeros — 58 days from New Year, 57 in the autumn, 12 in December — all end; only the last, 13 days, never does."
+
+[[task]]
+id = "clock_forward"
+question = """
+On one day in 2014 every meter reads exactly zero for an hour. Which day? Give the date as
+YYYY-MM-DD."""
+sql = """
+SELECT strftime(ts, '%Y-%m-%d') FROM readings
+GROUP BY ts HAVING sum(kw) = 0 ORDER BY ts LIMIT 1"""
+type = "string"
+named_by_describe = true
+trap = "The hour the clocks went forward: an artefact of recording, not an outage."
+
+[[task]]
+id = "clock_back"
+question = """
+On one night in 2014 the whole fleet's load jumps to nearly twice its level of 15 minutes before,
+stays there for an hour, then falls back. On which date? Give it as YYYY-MM-DD."""
+sql = """
+SELECT strftime(ts, '%Y-%m-%d') FROM (
+  SELECT ts, sum(kw) AS s, lag(sum(kw)) OVER (ORDER BY ts) AS p FROM readings GROUP BY ts
+) WHERE p > 0 ORDER BY s / p DESC LIMIT 1"""
+type = "string"
+named_by_describe = true
+trap = "The hour the clocks went back holds two hours' consumption. It is not a peak in demand."
+
+[[task]]
+id = "peak_time"
+question = """
+At what moment in 2014 did the fleet as a whole draw the most power? Give the timestamp of that
+reading as YYYY-MM-DD HH:MM."""
+sql = """
+SELECT strftime(ts, '%Y-%m-%d %H:%M') FROM readings
+GROUP BY ts ORDER BY sum(kw) DESC LIMIT 1"""
+type = "string"
+trap = "The fleet's load is the sum across meters per interval, not the largest single reading."
+
+[[task]]
+id = "busiest_month"
+question = """
+In which month of 2014 did the fleet draw the most energy? Give the month's number, 1 to 12."""
+sql = "SELECT month(ts) FROM readings GROUP BY month(ts) ORDER BY sum(kw) DESC LIMIT 1"
+type = "number"
+tolerance = 0
+trap = "none, beyond the units."
+
+[[task]]
+id = "weekday_ratio"
+question = """
+For meter MT_002, what is its average load on weekdays divided by its average load at weekends?
+Give the ratio to four decimal places."""
+sql = """
+SELECT round(avg(kw) FILTER (WHERE isodow(ts) < 6)
+           / avg(kw) FILTER (WHERE isodow(ts) >= 6), 4)
+FROM readings WHERE meter = 'MT_002'"""
+type = "number"
+# 0.9873, to four places: close enough for either reading of a timestamp (0.98724), and not for
+# a wrong weekend — Monday alone gives 0.9920, Saturday alone 0.9897.
+tolerance = 0.0005
+trap = "Near 1: this meter barely notices the weekend, so an inverted ratio is close but wrong."
+
+[[task]]
+id = "steadiest"
+question = """
+Which meter has the steadiest load over 2014 — the highest ratio of its average load to its peak
+load? Give its name."""
+sql = """
+SELECT meter FROM readings GROUP BY meter HAVING max(kw) > 0
+ORDER BY avg(kw) / max(kw) DESC LIMIT 1"""
+type = "string"
+trap = "The top two are within 1% of each other, and the meter that never reads divides zero by zero."
+
+[[task]]
+id = "top_day"
+question = """
+On which day of 2014 did the fleet as a whole draw the most energy? Give the date as
+YYYY-MM-DD."""
+sql = """
+SELECT strftime(ts, '%Y-%m-%d') FROM readings
+GROUP BY strftime(ts, '%Y-%m-%d') ORDER BY sum(kw) DESC LIMIT 1"""
+type = "string"
+trap = "The top day leads the next, 2014-12-30, by under 1%; the day of the single peak reading, 2014-02-04, is third. The answer is the same whether a timestamp starts or ends its interval."
+
+[[task]]
+id = "median_load"
+question = """
+Take the fleet's total load at each 15-minute interval — the sum over all meters. What is the
+median of that total over 2014, in kW? Give one number."""
+sql = """
+SELECT round(median(s), 3) FROM (SELECT ts, sum(kw) AS s FROM readings GROUP BY ts)"""
+type = "number"
+# Covers either middle value of the 35,040 intervals (1813.715 and 1813.743, against the mean of
+# the two, 1813.729), and leaving out the hour the clocks went forward (1813.782).
+tolerance = 0.1
+trap = "The mean (1792.2) is not the median, and neither is the median of single readings (44.7)."

@@ -1,0 +1,32 @@
+[package]
+name = "spike"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+duckdb = { version = "1.10505", features = ["appender-arrow"] }
+landlock = "0.4"
+# probe7 only: the decoders an HTTP source could use (docs/HTTP-SOURCE.md).
+arrow = { version = "58.4", default-features = false, features = ["ipc"] }
+arrow-json = "58.4"
+serde_json = "1"
+simd-json = "0.17"
+
+[[bin]]
+name = "probe1_stmt_types"
+path = "src/probe1_stmt_types.rs"
+[[bin]]
+name = "probe2_interrupt"
+path = "src/probe2_interrupt.rs"
+[[bin]]
+name = "probe3_arrow_stream"
+path = "src/probe3_arrow_stream.rs"
+[[bin]]
+name = "probe4_escape_corpus"
+path = "src/probe4_escape_corpus.rs"
+[[bin]]
+name = "probe6_landlock"
+path = "src/probe6_landlock.rs"
+[[bin]]
+name = "probe7_http_decode"
+path = "src/probe7_http_decode.rs"

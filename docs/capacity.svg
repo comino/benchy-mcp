@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 286" width="880" height="286" role="img" aria-label="A large dataset stays on the bench; the agent sends SQL across and receives a small bounded answer, so the rows never enter the conversation.">
+  <style>
+    .t { fill:#24292f; } .m { fill:#6e7781; }
+    .slab { fill:#8b949e; }
+    .box { stroke:#d0d7de; fill:#ffffff; }
+    .pen { stroke:#d0d7de; }
+    @media (prefers-color-scheme: dark) {
+      .t { fill:#e6edf3; } .m { fill:#8b949e; }
+      .slab { fill:#6e7781; }
+      .box { stroke:#30363d; fill:#12171d; }
+      .pen { stroke:#30363d; }
+    }
+    text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+
+    .ask { animation: ask 6s ease-in-out infinite; }
+    @keyframes ask { 0%,100%{ opacity:.45 } 18%,30%{ opacity:1 } }
+    .ret { animation: ret 6s ease-in-out infinite; }
+    @keyframes ret { 0%,100%{ opacity:.45 } 56%,72%{ opacity:1 } }
+    .got { animation: got 6s ease-in-out infinite; }
+    @keyframes got { 0%,48%{ fill-opacity:.35 } 62%,100%{ fill-opacity:.9 } }
+  </style>
+
+  <text class="t" x="20" y="26" font-size="15" font-weight="600">The data does not fit in the conversation. That is the whole reason for a bench.</text>
+
+  <!-- the bench side -->
+  <text class="m" x="50" y="60" font-size="11.5" font-weight="600">ON THE BENCH</text>
+  <g>
+    <rect class="slab" x="50" y="76"  width="300" height="14" rx="3" fill-opacity=".8"/>
+    <rect class="slab" x="50" y="96"  width="300" height="14" rx="3" fill-opacity=".8"/>
+    <rect class="slab" x="50" y="116" width="300" height="14" rx="3" fill-opacity=".8"/>
+    <rect class="slab" x="50" y="136" width="300" height="14" rx="3" fill-opacity=".8"/>
+    <rect class="slab" x="50" y="156" width="300" height="14" rx="3" fill-opacity=".8"/>
+    <rect class="slab" x="50" y="176" width="300" height="14" rx="3" fill-opacity=".8"/>
+  </g>
+  <rect class="slab" x="38" y="198" width="324" height="10" rx="2.5"/>
+  <text class="t mono" x="200" y="230" text-anchor="middle" font-size="13" font-weight="600">2,400,000 rows &#183; 180 MB</text>
+  <text class="m" x="200" y="250" text-anchor="middle" font-size="11.5">queried in place, never serialised to the model</text>
+
+  <!-- divider -->
+  <line class="pen" x1="470" y1="56" x2="470" y2="254" stroke-width="1.5" stroke-dasharray="6 5"/>
+
+  <!-- traffic -->
+  <g class="ask">
+    <path d="M462 104 H352 m8 -5 l-8 5 l8 5" fill="none" stroke="#4c8dff" stroke-width="1.6"/>
+    <text class="mono" x="408" y="94" text-anchor="middle" font-size="10.5" fill="#4c8dff">SELECT &#8230;</text>
+  </g>
+  <g class="ret">
+    <path d="M352 152 H462 m-8 -5 l8 5 l-8 5" fill="none" stroke="#10b981" stroke-width="1.6"/>
+    <text class="mono" x="408" y="142" text-anchor="middle" font-size="10.5" fill="#10b981">200 rows</text>
+  </g>
+
+  <!-- the conversation side -->
+  <text class="m" x="500" y="60" font-size="11.5" font-weight="600">IN THE CONVERSATION</text>
+  <rect class="box" x="500" y="76" width="340" height="132" rx="10" stroke-width="1.5"/>
+  <text class="m mono" x="520" y="100" font-size="10.5">the question</text>
+  <rect class="slab" x="520" y="110" width="150" height="9" rx="2.5" fill-opacity=".5"/>
+  <text class="m mono" x="520" y="146" font-size="10.5">the answer</text>
+  <rect class="got" x="520" y="156" width="150" height="9" rx="2.5" fill="#10b981"/>
+  <rect class="got" x="520" y="170" width="104" height="9" rx="2.5" fill="#10b981"/>
+  <text class="t mono" x="670" y="230" text-anchor="middle" font-size="13" font-weight="600">a few KB</text>
+  <text class="m" x="670" y="250" text-anchor="middle" font-size="11.5">bounded, typed, and traceable to the query that made it</text>
+</svg>

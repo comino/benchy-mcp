@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 314" width="880" height="314" role="img" aria-label="Three layered isolation walls: no utterable name, SQL cannot reach the filesystem or the network, and on Linux no filesystem to reach. The locked engine and the sealed process each stop cross-session access on their own.">
+  <style>
+    .t { fill:#24292f; } .m { fill:#6e7781; }
+    .card { stroke:#d0d7de; fill:#ffffff; }
+    .wall { stroke:#9aa4af; }
+    @media (prefers-color-scheme: dark) {
+      .t { fill:#e6edf3; } .m { fill:#8b949e; }
+      .card { stroke:#30363d; fill:#12171d; }
+      .wall { stroke:#6e7781; }
+    }
+    text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+
+    .hit { animation: hit 6s cubic-bezier(.3,0,.2,1) infinite; opacity:0 }
+    .h1{animation-delay:0s} .h2{animation-delay:1.1s} .h3{animation-delay:2.2s}
+    @keyframes hit {
+      0%   { transform:translateX(0);    opacity:0 }
+      4%   { transform:translateX(0);    opacity:1 }
+      13%  { transform:translateX(50px); opacity:1 }
+      17%  { transform:translateX(34px); opacity:1 }
+      21%  { transform:translateX(42px); opacity:.65 }
+      27%  { transform:translateX(0);    opacity:0 }
+      100% { transform:translateX(0);    opacity:0 }
+    }
+    .flash { animation: flash 6s ease-out infinite; opacity:0 }
+    .f1{animation-delay:0s} .f2{animation-delay:1.1s} .f3{animation-delay:2.2s}
+    @keyframes flash { 0%,11%{opacity:0} 15%{opacity:1} 25%{opacity:0} 100%{opacity:0} }
+  </style>
+
+  <text class="t" x="20" y="24" font-size="15" font-weight="600">Three walls. The locked engine and, on Linux, the sealed process each stop cross-session access alone.</text>
+
+  <!-- L1 -->
+  <rect class="card" x="22" y="42" width="836" height="62" rx="9" stroke-width="1.5"/>
+  <rect x="22" y="42" width="5" height="62" rx="2.5" fill="#4c8dff"/>
+  <text class="t" x="46" y="66" font-size="13" font-weight="600">1 &#183; No utterable name</text>
+  <text class="m" x="46" y="87" font-size="11.5">No tool argument names a workspace, a path or a session. The connection <tspan font-style="italic">is</tspan> the handle.</text>
+  <line class="wall" x1="700" y1="52" x2="700" y2="94" stroke-width="3.5" stroke-linecap="round"/>
+  <g class="hit h1"><circle cx="636" cy="73" r="7" fill="#f43f5e"/></g>
+  <text class="flash f1 mono" x="716" y="78" font-size="11" fill="#4c8dff">nothing to ask for</text>
+
+  <!-- L2 -->
+  <rect class="card" x="22" y="112" width="836" height="62" rx="9" stroke-width="1.5"/>
+  <rect x="22" y="112" width="5" height="62" rx="2.5" fill="#a855f7"/>
+  <text class="t" x="46" y="136" font-size="13" font-weight="600">2 &#183; SQL cannot reach the filesystem or the network</text>
+  <text class="m" x="46" y="157" font-size="11.5">ATTACH, read_parquet, COPY, INSTALL &#8212; refused by the locked engine; the allowlist keeps it locked.</text>
+  <line class="wall" x1="700" y1="122" x2="700" y2="164" stroke-width="3.5" stroke-linecap="round"/>
+  <g class="hit h2"><circle cx="636" cy="143" r="7" fill="#f43f5e"/></g>
+  <text class="flash f2 mono" x="716" y="148" font-size="11" fill="#a855f7">refused</text>
+
+  <!-- L3 -->
+  <rect class="card" x="22" y="182" width="836" height="62" rx="9" stroke-width="1.5"/>
+  <rect x="22" y="182" width="5" height="62" rx="2.5" fill="#10b981"/>
+  <text class="t" x="46" y="206" font-size="13" font-weight="600">3 &#183; There is no filesystem to reach</text>
+  <text class="m" x="46" y="227" font-size="11.5">On Linux, once loading is done, Landlock confines the engine to its own workspace directory.</text>
+  <line class="wall" x1="700" y1="192" x2="700" y2="234" stroke-width="3.5" stroke-linecap="round"/>
+  <g class="hit h3"><circle cx="636" cy="213" r="7" fill="#f43f5e"/></g>
+  <text class="flash f3 mono" x="716" y="218" font-size="11" fill="#10b981">nothing there</text>
+
+  <text class="m" x="22" y="270" font-size="12">Underneath them one invariant, structural and never a setting: <tspan class="t mono" font-size="11.5">one session = one process = one workspace</tspan>.</text>
+  <text class="m" x="22" y="292" font-size="12">Access is a capability you hold, never a name you can say &#8212; so there is no check to get wrong, and no identifier to leak into a log.</text>
+</svg>

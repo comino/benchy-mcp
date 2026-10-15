@@ -1,0 +1,396 @@
+# The escape corpus — REQ-2 `nothing_in_the_corpus_reaches_outside_the_workspace`,
+# `the_recorded_division_of_labour_still_holds` and `the_corpus_records_why_the_engine_is_the_boundary`
+# all read it, from tests/escape.rs. One corpus: a second copy would drift.
+#
+# `{canary}` is substituted with a path outside the workspace holding a known marker. A case
+# PASSES when that marker never reaches a result through the full stack.
+#
+# `allowlist` and `engine` record what each mechanism did **when measured in isolation** on
+# DuckDB 1.5.5. They are not the requirement — the requirement is that nothing leaks — but
+# recording them turns a DuckDB upgrade that changes a verdict into a failing test rather than a
+# silent change of posture.
+#
+#   kind      = "SELECT" | "SET" | …   the statement type the classifier reads under lockdown;
+#                                      "UNBOUND" when the locked engine cannot bind it yet
+#   allowlist = "refuse" | "pass"      what REQ-2 layer 1 does alone
+#   engine    = "error"  | "ok"        what REQ-2 layer 2 does alone
+#   alone     = "leaks"                layer 1 alone let the canary through (measured: 5 cases)
+#   locked    = "unprepared"           in the PRODUCT configuration this statement cannot be
+#                                      prepared at all, so the engine refuses it BEFORE the
+#                                      allowlist ever sees a type. Four cases. Not a weakening:
+#                                      it is the engine acting earlier than layer 1 can.
+
+[[case]]
+sql = "ATTACH '{canary}' AS evil"
+category = "attach"
+kind = "ATTACH"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "ATTACH DATABASE '{canary}' AS evil"
+category = "attach"
+kind = "ATTACH"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "ATTACH ':memory:' AS scratch"
+category = "attach"
+kind = "ATTACH"
+allowlist = "refuse"
+engine = "ok"          # the engine permits this; only the allowlist stops it
+
+[[case]]
+sql = "ATTACH '{canary}' AS e (TYPE sqlite)"
+category = "attach"
+kind = "ATTACH"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_csv('{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_csv_auto('{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_text('{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+alone = "leaks"
+
+[[case]]
+sql = "SELECT * FROM read_blob('{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+alone = "leaks"
+
+[[case]]
+sql = "SELECT * FROM read_parquet('{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_json_auto('{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM '{canary}'"
+category = "replacement scan"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM sniff_csv('{canary}')"
+category = "file read"
+kind = "SELECT"
+allowlist = "pass"
+engine = "error"
+alone = "leaks"
+
+[[case]]
+sql = "SELECT * FROM glob('/tmp/*')"
+category = "glob"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "COPY loaded TO '/tmp/benchy-exfil.csv'"
+category = "copy out"
+kind = "UNBOUND"
+allowlist = "refuse"
+engine = "error"
+locked = "unprepared"
+
+[[case]]
+sql = "COPY loaded FROM '{canary}'"
+category = "copy in"
+kind = "UNBOUND"
+allowlist = "refuse"
+engine = "error"
+locked = "unprepared"
+
+[[case]]
+sql = "EXPORT DATABASE '/tmp/benchy-dump'"
+category = "export"
+kind = "UNBOUND"
+allowlist = "refuse"
+engine = "error"
+locked = "unprepared"
+
+[[case]]
+sql = "INSTALL httpfs"
+category = "extension"
+kind = "LOAD"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "LOAD httpfs"
+category = "extension"
+kind = "LOAD"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "INSTALL sqlite"
+category = "extension"
+kind = "LOAD"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "SET enable_external_access = true"
+category = "unlock"
+kind = "SET"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "SET home_directory = '/home'"
+category = "unlock"
+kind = "SET"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "SET extension_directory = '/tmp'"
+category = "unlock"
+kind = "SET"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "RESET enable_external_access"
+category = "unlock"
+kind = "SET"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "PRAGMA database_list"
+category = "path disclosure"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"          # neither mechanism stops this; the path must be uninteresting instead
+
+[[case]]
+sql = "SELECT * FROM duckdb_databases()"
+category = "path disclosure"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+
+[[case]]
+sql = "SELECT * FROM duckdb_settings() WHERE name LIKE '%directory%'"
+category = "path disclosure"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+
+[[case]]
+sql = "SELECT current_setting('home_directory')"
+category = "path disclosure"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+
+[[case]]
+sql = "SELECT * FROM duckdb_extensions()"
+category = "recon"
+kind = "SELECT"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT getenv('HOME')"
+category = "env read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_csv('file://{canary}')"
+category = "file read"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_csv('https://example.invalid/x.csv')"
+category = "network"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM read_parquet('s3://bucket/x.parquet')"
+category = "network"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "CALL pragma_version()"
+category = "call"
+kind = "CALL"
+allowlist = "refuse"
+engine = "ok"
+
+[[case]]
+sql = "BEGIN TRANSACTION"
+category = "transaction"
+kind = "TRANSACTION"
+allowlist = "refuse"
+engine = "ok"
+
+[[case]]
+sql = "SELECT 1; ATTACH '{canary}' AS e"
+category = "multi-statement"
+kind = "ATTACH"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "CREATE TABLE x AS SELECT * FROM read_csv('{canary}')"
+category = "ctas wrapping a reader"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM (SELECT * FROM read_text('{canary}'))"
+category = "nested reader"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+alone = "leaks"
+
+[[case]]
+sql = "WITH c AS (SELECT * FROM read_text('{canary}')) SELECT * FROM c"
+category = "cte wrapping a reader"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+alone = "leaks"
+
+[[case]]
+sql = "PREPARE p AS SELECT * FROM read_text('{canary}')"
+category = "prepare"
+kind = "UNBOUND"
+allowlist = "refuse"
+engine = "error"
+locked = "unprepared"
+
+# EXPLAIN ANALYZE runs the statement it explains, and DuckDB types the whole as EXPLAIN. The lock
+# lets these two run — neither reaches outside — so the allowlist is what refuses them.
+[[case]]
+sql = "EXPLAIN ANALYZE SET VARIABLE v = 7"
+category = "wrapper"
+kind = "EXPLAIN"
+allowlist = "refuse"
+engine = "ok"
+
+[[case]]
+sql = "EXPLAIN ANALYZE CALL pragma_version()"
+category = "wrapper"
+kind = "EXPLAIN"
+allowlist = "refuse"
+engine = "ok"
+
+# Shadowing (REQ-9 `an_agent_object_cannot_shadow_a_host_object_or_builtin`). Neither layer stops
+# these: each is an ordinary CREATE that the locked engine runs, and none reaches outside the
+# workspace. DuckDB resolves the agent's temporary catalog before any search path and its own
+# schema before the host's catalogs, so each would stand in for what it is named after, for the
+# agent and, for a catalog function in the agent's own schema, for benchy's host-facing reads too
+# (`benchys_catalog_reads_cannot_be_shadowed`). The check after every CREATE and ALTER refuses
+# and undoes them:
+#
+#   shadow    = "refused"              `the_corpus_shadows_are_refused_and_undone` asserts it
+#                                      on a bench holding a table named `loaded`
+
+[[case]]
+sql = "CREATE TEMP MACRO lower(x) AS 'pwn'"
+category = "shadow a built-in"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+shadow = "refused"
+
+[[case]]
+sql = "CREATE TEMP MACRO read_text(f) AS TABLE SELECT 'not the file' AS content"
+category = "shadow a built-in table function"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+shadow = "refused"
+
+[[case]]
+sql = "CREATE TEMP MACRO duckdb_types() AS TABLE SELECT 'temp' AS database_name, '__pivot_enum_x' AS type_name"
+category = "shadow a catalog function"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+shadow = "refused"
+
+[[case]]
+sql = "CREATE MACRO duckdb_columns() AS TABLE SELECT 'forged' AS column_name"
+category = "shadow a catalog function"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+shadow = "refused"
+
+[[case]]
+sql = "CREATE TEMP TABLE loaded AS SELECT 1 AS x"
+category = "shadow a host table"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+shadow = "refused"
+
+[[case]]
+sql = "CREATE TEMP VIEW \"LOADED\" AS SELECT 1 AS x"
+category = "shadow a host table"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+shadow = "refused"
+
+# A type the agent names like DuckDB's dynamic-PIVOT enums is taken for one: its own CREATE
+# answers nothing, and later statements are numbered as if DuckDB had added it. That is all it
+# buys: every statement is still classified before it runs
+# (`a_spoofed_pivot_type_gets_nothing_past_the_guard`).
+[[case]]
+sql = "CREATE TEMP TYPE \"__pivot_enum_x\" AS ENUM ('a'); SET enable_external_access = true"
+category = "spoofed pivot type"
+kind = "SET"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "CREATE TEMP TYPE \"__pivot_enum_y\" AS ENUM ('a'); SELECT * FROM read_text('{canary}')"
+category = "spoofed pivot type"
+kind = "CREATE+UNBOUND"
+allowlist = "pass"
+engine = "error"
