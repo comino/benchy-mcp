@@ -22,6 +22,8 @@ cat "$work/doctor.json"
 # A read-only bind mount also proves that the image does not need to write into the data folder.
 export BENCHY_SMOKE_IMAGE="$image" BENCHY_SMOKE_DATA="$repo/examples/data"
 export BENCHY_SMOKE_ARROW="$repo/examples/connectors/hello.arrows"
+# verify.py also starts the connector example using its absolute path in this checkout.
+export BENCHY_SMOKE_EXAMPLES="$repo/examples"
 cat > "$work/benchy" <<'SH'
 #!/usr/bin/env bash
 exec docker run --rm --init -i --read-only --cap-drop=ALL \
@@ -30,6 +32,7 @@ exec docker run --rm --init -i --read-only --cap-drop=ALL \
   --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
   --mount "type=bind,src=$BENCHY_SMOKE_DATA,dst=/data,readonly" \
   --mount "type=bind,src=$BENCHY_SMOKE_ARROW,dst=/hello.arrows,readonly" \
+  --mount "type=bind,src=$BENCHY_SMOKE_EXAMPLES,dst=$BENCHY_SMOKE_EXAMPLES,readonly" \
   "$BENCHY_SMOKE_IMAGE" "$@"
 SH
 chmod +x "$work/benchy"
