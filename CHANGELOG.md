@@ -23,6 +23,8 @@ not ready for production. Expect frequent breaking changes; pin the version you 
   tests, and real MCP/host checks inside the containers. Container checks keep Docker's default
   seccomp profile and exercise Landlock with a read-only root filesystem.
 - Fix a parallel test fixture race found by macOS CI. Update rustls to 0.23.46.
+- Handle a stream write's callback error in the Node.js host example, before its asynchronous
+  `error` event arrives.
 
 Known limits: no OS sandbox on native macOS; no Windows binary; connectors run with their
 process's rights; no independent security audit. Engine and loader ceilings do not cap the

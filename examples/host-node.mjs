@@ -117,7 +117,10 @@ check(
 );
 r = await call("attach", { name: "rooms", stream: "channel" });
 check("and no later attach takes its stream", r.ok === false && r.error.code === "E_CHANNEL", r);
-await new Promise((resolve) => channel.write(stream, resolve));
+// Node can call the write callback before emitting 'error'. Keep that error as well, so the
+// host does not mistake the event's scheduling (notably on macOS) for an accepted write.
+const writeError = await new Promise((resolve) => channel.write(stream, resolve));
+channelError ??= writeError;
 check(
   "writing into the closed channel fails, and the host stays up",
   ["ECONNRESET", "EPIPE"].includes(channelError?.code),
