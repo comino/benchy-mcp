@@ -21,7 +21,7 @@ guard is decoration.
 | [`scripts/check_requirements.py`](scripts/check_requirements.py) | fails if REQUIREMENTS.md names a test that does not exist, or plans one that already does |
 | [`scripts/ci.sh`](scripts/ci.sh) | everything CI would run, run here: the one verification a change gets. See [Before you push](#before-you-push) |
 | [`bench/`](bench/) | the ingest benchmark: the same table loaded every way, with instructions, CPU time and peak memory per process and per stage. [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the method, the baseline and the backlog |
-| [`packaging/`](packaging/), [`install.sh`](install.sh) | bundles: how one is packed, the smoke test it must pass on a machine that built nothing, and the installer. Not in use: there is no release. See [Releasing](#releasing) |
+| [`packaging/`](packaging/), [`install.sh`](install.sh), [`Dockerfile`](Dockerfile) | native bundles, container images, their smoke tests and the installer. See [Releasing](#releasing) |
 | [`spike/`](spike/) | throwaway probes that answered requirement-blocking questions. Not product code |
 | [`eval/`](eval/) | measures what the bench costs an agent against the same agent with a jailed shell and the DuckDB CLI, on public data. The run needs an API key; its scorer and jail checks, `eval/test_eval.py`, run in `scripts/ci.sh` |
 
@@ -67,9 +67,8 @@ cargo test --release some_test_name         # every test whose name contains thi
 
 ## Before you push
 
-**Verification is local.** GitHub Actions is not relied on: its workflows stay in
-`.github/workflows/` as a record of what a clean machine runs, but a change is checked by running
-the same steps here, with one script:
+Run verification locally before pushing. GitHub Actions repeats the checks on clean Linux and
+macOS runners, and a release must pass them before publication. The local entry point is:
 
 ```sh
 scripts/ci.sh                                          # exits non-zero on the first failure
@@ -108,9 +107,8 @@ easy bug to ship.
 
 ## Releasing
 
-No packaged release has been published yet; building from source is the way to try the prototype.
-What follows describes the machinery for publishing one. A prototype release still carries no
-stability or backward-compatibility guarantee.
+A prototype release carries no stability or backward-compatibility guarantee. Keep the notices
+in the README, changelog and bundle documentation when preparing a new version.
 
 A release is a tag. Set the version in `Cargo.toml`, give it a section in `CHANGELOG.md` headed
 `## [<version>]` (the release notes are that section alone, so move what is under Unreleased
@@ -123,6 +121,19 @@ a runner that built nothing and runs `doctor`, `verify.py`, `host.py` and `insta
 same build and smoke test without publishing; `gh run download` fetches the bundles, and
 `BENCHY_DOWNLOAD_BASE=<dir> sh install.sh` installs one from a local directory. To pack one on
 your own machine, build with `BENCHY_BUNDLE=1` and run `packaging/package.sh` as its header says.
+
+The release also packages the tested Linux bundles into native amd64 and arm64 Docker images,
+using `Dockerfile`'s `release` target with each unpacked bundle as the build context. The default
+Dockerfile target builds from source instead, and is checked separately. Both paths run
+`packaging/container-smoke.sh`: a real MCP handshake, host-protocol requests and `doctor --probe`
+with the default Docker seccomp profile, a non-root user, read-only root filesystem and resource
+limits. Dry runs keep the tested images as workflow artifacts. A tag publishes them to
+`ghcr.io/comino/benchy-mcp`, creates the version, minor-version and `latest` multi-platform tags,
+and attests the manifest. Only the final release job has registry credentials.
+
+After the first registry publication, verify that the package is public and can be pulled without
+logging in; GitHub package visibility is separate from repository visibility. A package owner can
+change it in the package's settings. Later releases reuse the same package.
 
 ## Workflows and actions
 
@@ -140,9 +151,8 @@ Pick a release at least two weeks old, and read what changed. `dtolnay/rust-tool
 release tags, so it is pinned to a commit of its `stable` branch and given `toolchain: stable`.
 
 Only the release job may sign: it alone has `id-token: write` and `attestations: write`, and it
-runs in the `release` environment. The repository's owner should give that environment required
-reviewers (Settings → Environments → `release`), so a pushed tag waits for a person before
-anything is published.
+runs in the `release` environment after the tests pass. An owner can configure required reviewers
+there if manual approval is desired; otherwise a passing tag publishes automatically.
 
 ## Mutation testing
 

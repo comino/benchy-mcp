@@ -14,8 +14,8 @@ mod common;
 use benchy_mcp::{result::Cell, source, Caps, Workspace};
 
 fn bench() -> Workspace {
-    let d = std::env::temp_dir().join(format!("benchy-render-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&d);
+    let d = common::unique("render");
+    std::fs::create_dir(&d).expect("create this test's input directory");
     std::fs::write(
         d.join("t.csv"),
         "observed_at,meter,power_kw\n\

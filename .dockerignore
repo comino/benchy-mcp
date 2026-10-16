@@ -1,0 +1,23 @@
+# Only build inputs enter the context. In particular, no Git history, credentials or local notes.
+**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!.cargo/
+!.cargo/config.toml
+!src/
+!src/**
+!docs/
+!docs/DIALECT.md
+!packaging/
+!packaging/package.sh
+!packaging/third_party_licenses.py
+!packaging/README.md
+!examples/
+!examples/data/
+!examples/data/**
+!LICENSE
+!CHANGELOG.md
+**/*.local.md
+**/.env*
+**/.git

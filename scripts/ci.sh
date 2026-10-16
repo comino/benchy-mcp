@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Everything .github/workflows/ci.yml runs, on this machine. Verification is local: GitHub
-# Actions is not relied on. Exits non-zero on the first failure.
+# The local counterpart of .github/workflows/ci.yml. Exits non-zero on the first failure.
 #
 #   scripts/ci.sh
 #   BENCHY_CLICKHOUSE_BIN=/path/to/clickhouse scripts/ci.sh   # and the ClickHouse tests

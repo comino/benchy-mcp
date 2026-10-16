@@ -19,10 +19,10 @@ however many rows sit underneath.
 > **Work in progress prototype — expect frequent breaking changes.** Benchy is under heavy
 > development and is not ready for production. CLI options, configuration, MCP tools, host and
 > connector protocols, and result formats may change or disappear without backward compatibility.
-> Pin a commit when experimenting, and expect to update your integrations as development continues.
+> Pin a version or commit when experimenting, and expect to update your integrations as development continues.
 >
-> The source is available under the [MIT license](LICENSE). No packaged release has been published
-> yet: [build from source](#build-from-source). Benchy has not been independently security-audited,
+> Available under the [MIT license](LICENSE), as [native bundles](#bundles), a [Docker image](#docker),
+> or [source](#build-from-source). Benchy has not been independently security-audited,
 > and on macOS it runs without an OS sandbox (see [Limits](#limits)).
 
 **Contents:** [One call to understand the data](#one-call-to-understand-the-data) ·
@@ -69,9 +69,9 @@ has the rules and the measurements.
 ## Quickstart
 
 ```sh
-git clone https://github.com/comino/benchy-mcp && cd benchy-mcp
-cargo build --release
-claude mcp add benchy -- "$PWD/target/release/benchy-mcp" "$PWD/examples/data"
+curl -fsSL https://github.com/comino/benchy-mcp/releases/download/v0.1.0/install.sh -o install-benchy.sh
+BENCHY_VERSION=0.1.0 sh install-benchy.sh
+claude mcp add benchy -- "$HOME/.local/bin/benchy-mcp" "$HOME/.local/lib/benchy-mcp/0.1.0/example-data"
 ```
 
 That registers benchy with Claude Code, serving the small example folder (on macOS, add
@@ -331,11 +331,74 @@ python3 examples/verify.py ./target/release/benchy-mcp ./examples/data
 
 ### Bundles
 
-`release.yml`, `install.sh` and `packaging/` can pack a build with DuckDB's library beside it, so
-it can move off the machine that built it: [`packaging/package.sh`](packaging/package.sh)'s header
-says how to pack one, `install.sh`'s how to install it from a local directory, and
-[packaging/README.md](packaging/README.md) is the README a bundle carries. No packaged release
-has been published yet; for now, [build from source](#build-from-source).
+Download a bundle from [Releases](https://github.com/comino/benchy-mcp/releases/tag/v0.1.0),
+or use the installer in [Quickstart](#quickstart). Linux bundles need glibc 2.35 or newer
+(Ubuntu 22.04 or newer); Alpine's musl is not supported. macOS bundles are not notarized:
+a browser download may need approval in System Settings → Privacy & Security.
+
+Each bundle carries the binary, DuckDB's library, licenses and example data. Keep them together;
+the installer unpacks to `~/.local/lib/benchy-mcp/0.1.0/` and links `~/.local/bin/benchy-mcp`.
+It checks the download's SHA-256. You can also verify its GitHub build attestation:
+
+```sh
+gh attestation verify benchy-mcp-linux-x86_64.tar.gz --repo comino/benchy-mcp
+```
+
+[`packaging/package.sh`](packaging/package.sh) builds a bundle locally;
+[packaging/README.md](packaging/README.md) is the README inside it.
+
+### Docker
+
+`ghcr.io/comino/benchy-mcp:0.1.0` supports Linux amd64 and arm64, including Docker Desktop's
+Linux VM on macOS and Windows. It speaks MCP over stdio: use `-i`, without `-t` or a published
+port. The image runs as UID/GID `65532:65532`; mounted files must be readable by that user.
+
+For a folder of files, mount it read-only and give the session a memory limit and writable
+temporary space. This example also disables network access:
+
+```sh
+docker run --rm --init -i --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --network=none --memory=2g --memory-swap=2g --pids-limit=256 \
+  --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
+  --mount "type=bind,src=/absolute/path/to/data,dst=/data,readonly" \
+  ghcr.io/comino/benchy-mcp:0.1.0
+```
+
+Configure an MCP client with `docker` as its command and these `run` arguments. For example:
+
+```json
+{
+  "mcpServers": {
+    "benchy": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "--init", "-i", "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges", "--network=none",
+        "--memory=2g", "--memory-swap=2g", "--pids-limit=256",
+        "--tmpfs=/tmp:rw,nosuid,nodev,size=1g",
+        "--mount", "type=bind,src=/absolute/path/to/data,dst=/data,readonly",
+        "ghcr.io/comino/benchy-mcp:0.1.0"
+      ]
+    }
+  }
+}
+```
+
+On desktop clients, use the full path to `docker` if it is not on the app's PATH. Increase the
+memory and temporary-space limits for larger loads; tmpfs usage counts toward container memory.
+For ClickHouse or HTTP, omit `--network=none`, mount your configuration read-only, pass its
+credential variables with `--env NAME`, and append `--config /path/in/container/benchy.toml`
+after the image. Connector runtimes such as Python and Node are not included; build a derived
+image when a connector needs them. The host protocol can use mounted files over stdio; descriptor
+passing and inherited stream-channel descriptors cannot cross `docker run`.
+
+The container uses its host's Linux kernel and Docker's default seccomp profile. Check the actual
+runtime with `docker run --rm ghcr.io/comino/benchy-mcp:0.1.0 doctor --probe --json`.
+If Landlock is unavailable, serving refuses to start; `--allow-unsandboxed` is an explicit opt-out
+with the limitations described below. The image does not enable it automatically.
+
+To build the current checkout: `docker build -t benchy-mcp:local .`. Pin `0.1.0` or an image
+digest for integrations; `0.1` and `latest` move as new prototype releases are published.
 
 ### Use it with…
 
@@ -522,7 +585,9 @@ and `scripts/ci.sh` fails if one names a test that does not exist.
   the ceiling as `null` and `doctor` says it is not enforced), and starts a new one over the loaded data, without reading any source
   again. You lose that query and the tables you made, and you are told so. DuckDB's `--memory`
   bounds what DuckDB counts, and not planning, a very long string or a large ENUM type; the
-  ceiling bounds the process, so in a container one session cannot OOM the rest.
+  ceiling bounds the engine process. It does not cap the parent server's input buffers or
+  queued requests. Use an external limit for the whole session, such as Docker's `--memory`;
+  a prototype session can otherwise exhaust its host's memory.
 - **A load that grows past `--loader-memory-ceiling` fails** (default 1GB, on Linux). Each loader
   is read while it runs, with the connector it runs and anything that starts; past the ceiling it
   is killed and nothing of its table is attached, and the operator's log says so and what to do.

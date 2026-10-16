@@ -10,6 +10,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - .github/workflows/ci.yml
+      - Dockerfile
+      - .dockerignore
+      - Cargo.toml
+      - Cargo.lock
       - packaging/**
       - install.sh
       - build.rs
@@ -19,6 +24,9 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   build:
     strategy:
       fail-fast: false
@@ -47,6 +55,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: benchy-mcp-${{ matrix.platform }}
+          retention-days: 7
           path: |
             dist/benchy-mcp-${{ matrix.platform }}.tar.gz
             dist/benchy-mcp-${{ matrix.platform }}.tar.gz.sha256
@@ -76,12 +85,63 @@ jobs:
           path: ${{ runner.temp }}/dist
       - run: packaging/smoke.sh "$RUNNER_TEMP/dist" ${{ matrix.platform }}
 
-  # The only job that can publish, and the only one that may sign: `id-token` and `attestations`
-  # are granted here and nowhere else. The `release` environment is where the repository's owner
-  # adds required reviewers (Settings → Environments → release), so a pushed tag waits for a
-  # person before anything is published.
+  containers:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, platform: linux-x86_64, runner: ubuntu-24.04 }
+          - { arch: arm64, platform: linux-aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchy-mcp-${{ matrix.platform }}
+          path: dist
+      - name: Build an image from the release bundle
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          (cd dist && sha256sum -c "benchy-mcp-$PLATFORM.tar.gz.sha256")
+          mkdir bundle
+          tar -xzf "dist/benchy-mcp-$PLATFORM.tar.gz" --strip-components=1 -C bundle
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          docker buildx build --load --target release --file Dockerfile \
+            --label "org.opencontainers.image.version=$version" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --tag "benchy-mcp:linux-$ARCH" bundle
+      - name: Exercise the image with the default Docker seccomp profile
+        run: packaging/container-smoke.sh benchy-mcp:linux-${{ matrix.arch }}
+      - name: Keep the tested image for publication
+        run: |
+          mkdir images
+          docker save benchy-mcp:linux-${{ matrix.arch }} | gzip > images/benchy-mcp-${{ matrix.arch }}.image.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchy-container-${{ matrix.arch }}
+          retention-days: 7
+          path: images/*.image.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  # Also exercise the Dockerfile's default source build, which users run with `docker build .`.
+  container-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: docker buildx build --load --tag benchy-mcp:source .
+      - run: packaging/container-smoke.sh benchy-mcp:source
+
+  # Only this job can publish or sign. The release environment can optionally require reviewers.
   release:
-    needs: smoke
+    needs: [checks, smoke, containers, container-source]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: release
@@ -89,6 +149,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -98,6 +159,39 @@ jobs:
           path: dist
       - name: Put install.sh beside the bundles
         run: cp install.sh dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: benchy-container-*
+          merge-multiple: true
+          path: images
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested images and the multi-platform tags
+        id: image
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          for arch in amd64 arm64; do
+            docker load --input "images/benchy-mcp-$arch.image.tar.gz"
+            docker tag "benchy-mcp:linux-$arch" "$image:$version-$arch"
+            docker push "$image:$version-$arch"
+          done
+          docker buildx imagetools create \
+            --tag "$image:$version" --tag "$image:${version%.*}" --tag "$image:latest" \
+            "$image:$version-amd64" "$image:$version-arm64"
+          digest=$(docker buildx imagetools inspect "$image:$version" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
       # A signed statement, kept by GitHub, that each file was built by this workflow from this
       # commit: `gh attestation verify <file> --repo <owner>/benchy-mcp` checks it (README).
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2

@@ -5,8 +5,8 @@ mod common;
 use benchy_mcp::{source, Caps};
 
 fn fixture_dir() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("benchy-src-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&d);
+    let d = common::unique("src");
+    std::fs::create_dir(&d).expect("create this test's input directory");
     std::fs::write(
         d.join("meters.csv"),
         "observed_at,meter,power_kw\n2026-01-01T00:00:00Z,lab,2.0\n2026-01-01T00:15:00Z,lab,4.0\n\

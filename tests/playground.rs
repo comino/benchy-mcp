@@ -5,8 +5,9 @@ mod common;
 use benchy_mcp::{result::Cell, source, Bench, Caps, Workspace};
 
 fn bench() -> Workspace {
-    let d = std::env::temp_dir().join(format!("benchy-play-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&d);
+    // Tests run in parallel; each load owns the directory it later removes.
+    let d = common::unique("play");
+    std::fs::create_dir(&d).expect("create this test's input directory");
     std::fs::write(
         d.join("meters.csv"),
         "observed_at,meter,power_kw\n2026-01-01T00:00:00Z,lab,2.0\n2026-01-01T00:15:00Z,lab,4.0\n",

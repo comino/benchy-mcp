@@ -3,10 +3,36 @@
 What changed in benchy-mcp. The version is the one in `Cargo.toml`, which is what
 `benchy-mcp --version` reports. This is a work in progress prototype under heavy development:
 frequent breaking changes are expected, with no stable API or backward-compatibility guarantee.
-No packaged release has been published yet: 0.1.0 below is the baseline the work was scoped from,
-and Unreleased is everything merged since.
 
 ## Unreleased
+
+## [0.1.0] — 2026-10-16
+
+First public packaged release, under the MIT license. **This is an experimental prototype,
+not ready for production. Expect frequent breaking changes; pin the version you integrate with.**
+
+- Load files, ClickHouse, HTTP sources and Arrow connectors into a private DuckDB workspace.
+  Explore through the `describe`, `query`, `get_result` and `dialect` MCP tools, or the host protocol.
+- Native bundles for Linux x86_64/aarch64 and macOS Apple silicon/Intel include DuckDB,
+  example data and third-party licenses. The installer checks SHA-256; release assets carry
+  GitHub build attestations.
+- Docker images at `ghcr.io/comino/benchy-mcp:0.1.0` for Linux amd64/arm64 run as a non-root
+  user and speak MCP on stdio. Tags `0.1` and `latest` follow the newest release in their series.
+  The default Dockerfile also builds directly from source.
+- Release publication requires the Linux, ClickHouse and macOS tests, native bundle smoke
+  tests, and real MCP/host checks inside the containers. Container checks keep Docker's default
+  seccomp profile and exercise Landlock with a read-only root filesystem.
+- Fix a parallel test fixture race found by macOS CI. Update rustls to 0.23.46.
+
+Known limits: no OS sandbox on native macOS; no Windows binary; connectors run with their
+process's rights; no independent security audit. Engine and loader ceilings do not cap the
+parent server or queued requests: use an external whole-session memory limit, such as Docker's
+`--memory`. See the README's Docker examples and Limits before using the prototype.
+
+## Prototype development history
+
+The entries below record development before the first public release. Later release notes
+supersede earlier packaging decisions.
 
 ### Public prototype status
 
@@ -855,7 +881,7 @@ and Unreleased is everything merged since.
   apart. Transcripts also hide the checkout's path and the host name. The 2026-09-30 results are
   in `eval/results/archive/`.
 
-## [0.1.0] — baseline, not published
+## Initial development baseline
 
 - **The bench.** `benchy-mcp <dir>` loads every `.csv`, `.tsv`, `.parquet`, `.json`, `.ndjson`
   and `.jsonl` in a folder as a table, before the agent's first call, and serves MCP on stdio.
