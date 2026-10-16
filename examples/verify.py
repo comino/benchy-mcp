@@ -170,6 +170,7 @@ def main(binary, data):
     # is not asking much of a connector author.
     cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchy.toml")
     if os.path.exists(cfg):
+        before_connector = len(failures)
         e = subprocess.Popen([binary, *PLATFORM, "--config", cfg, "--deadline", "3"],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
@@ -205,6 +206,8 @@ def main(binary, data):
         check("...and join a file source, which is the point of one bench",
               not err and "lab" in body, body[:90])
         e.stdin.close(); e.wait(timeout=15)
+        if len(failures) != before_connector:
+            print("connector startup log:\n" + e.stderr.read(), file=sys.stderr)
 
     # The sandbox is a claim about the process, not about SQL, so prove it separately.
     d = subprocess.run([binary, "doctor", "--probe"], capture_output=True, text=True, env=env)

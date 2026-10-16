@@ -18,10 +18,20 @@ test "$(docker run "${flags[@]}" "$image" --version | head -n 1)" = "benchy-mcp 
 docker run "${flags[@]}" "$image" doctor --probe --json > "$work/doctor.json"
 cat "$work/doctor.json"
 
+# A bind mount keeps the host's ownership. Benchy requires an executable connector to belong
+# to its user or root, so stage a root-owned copy, as COPY would in a derived image. Only this
+# temporary fixture's ownership changes; the server itself always uses the image's non-root user.
+cp -R "$repo/examples" "$work/examples"
+docker run --rm --read-only --network=none --cap-drop=ALL --cap-add=CHOWN \
+  --user=0:0 --entrypoint=/bin/chown \
+  --mount "type=bind,src=$work/examples,dst=/fixtures" \
+  "$image" 0:0 /fixtures/connectors/hello.sh
+
 # The wrapper lets the existing real MCP client drive Docker just as it drives a binary.
 # A read-only bind mount also proves that the image does not need to write into the data folder.
-export BENCHY_SMOKE_IMAGE="$image" BENCHY_SMOKE_DATA="$repo/examples/data"
-export BENCHY_SMOKE_ARROW="$repo/examples/connectors/hello.arrows"
+export BENCHY_SMOKE_IMAGE="$image" BENCHY_SMOKE_DATA="$work/examples/data"
+export BENCHY_SMOKE_ARROW="$work/examples/connectors/hello.arrows"
+export BENCHY_SMOKE_FIXTURES="$work/examples"
 # verify.py also starts the connector example using its absolute path in this checkout.
 export BENCHY_SMOKE_EXAMPLES="$repo/examples"
 cat > "$work/benchy" <<'SH'
@@ -32,7 +42,7 @@ exec docker run --rm --init -i --read-only --cap-drop=ALL \
   --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
   --mount "type=bind,src=$BENCHY_SMOKE_DATA,dst=/data,readonly" \
   --mount "type=bind,src=$BENCHY_SMOKE_ARROW,dst=/hello.arrows,readonly" \
-  --mount "type=bind,src=$BENCHY_SMOKE_EXAMPLES,dst=$BENCHY_SMOKE_EXAMPLES,readonly" \
+  --mount "type=bind,src=$BENCHY_SMOKE_FIXTURES,dst=$BENCHY_SMOKE_EXAMPLES,readonly" \
   "$BENCHY_SMOKE_IMAGE" "$@"
 SH
 chmod +x "$work/benchy"

@@ -389,8 +389,11 @@ memory and temporary-space limits for larger loads; tmpfs usage counts toward co
 For ClickHouse or HTTP, omit `--network=none`, mount your configuration read-only, pass its
 credential variables with `--env NAME`, and append `--config /path/in/container/benchy.toml`
 after the image. Connector runtimes such as Python and Node are not included; build a derived
-image when a connector needs them. The host protocol can use mounted files over stdio; descriptor
-passing and inherited stream-channel descriptors cannot cross `docker run`.
+image when a connector needs them. Executable connectors must belong to root or the container's
+user, without group/world write permissions. `COPY` in a derived image gives them root ownership;
+for bind-mounted connectors, use `--user UID:GID` matching their owner. The host protocol can use
+mounted files over stdio; descriptor passing and inherited stream-channel descriptors cannot
+cross `docker run`.
 
 The container uses its host's Linux kernel and Docker's default seccomp profile. Check the actual
 runtime with `docker run --rm ghcr.io/comino/benchy-mcp:0.1.0 doctor --probe --json`.
