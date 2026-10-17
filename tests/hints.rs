@@ -232,18 +232,22 @@ fn the_empty_result_note_stays_inside_the_deadline() {
     let mut ws = bench.seal("1GB").unwrap();
     // An interrupted query stops when DuckDB next looks, which is a machine's own time: on a
     // shared macOS runner it was 164 ms past a 300 ms deadline, where this box takes a few. So
-    // the bound below is the deadline plus what the batch's own watchdog takes to stop a query
-    // on this engine and table, measured here, not a fixed allowance. (Measured on the bench's
-    // connection before the seal, with every thread, the same scan finished inside 100 ms on
-    // that runner, so it has to be the sealed engine.)
+    // the bound below is the deadline plus what the sealed engine takes to stop the note's own
+    // query on this table, measured here, not a fixed allowance. Both matter: on the bench's
+    // connection before the seal, with every thread, the scan finished inside 100 ms on that
+    // runner, and a `count(DISTINCT …)` stopped in 16 ms where the note's `DISTINCT … ORDER BY`
+    // ran 106 ms past its deadline.
     let stop = {
-        let deadline = std::time::Duration::from_millis(100);
+        let deadline = std::time::Duration::from_millis(50);
         let caps = Caps {
             deadline,
             ..Caps::default()
         };
         let t = std::time::Instant::now();
-        let ran = ws.work("SELECT count(DISTINCT late || c1 || c2) FROM w", &caps);
+        let ran = ws.work(
+            "SELECT DISTINCT late FROM w WHERE late IS NOT NULL ORDER BY 1 LIMIT 21",
+            &caps,
+        );
         let took = t.elapsed();
         assert!(
             ran.is_err(),
