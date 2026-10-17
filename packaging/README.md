@@ -19,6 +19,7 @@ pinned and review the changelog before updating. Benchy is licensed under MIT; s
 | `LICENSE-DuckDB` | DuckDB's licence (MIT) |
 | `THIRD-PARTY-LICENSES.txt` | the licences of the Rust crates compiled into the binary |
 | `CHANGELOG.md` | what changed in each release |
+| `SHA256SUMS` | the SHA-256 of every other file here, as shipped |
 | `example-data/` | two small CSV files to try it on |
 
 ## Run it

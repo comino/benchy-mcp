@@ -43,10 +43,23 @@ crate root.
 ## Building
 
 ```sh
-cargo build --release          # the first build fetches DuckDB's release library into target/
+python3 packaging/duckdb_lib.py fetch   # DuckDB's release library into target/, checked
+cargo build --release
 cargo test --release
 python3 examples/verify.py ./target/release/benchy-mcp ./examples/data
 ```
+
+Without the first line, the first `cargo build` downloads the library itself, through
+libduckdb-sys's build script, which checks nothing. `packaging/duckdb_lib.py` puts the release
+file where that build script reuses it, after checking it against `packaging/duckdb.sha256`, and
+unpacks the library from it; `packaging/duckdb_lib.py check` says whether what is in `target/`,
+the copies cargo made included, is still that release. CI, the release, the Dockerfile and
+`scripts/ci.sh` all fetch it this way, and `packaging/package.sh` checks it again before it goes
+into a bundle. To update DuckDB, bump `duckdb` and `libduckdb-sys` together and add the new
+release's lines to `packaging/duckdb.sha256`: download each file from DuckDB's GitHub release,
+hash it, and compare with the `digest` GitHub records for the asset
+(`gh api repos/duckdb/duckdb/releases/tags/v<version>`). `packaging/test_duckdb_lib.py` fails
+until every archive and the LICENSE are pinned.
 
 To link a `libduckdb.so` and `duckdb.h` you already have, which also skips the download:
 
@@ -79,7 +92,8 @@ BENCHY_CLICKHOUSE_BIN=/path/to/clickhouse scripts/ci.sh  # and the ClickHouse te
 ```
 
 It runs what `.github/workflows/ci.yml` runs, in this order: `cargo fmt --check`,
-`scripts/check_requirements.py`, `scripts/check_toolchain.py`, clippy with warnings as errors, `cargo test --release`, the
+`scripts/check_requirements.py`, `scripts/check_toolchain.py`, `packaging/test_duckdb_lib.py`
+and the checked DuckDB fetch, clippy with warnings as errors, `cargo test --release`, the
 ClickHouse tests when `BENCHY_CLICKHOUSE_BIN` is set (and fails if one of them was skipped),
 `examples/verify.py`, `examples/host.py`, `examples/host-node.mjs` (when `node` is installed),
 `eval/test_eval.py` (Linux 6.7 or later: the eval's jail is Landlock) and `doctor`. Run it before opening a pull request, and say in the pull
@@ -99,7 +113,7 @@ linking: `rustup target add aarch64-apple-darwin`, then `cargo check --all-targe
 aarch64-apple-darwin` (or `cargo clippy` the same way). The C dependencies need a C compiler for
 the target; `zig cc -target aarch64-macos`, named in `CC_aarch64_apple_darwin` through a wrapper
 that drops `-arch`, `--target=` and `-mmacosx-version-min=`, is enough. DuckDB's macOS library is
-downloaded by the build as for Linux.
+fetched as for Linux: `python3 packaging/duckdb_lib.py fetch aarch64-apple-darwin`.
 
 A change that could make ingest slower is measured with `bench/ingest.py` before and after, and
 the pull request gives both numbers ([docs/PERFORMANCE.md](docs/PERFORMANCE.md)).

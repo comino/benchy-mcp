@@ -32,15 +32,25 @@ jobs:
         run: |
           ls target/duckdb-download/*/*/libduckdb.* >/dev/null 2>&1 ||
             rm -rf target/*/build/libduckdb-sys-* target/*/.fingerprint/libduckdb-sys-*
+      # libduckdb-sys's build script downloads DuckDB's library with no checksum. Put the release
+      # file, checked against packaging/duckdb.sha256, where that build script reuses it instead,
+      # and unpack the library from it over whatever the cache restored.
+      - name: Fetch DuckDB's release library, checked
+        run: python3 packaging/duckdb_lib.py fetch
 
       - run: cargo fmt --check
       # REQUIREMENTS.md may only name tests that exist, or mark them planned. Cheap, and it is
       # what stops the document claiming more than the code proves.
       - run: python3 scripts/check_requirements.py
-      # No DUCKDB_LIB_DIR: this builds what a stranger's `cargo build` builds, fetching DuckDB's
-      # release library the same way.
+      # One compiler for every build, and DuckDB's library only as released.
+      - run: python3 scripts/check_toolchain.py
+      - run: python3 -I packaging/test_duckdb_lib.py
+      # No DUCKDB_LIB_DIR: this builds what a stranger's `cargo build` builds, through the same
+      # libduckdb-sys path, with the release file already in place and checked.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
+      # And the copy of the library the tests ran against is still the released one.
+      - run: python3 packaging/duckdb_lib.py check
 
       # The escape corpus and the requirement tests are the point, but they run in-process.
       # This is the same assertion through a real MCP stdio handshake.
@@ -76,6 +86,8 @@ jobs:
         run: |
           ls target/duckdb-download/*/*/libduckdb.* >/dev/null 2>&1 ||
             rm -rf target/*/build/libduckdb-sys-* target/*/.fingerprint/libduckdb-sys-*
+      - name: Fetch DuckDB's release library, checked
+        run: python3 packaging/duckdb_lib.py fetch
       - name: Fetch ClickHouse, checked
         run: |
           tgz="clickhouse-common-static-${CLICKHOUSE_VERSION}-amd64.tgz"
@@ -111,6 +123,8 @@ jobs:
         run: |
           ls target/duckdb-download/*/*/libduckdb.* >/dev/null 2>&1 ||
             rm -rf target/*/build/libduckdb-sys-* target/*/.fingerprint/libduckdb-sys-*
+      - name: Fetch DuckDB's release library, checked
+        run: python3 packaging/duckdb_lib.py fetch
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
       - name: Verify through a real MCP client

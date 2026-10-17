@@ -50,7 +50,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
         with: { toolchain: "1.98.1", targets: "${{ matrix.target }}" }
-      # No build cache: a release is built the way a stranger's first build is, from nothing.
+      # No build cache: a release is built the way a stranger's first build is, from nothing,
+      # except that DuckDB's release file is fetched first and checked against
+      # packaging/duckdb.sha256, so libduckdb-sys reuses it instead of downloading it unchecked.
+      # package.sh checks the library again before it goes into the bundle.
+      - run: python3 packaging/duckdb_lib.py fetch ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - run: packaging/package.sh ${{ matrix.target }} ${{ matrix.platform }} dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

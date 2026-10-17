@@ -292,18 +292,21 @@ pass `--allow-unsandboxed`, and the SQL layer is the only boundary.
 
 ### Build from source
 
-You need rustup: `rust-toolchain.toml` pins the compiler (Rust 1.98.1), and rustup
+You need rustup and Python 3: `rust-toolchain.toml` pins the compiler (Rust 1.98.1), and rustup
 fetches it on the first build.
 
 ```sh
 git clone https://github.com/comino/benchy-mcp && cd benchy-mcp
+python3 packaging/duckdb_lib.py fetch    # DuckDB's library, checked against its SHA-256
 cargo build --release
 ./target/release/benchy-mcp doctor
 ```
 
 The first build takes several minutes. It downloads DuckDB's official release library for your
 platform, about 40 MB with Parquet, JSON and time-zone support built in, into `target/`, and links
-against it. To link a copy of your own instead, set `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR`.
+against it. The `fetch` line checks that file against the SHA-256 pinned in
+`packaging/duckdb.sha256` first; without it, the build downloads it unchecked. To link a copy of
+your own instead, set `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR`.
 Serving data never downloads anything.
 
 **Register the binary you built by its absolute path**, and keep the clone where it is. The
@@ -339,7 +342,9 @@ a browser download may need approval in System Settings → Privacy & Security.
 
 Each bundle carries the binary, DuckDB's library, licenses and example data. Keep them together;
 the installer unpacks to `~/.local/lib/benchy-mcp/0.1.0/` and links `~/.local/bin/benchy-mcp`.
-It checks the download's SHA-256. You can also verify its GitHub build attestation:
+It checks the download's SHA-256. Inside, `SHA256SUMS` lists every file, and the README names
+the DuckDB release file the library came from and the SHA-256 it was checked against before the
+build. You can also verify its GitHub build attestation:
 
 ```sh
 gh attestation verify benchy-mcp-linux-x86_64.tar.gz --repo comino/benchy-mcp

@@ -17,7 +17,8 @@ FROM runtime AS release
 COPY . /opt/benchy/
 
 # The same Rust as rust-toolchain.toml, which the native bundles are built with;
-# scripts/check_toolchain.py keeps the two in step.
+# scripts/check_toolchain.py keeps the two in step. DuckDB's library is fetched checked against
+# packaging/duckdb.sha256 before cargo runs, so libduckdb-sys never downloads it unchecked.
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \
@@ -30,6 +31,7 @@ RUN target="$(rustc -vV | sed -n 's/^host: //p')" \
          aarch64-unknown-linux-gnu) platform=linux-aarch64 ;; \
          *) echo "unsupported container target: $target" >&2; exit 1 ;; \
        esac \
+    && python3 packaging/duckdb_lib.py fetch "$target" \
     && BENCHY_BUNDLE=1 cargo build --release --locked --target "$target" \
     && packaging/package.sh "$target" "$platform" /dist \
     && mkdir /bundle \

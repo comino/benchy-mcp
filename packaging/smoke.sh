@@ -27,6 +27,11 @@ tar -xzf "$dist/$asset" -C "$work/fresh"
 bundle=$(echo "$work"/fresh/benchy-mcp-*)
 ls -la "$bundle"
 bin="$bundle/benchy-mcp"
+
+step "every file in it is the one packaged"
+(cd "$bundle" && if command -v sha256sum >/dev/null; then sha256sum -c --quiet SHA256SUMS; else shasum -a 256 -c --quiet SHA256SUMS; fi)
+grep -q "checked before the build" "$bundle/README.md"
+echo ok
 case "$platform" in
 linux-*) lib=libduckdb.so; ldd "$bin" ;;
 macos-*) lib=libduckdb.dylib; otool -L "$bin"; lipo -info "$bundle/$lib"; codesign -dv "$bin" 2>&1 || true ;;

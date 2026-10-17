@@ -20,11 +20,18 @@ python3 scripts/check_requirements.py
 step "one Rust compiler everywhere"
 python3 scripts/check_toolchain.py
 
+step "DuckDB's library only as released"
+python3 -I packaging/test_duckdb_lib.py
+# Into both target dirs, before cargo: libduckdb-sys would otherwise download it unchecked.
+python3 packaging/duckdb_lib.py fetch
+CARGO_TARGET_DIR="$PWD/target/clippy" python3 packaging/duckdb_lib.py fetch
+
 step "clippy, warnings are errors"
 CARGO_TARGET_DIR="$PWD/target/clippy" CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
 
 step "cargo test --release"
 cargo test --release
+python3 packaging/duckdb_lib.py check
 
 if [ -n "${BENCHY_CLICKHOUSE_BIN:-}" ]; then
   step "the ClickHouse tests, against $BENCHY_CLICKHOUSE_BIN"
