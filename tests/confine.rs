@@ -151,6 +151,131 @@ fn a_missing_sandbox_is_refused_without_the_flag() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `benchy-mcp host` with `args`, greeted in protocol 1: the reply to `hello`, or `None` where
+/// the session did not start, and what it logged.
+fn host_hello(args: &[&str]) -> (Option<serde_json::Value>, String) {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(BIN)
+        .arg("host")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // A session that refused to start has closed its end: the write may fail, the read does.
+    let _ = benchy_mcp::proto::write_frame(
+        &mut stdin,
+        &serde_json::json!({"id": 1, "call": "hello", "protocol": [1]}),
+    );
+    let reply = benchy_mcp::proto::read_frame(child.stdout.as_mut().unwrap()).ok();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    (reply, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn hello_says_how_the_engine_is_confined() {
+    // A host gated its sessions on `sandbox` being the words "fully enforced": prose, which a
+    // rewording would turn into refusing every session, or passing the wrong one. On a kernel
+    // without TCP rules (before Linux 6.7) the prose said "enforced, some newer rights
+    // unsupported by this kernel", and a host that did not match words had no way to learn that
+    // the engine could open any TCP connection. `sandbox_posture` says it in fixed words.
+    // The ABI is asked of the kernel here, not through `sandbox::landlock_abi`, which the reply's
+    // own number comes from.
+    let abi = kernel_landlock_abi();
+    let (hello, log) = host_hello(&[]);
+    let hello = hello.unwrap_or_else(|| panic!("no hello: {log}"));
+    let p = &hello["sandbox_posture"];
+    let mut keys: Vec<&str> = p
+        .as_object()
+        .unwrap_or_else(|| panic!("no sandbox_posture: {hello}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["filesystem", "landlock_abi", "network", "posture", "reason"],
+        "{hello}"
+    );
+    assert_eq!(p["landlock_abi"], abi, "{hello}");
+    if abi >= 4 {
+        assert_eq!(p["posture"], "full", "{hello}");
+        assert_eq!(p["filesystem"], true, "{hello}");
+        assert_eq!(p["network"], true, "{hello}");
+        assert!(p["reason"].is_null(), "{hello}");
+        // The prose stays, for the hosts that read it.
+        assert_eq!(hello["sandbox"], "fully enforced", "{hello}");
+    } else {
+        assert_eq!(p["posture"], "partial", "{hello}");
+        assert_eq!(p["filesystem"], true, "{hello}");
+        assert_eq!(p["network"], false, "{hello}");
+        assert!(
+            p["reason"].as_str().is_some_and(|r| r.contains("TCP")),
+            "{hello}"
+        );
+    }
+
+    // Where the engine cannot be confined and the operator said to serve anyway.
+    let (hello, log) = with_landlock_exhausted(|| host_hello(&["--allow-unsandboxed"]));
+    let hello = hello.unwrap_or_else(|| panic!("no hello: {log}"));
+    let p = &hello["sandbox_posture"];
+    assert_eq!(p["posture"], "unavailable", "{hello}");
+    assert_eq!(p["filesystem"], false, "{hello}");
+    assert_eq!(p["network"], false, "{hello}");
+    assert!(p["reason"].is_string(), "{hello}");
+}
+
+#[test]
+fn a_session_that_must_be_fully_sandboxed_refuses_to_start_otherwise() {
+    // `--require-full-sandbox` is the operator saying that the network boundary is relied on too:
+    // a server whose engine is confined to its files but not kept off TCP, as on a kernel before
+    // Linux 6.7, must not start. That kernel is not to be had here, so the posture short of full
+    // is the one this kernel can be made to give — the engine unconfined, served anyway with
+    // `--allow-unsandboxed`, over which the stricter flag wins. A posture short of full is one
+    // case of the same check (`a_kernel_without_tcp_rules_is_reported_as_partial` holds the
+    // check to `partial` at ABI 3).
+    let abi = kernel_landlock_abi();
+    let (hello, log) = host_hello(&["--require-full-sandbox"]);
+    if abi >= 4 {
+        let hello = hello.unwrap_or_else(|| panic!("fully confined, it starts: {log}"));
+        assert_eq!(hello["sandbox_posture"]["posture"], "full", "{hello}");
+    } else {
+        assert!(hello.is_none(), "no TCP rules, and it started: {log}");
+    }
+
+    let (hello, log) =
+        with_landlock_exhausted(|| host_hello(&["--allow-unsandboxed", "--require-full-sandbox"]));
+    assert!(hello.is_none(), "served unconfined: {hello:?}");
+    assert!(
+        log.contains("--require-full-sandbox") && log.contains("does not fully confine"),
+        "says why: {log}"
+    );
+
+    // A server refuses before any source loads: a network loader would otherwise have run, and
+    // reached its source, under the posture that was refused.
+    let dir = common::data_dir();
+    let out = with_landlock_exhausted(|| {
+        std::process::Command::new(BIN)
+            .arg(&dir)
+            .args(["--allow-unsandboxed", "--require-full-sandbox"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    });
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "served unconfined: {err}");
+    assert!(err.contains("does not fully confine"), "says why: {err}");
+    assert!(!err.contains("rows)"), "loaded first: {err}");
+    if abi >= 4 {
+        let mut s = common::Server::launch(&[dir.to_str().unwrap(), "--require-full-sandbox"], &[]);
+        assert!(s.alive(), "fully confined, it serves");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Run one loader job to completion and return its report.
 fn run_loader(job: &benchy_mcp::loader::Job) -> benchy_mcp::loader::Done {
     use std::process::{Command, Stdio};

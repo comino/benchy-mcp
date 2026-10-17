@@ -61,6 +61,10 @@ OPTIONS
                       the next one. No descriptor passing, so a host on Node.js or Java can
                       stream. Off unless named: an inherited descriptor is not a channel.
   --allow-unsandboxed serve even where Landlock cannot confine the engine
+  --require-full-sandbox  refuse to start unless Landlock confines the engine fully,
+                      TCP included (Linux 6.7 or later); wins over --allow-unsandboxed
+  --require-memory-ceilings  refuse to start unless the engine's and the loaders'
+                      memory ceilings are enforced (Linux)
   --probe             with `doctor`: measure containment instead of reporting it
   --json              with `doctor`: measure it, and say so as JSON: a verdict and each mechanism
   -h, --help          this
@@ -192,12 +196,23 @@ fn main() -> ExitCode {
         loader_ceiling,
         load_timeout,
         allow_unsandboxed,
+        require_full_sandbox,
+        require_memory_ceilings,
         limits,
         stream_channel,
     } = match parse_options(if host { &args[1..] } else { &args }) {
         Ok(o) => o,
         Err(e) => return fail(&e),
     };
+    // Before anything starts: the platform decides it, and nothing a session does changes it.
+    if require_memory_ceilings {
+        if let Err(e) = ceilings_enforced(
+            benchy_mcp::supervisor::MEMORY_CEILING_UNENFORCED,
+            benchy_mcp::supervisor::LOADER_MEMORY_CEILING_UNENFORCED,
+        ) {
+            return fail(&e);
+        }
+    }
     if host {
         if dir.is_some() || !named.is_empty() {
             return fail("`host` takes no sources: the host attaches them");
@@ -222,6 +237,7 @@ fn main() -> ExitCode {
             caps,
             load_timeout,
             allow_unsandboxed,
+            require_full_sandbox,
             limits,
             helpers,
             channel,
@@ -338,6 +354,18 @@ fn main() -> ExitCode {
         Err(e) => return fail(&e),
     };
     supervisor.state_shapes(shapes);
+    // REQ-3 `a_session_that_must_be_fully_sandboxed_refuses_to_start_otherwise`: the engine
+    // opens while the sources load, but a network loader would reach its source under the posture
+    // about to be refused, so with the flag the engine's posture is waited for first. It is the
+    // engine's, measured; a loader's ruleset handles the same rights on the same kernel.
+    if require_full_sandbox {
+        let checked = supervisor.opened().and_then(|o| {
+            benchy_mcp::sandbox::require_full(&o.posture, benchy_mcp::sandbox::landlock_abi())
+        });
+        if let Err(e) = checked {
+            return fail(&e);
+        }
+    }
     // Each source through a loader of its own; the engine attaches what they wrote, all in one
     // request. One that fails does not cost the others: the session starts with what loaded, the
     // operator's log has the whole reason, and the agent is told only the table's name. With
@@ -406,8 +434,9 @@ fn main() -> ExitCode {
         "benchy: sealed in a separate engine process — SQL cannot reach the filesystem or the \
          network, and a query that wedges the planner costs the engine, not the server"
     );
-    eprintln!("benchy: Landlock {}", opened.posture);
-    if opened.posture.starts_with("unavailable") || opened.posture == "not enforced" {
+    eprintln!("benchy: Landlock {}", opened.posture.describe());
+    say_what_the_network_is(&opened.posture);
+    if !opened.posture.is_enforced() {
         eprintln!(
             "benchy: running without an OS sandbox, as --allow-unsandboxed asked: the SQL layer \
              is the only boundary"
@@ -456,6 +485,10 @@ struct Options {
     loader_ceiling: Option<String>,
     load_timeout: std::time::Duration,
     allow_unsandboxed: bool,
+    /// `--require-full-sandbox`: start only where Landlock confines the engine fully, TCP included.
+    require_full_sandbox: bool,
+    /// `--require-memory-ceilings`: start only where the memory ceilings are enforced.
+    require_memory_ceilings: bool,
     /// `--attach-rows`, `--attach-bytes`, `--session-rows`, `--session-bytes`, where given.
     limits: benchy_mcp::config::Stated,
     /// `--stream-channel`, where given: the descriptor a host's stream channel is on.
@@ -570,6 +603,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut loader_ceiling: Option<String> = None;
     let mut load_timeout = std::time::Duration::from_secs(300);
     let mut allow_unsandboxed = false;
+    let mut require_full_sandbox = false;
+    let mut require_memory_ceilings = false;
     let mut limits: benchy_mcp::config::Stated = [None; 4];
     let mut stream_channel = None;
     let mut it = args.iter();
@@ -604,6 +639,8 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 _ => return Err("--max-cell-bytes needs a number of at least 16".into()),
             },
             "--allow-unsandboxed" => allow_unsandboxed = true,
+            "--require-full-sandbox" => require_full_sandbox = true,
+            "--require-memory-ceilings" => require_memory_ceilings = true,
             "--stream-channel" => match it.next().and_then(|s| s.parse::<i32>().ok()) {
                 Some(fd) if fd >= 3 => stream_channel = Some(fd),
                 _ => {
@@ -671,9 +708,45 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         loader_ceiling,
         load_timeout,
         allow_unsandboxed,
+        require_full_sandbox,
+        require_memory_ceilings,
         limits,
         stream_channel,
     })
+}
+
+/// REQ-7 `ceilings_that_cannot_be_enforced_are_refused_when_required`: whether a session started
+/// with `--require-memory-ceilings` may go on, where the engine's ceiling and the loaders' are
+/// not enforced for the reasons given, if any.
+fn ceilings_enforced(engine: Option<&str>, loader: Option<&str>) -> Result<(), String> {
+    let unenforced: Vec<String> = [
+        ("--memory-ceiling", engine),
+        ("--loader-memory-ceiling", loader),
+    ]
+    .into_iter()
+    .filter_map(|(flag, why)| why.map(|why| format!("{flag} is not enforced here: {why}")))
+    .collect();
+    if unenforced.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "--require-memory-ceilings: {}. Run on Linux, or start without the flag.",
+        unenforced.join("; ")
+    ))
+}
+
+/// On the operator's log, where the posture confines files and not TCP: `describe` says only that
+/// some rights are unsupported, and which ones is what an operator acts on.
+fn say_what_the_network_is(posture: &benchy_mcp::sandbox::Posture) {
+    if !posture.is_enforced() {
+        return;
+    }
+    if let Some(why) = posture.shortfall(benchy_mcp::sandbox::landlock_abi()) {
+        eprintln!(
+            "benchy: {why}; the engine and every confined loader may open any TCP connection. \
+             --require-full-sandbox refuses to start here."
+        );
+    }
 }
 
 /// `--stream-channel FD`: the descriptor the host's stream channel is on, inherited, taken as the
@@ -720,6 +793,7 @@ fn serve_host(
     caps: Caps,
     load_timeout: std::time::Duration,
     allow_unsandboxed: bool,
+    require_full_sandbox: bool,
     limits: benchy_mcp::admission::HostLimits,
     helpers: Vec<benchy_mcp::helpers::Def>,
     channel: Option<std::os::fd::OwnedFd>,
@@ -758,6 +832,14 @@ fn serve_host(
         Ok(o) => o,
         Err(e) => return fail(&e),
     };
+    let landlock_abi = benchy_mcp::sandbox::landlock_abi();
+    // REQ-3 `a_session_that_must_be_fully_sandboxed_refuses_to_start_otherwise`, before anything
+    // is loaded: the helpers' job is a loader too.
+    if require_full_sandbox {
+        if let Err(e) = benchy_mcp::sandbox::require_full(&opened.posture, landlock_abi) {
+            return fail(&e);
+        }
+    }
     // REQ-18: the helpers, made before the host's first call, against no table yet. One that
     // cannot be made stops startup; one that reads a table waits for the host to attach it.
     if !helpers.is_empty() {
@@ -775,13 +857,15 @@ fn serve_host(
     }
     eprintln!(
         "benchy: host protocol on stdio; Landlock {}",
-        opened.posture
+        opened.posture.describe()
     );
+    say_what_the_network_is(&opened.posture);
     benchy_mcp::host::serve(
         supervisor,
         benchy_mcp::host::Session {
             engine: opened.engine_version,
             sandbox: opened.posture,
+            landlock_abi,
             caps,
             limits,
             dir: session.0.clone(),
@@ -1603,6 +1687,82 @@ mod tests {
             .map(|m| m["enforced"].clone())
             .collect();
         assert_eq!(flags, [true, false, true], "{json}");
+    }
+
+    #[test]
+    fn the_doctor_json_has_the_documented_keys() {
+        // A host checks a container at start by these keys, and the README once said only "a
+        // verdict and each mechanism". Its table now lists them, and this holds the JSON to it:
+        // a key added, renamed or dropped fails here until the table says so.
+        let readme = include_str!("../README.md");
+        let table = readme
+            .split_once("The JSON has these keys")
+            .expect("the README documents the doctor's JSON")
+            .1;
+        let (mut top, mut each) = (Vec::new(), Vec::new());
+        let rows = table
+            .lines()
+            .skip_while(|l| !l.starts_with('|'))
+            .take_while(|l| l.starts_with('|'));
+        for row in rows {
+            let Some(key) = row.strip_prefix("| `").and_then(|r| r.split_once('`')) else {
+                continue;
+            };
+            match key.0.strip_prefix("mechanisms[].") {
+                Some(k) => each.push(k.to_string()),
+                None => top.push(key.0.to_string()),
+            }
+        }
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();
+            k.sort();
+            k
+        };
+        top.sort();
+        each.sort();
+        let mut mechanisms = unconfined(4);
+        mechanisms.push(Mechanism::failed("engine", "", "", "could not run".into()));
+        let (_, json) = report(4, &mechanisms, true);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(keys(&v), top, "{json}");
+        for m in v["mechanisms"].as_array().unwrap() {
+            assert_eq!(keys(m), each, "{m}");
+            for c in m["checks"].as_array().unwrap() {
+                assert_eq!(keys(c), ["allowed", "check", "must_be"], "{c}");
+            }
+        }
+        assert!(
+            table.contains(r#"`{"check", "allowed", "must_be"}`"#),
+            "the README names a check's keys"
+        );
+    }
+
+    #[test]
+    fn ceilings_that_cannot_be_enforced_are_refused_when_required() {
+        // `--require-memory-ceilings` refuses wherever either ceiling is not enforced, and says
+        // which and why; the platform is given, as only off Linux are they not.
+        use super::ceilings_enforced;
+        assert_eq!(ceilings_enforced(None, None), Ok(()));
+        let e = ceilings_enforced(Some("no /proc"), None).unwrap_err();
+        assert!(
+            e.contains("--memory-ceiling is not enforced here: no /proc"),
+            "{e}"
+        );
+        assert!(!e.contains("--loader-memory-ceiling"), "{e}");
+        let e = ceilings_enforced(None, Some("no /proc")).unwrap_err();
+        assert!(e.contains("--loader-memory-ceiling is not enforced"), "{e}");
+        let e = ceilings_enforced(Some("a"), Some("b")).unwrap_err();
+        assert!(e.starts_with("--require-memory-ceilings: "), "{e}");
+        assert!(e.contains(": a;") && e.contains(": b."), "{e}");
+        // and this platform is the one the flag is checked against
+        assert_eq!(
+            ceilings_enforced(
+                benchy_mcp::supervisor::MEMORY_CEILING_UNENFORCED,
+                benchy_mcp::supervisor::LOADER_MEMORY_CEILING_UNENFORCED
+            )
+            .is_ok(),
+            cfg!(target_os = "linux")
+        );
     }
 
     #[test]

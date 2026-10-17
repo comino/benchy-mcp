@@ -6,6 +6,30 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+### The sandbox's posture, for a host to read (#25)
+
+- **`hello` reports `sandbox_posture`** (`hello_says_how_the_engine_is_confined`):
+  `{"posture": "full" | "partial" | "none" | "unavailable", "landlock_abi", "filesystem",
+  "network", "reason"}`, beside the prose of `sandbox`, which stays. A host gated its sessions on
+  `sandbox` being the words "fully enforced", which a rewording would break. A reply field, so
+  sent in every protocol version, and no new version.
+- **A kernel without TCP rules is said to be one** (`a_kernel_without_tcp_rules_is_reported_as_partial`).
+  Before Linux 6.7 (Landlock ABI 4) every ruleset is enforced partially: files confined, and the
+  engine and every confined loader free to open any TCP connection. benchy still serves there, as
+  before, but `hello` says `"network": false`, the operator's log says the network is not
+  confined, and the README, REQUIREMENTS.md and CONTRIBUTING.md no longer claim the ClickHouse and
+  HTTP loaders are held to their source's port on such a kernel.
+- **`--require-full-sandbox`**, for a server and `host`
+  (`a_session_that_must_be_fully_sandboxed_refuses_to_start_otherwise`): start only where the
+  engine's posture is `full` with TCP rules, and otherwise say why and exit, a server before any
+  source loads. Stricter than `--allow-unsandboxed`, and wins over it.
+- **`--require-memory-ceilings`**, for a server and `host`
+  (`a_session_that_must_have_memory_ceilings_refuses_to_start_without_them`): start only where the
+  engine's and the loaders' memory ceilings are enforced, which is Linux.
+- **`doctor --probe --json`'s keys are documented**, in the README, and pinned
+  (`the_doctor_json_has_the_documented_keys`). The README says that its verdict counts what the
+  kernel can refuse, so below ABI 4 `enforced` comes with the network unconfined.
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,

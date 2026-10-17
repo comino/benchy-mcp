@@ -1879,6 +1879,35 @@ fn limits_are_lowered_by_the_host_and_raised_only_by_the_operator() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn a_session_that_must_have_memory_ceilings_refuses_to_start_without_them() {
+    // A host running many sessions in one container relies on each engine and loader being
+    // killed past its ceiling, and checked `limits.memory_ceiling` for a number in every `hello`.
+    // `--require-memory-ceilings` says so once, at startup: where the ceilings are enforced
+    // (Linux, which has the `/proc` they are read from) it changes nothing, and elsewhere the
+    // session does not start (`ceilings_that_cannot_be_enforced_are_refused_when_required`).
+    if cfg!(target_os = "linux") {
+        let mut h = Host::spawn(&["--require-memory-ceilings"]);
+        let r = h.call("hello", json!({"protocol": [1, 2, 3, 4, 5, 6]}));
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(r["limits"]["memory_ceiling"].is_u64(), "{r}");
+        assert!(r["limits"]["loader_memory_ceiling"].is_u64(), "{r}");
+        let data = common::data_dir();
+        let mut s = common::Server::start(&data, &["--require-memory-ceilings"]);
+        assert!(s.alive(), "the server serves too");
+        let _ = std::fs::remove_dir_all(&data);
+    } else {
+        let out = Command::new(common::BIN)
+            .args(["host", "--allow-unsandboxed", "--require-memory-ceilings"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{err}");
+        assert!(err.contains("--require-memory-ceilings"), "{err}");
+    }
+}
+
 /// Three meters, hourly, for three days: `at`, `meter`, `kw`.
 fn meters() -> RecordBatch {
     let schema = Schema::new(vec![

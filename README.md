@@ -274,6 +274,7 @@ or names a table in a string (`query_table('readings')`), stops startup. A helpe
   path, a session or a database, so there is nothing to guess. Nothing outlives the session.
 - **Landlock on Linux.** The engine, every file parser and the ClickHouse and HTTP loaders are
   confined by the kernel to what they need, so even a compromised engine cannot reach the rest of your files.
+  From Linux 6.7 they are kept off the network too, but for a loader's own source's ports.
 - **Survivable failure.** A runaway query is stopped at its deadline and costs that query, not the
   session.
 
@@ -328,6 +329,27 @@ python3 examples/verify.py ./target/release/benchy-mcp ./examples/data
 ./target/release/benchy-mcp doctor --probe
 ./target/release/benchy-mcp doctor --probe --json
 ```
+
+The JSON has these keys, and a release may add more, never rename or drop these:
+
+| Key | |
+|---|---|
+| `benchy` | benchy's version |
+| `engine` | `"DuckDB v1.5.5"`, the library loaded |
+| `library` | the file it was loaded from, or `null` |
+| `landlock_abi` | the kernel's Landlock ABI, 0 where it has none |
+| `verdict` | `"enforced"` or `"not_enforced"`, as the exit status says |
+| `reason` | why it is not enforced, or `null` |
+| `mechanisms` | one entry each for `engine`, `file_loader` and `network_loader` |
+| `mechanisms[].name` | which |
+| `mechanisms[].enforced` | whether every check that counts held, and at least one counted |
+| `mechanisms[].posture` | how the child said it was confined, as prose |
+| `mechanisms[].checks` | each `{"check", "allowed", "must_be"}`: what was tried, whether the child could, and what it must; `must_be` is `null` where the right is not Landlock's to withhold on this kernel, and does not count |
+| `mechanisms[].error` | why the probe could not run, or `null` |
+
+The verdict counts what this kernel can refuse. Below Landlock ABI 4 (Linux 6.7) the TCP checks
+do not count, and `"verdict": "enforced"` comes with the network unconfined; a host that relies on
+it checks `landlock_abi`, or starts benchy with `--require-full-sandbox`.
 
 ### Bundles
 
@@ -522,6 +544,10 @@ OPTIONS
                       the next one. No descriptor passing, so a host on Node.js or Java can
                       stream. Off unless named: an inherited descriptor is not a channel.
   --allow-unsandboxed serve even where Landlock cannot confine the engine
+  --require-full-sandbox  refuse to start unless Landlock confines the engine fully,
+                      TCP included (Linux 6.7 or later); wins over --allow-unsandboxed
+  --require-memory-ceilings  refuse to start unless the engine's and the loaders'
+                      memory ceilings are enforced (Linux)
   --probe             with `doctor`: measure containment instead of reporting it
   --json              with `doctor`: measure it, and say so as JSON: a verdict and each mechanism
   -h, --help          this
@@ -545,8 +571,8 @@ and `scripts/ci.sh` fails if one names a test that does not exist.
 1. **Isolation**: one session, one process, one workspace; nothing names a path or a session.
 2. **Sealed SQL**: the locked engine is the boundary; the allowlist keeps it locked.
 3. **Sealed process**: on Linux, Landlock confines the engine, each file's parser, and the
-   ClickHouse and HTTP loaders (their staging directory, the resolver's files, their source's
-   ports).
+   ClickHouse and HTTP loaders (their staging directory, the resolver's files, and from Linux 6.7
+   their source's ports).
 4. **Sources**: files, ClickHouse, HTTP and connectors, loaded before the agent's first call.
 5. **Credentials stay out of the engine**: each loader holds only its own source's.
 6. **Connector output is untrusted**: validated against the operator's declaration.

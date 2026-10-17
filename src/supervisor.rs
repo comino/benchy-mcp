@@ -104,7 +104,7 @@ pub struct Opened {
     /// `version_not_hardcoded`.
     pub engine_version: String,
     /// How Landlock confines the engine.
-    pub posture: String,
+    pub posture: crate::sandbox::Posture,
 }
 
 /// A size as DuckDB writes one, `1GB` or `512 MiB`, in bytes: KB, MB, GB and TB are powers of
@@ -758,7 +758,9 @@ impl Supervisor {
         }) {
             Ok(reply) if reply.ok => Ok(Opened {
                 engine_version: reply.body,
-                posture: reply.posture.unwrap_or_else(|| "unknown".into()),
+                posture: reply.posture.unwrap_or_else(|| {
+                    crate::sandbox::Posture::Unavailable("the engine did not say".into())
+                }),
             }),
             Ok(reply) => {
                 self.stop_engine();

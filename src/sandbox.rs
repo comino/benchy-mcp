@@ -46,13 +46,22 @@ pub const MINIMUM_ABI: &str = "V1";
 /// [`MINIMUM_ABI`] as the number the kernel answers with ([`landlock_abi`]).
 pub const MINIMUM_ABI_NUMBER: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The first Landlock ABI with TCP rules (Linux 6.7). Every ruleset handles them, so below it each
+/// is [`Posture::Partial`]: the filesystem confined, the network not.
+pub const NETWORK_ABI: u32 = 4;
+
+/// How much of a ruleset the kernel enforces, as `restrict_self` reported it. The engine sends
+/// its own to the server, which reports it in `hello` and on the operator's log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Posture {
     /// Every requested right was enforced.
     Full,
     /// Some requested rights were not enforceable by this kernel. **This does not mean the
-    /// sandbox leaks** — at V5 on kernel 6.8 the status is `PartiallyEnforced` and every
-    /// filesystem open is still denied. Report the level, never a bare boolean.
+    /// filesystem boundary leaks** — at V5 on kernel 6.8 the status is `PartiallyEnforced` and
+    /// every filesystem open is still denied. Every ruleset handles the kernel's own filesystem
+    /// ABI ([`fs_abi`]) and V4's TCP rights, so what this means in practice is a kernel below
+    /// [`NETWORK_ABI`]: no TCP rules, and a confined process may connect anywhere. Report the
+    /// level, never a bare boolean.
     Partial,
     /// Landlock produced no restriction at all.
     None,
@@ -64,6 +73,50 @@ impl Posture {
     /// Whether the filesystem boundary this design relies on is actually in force.
     pub fn is_enforced(&self) -> bool {
         matches!(self, Posture::Full | Posture::Partial)
+    }
+
+    /// The posture as a host reads it in `hello`'s `sandbox_posture`: one of four fixed words,
+    /// where [`describe`](Self::describe) is prose and may be reworded.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Posture::Full => "full",
+            Posture::Partial => "partial",
+            Posture::None => "none",
+            Posture::Unavailable(_) => "unavailable",
+        }
+    }
+
+    /// Why this posture, on a kernel with Landlock ABI `abi`, falls short of confining files and
+    /// TCP both, or `None` where it does not. Only a fully enforced ruleset at [`NETWORK_ABI`] or
+    /// later confines TCP: `Partial` says some rights were dropped, not which.
+    pub fn shortfall(&self, abi: u32) -> Option<String> {
+        match self {
+            Posture::Full if abi >= NETWORK_ABI => None,
+            Posture::Full | Posture::Partial if abi < NETWORK_ABI => Some(format!(
+                "this kernel's Landlock ABI {abi} has no TCP rules (they came with ABI \
+                 {NETWORK_ABI}, Linux 6.7): files are confined, the network is not"
+            )),
+            Posture::Full | Posture::Partial => {
+                Some("this kernel enforces some of the ruleset's rights and not others".into())
+            }
+            Posture::None => Some("Landlock enforced none of the ruleset".into()),
+            Posture::Unavailable(why) => Some(format!("Landlock is unavailable: {why}")),
+        }
+    }
+
+    /// REQ-3 `a_kernel_without_tcp_rules_is_reported_as_partial`: the posture as `hello` reports
+    /// it in `sandbox_posture`, for a host to act on without reading prose. `filesystem` is
+    /// whether the filesystem boundary holds, `network` whether TCP is confined too, and `reason`
+    /// why the posture falls short of both, `null` where it does not.
+    pub fn report(&self, abi: u32) -> serde_json::Value {
+        let reason = self.shortfall(abi);
+        serde_json::json!({
+            "posture": self.name(),
+            "landlock_abi": abi,
+            "filesystem": self.is_enforced(),
+            "network": reason.is_none(),
+            "reason": reason,
+        })
     }
 
     pub fn describe(&self) -> String {
@@ -89,6 +142,21 @@ pub fn admit(posture: &Posture, allow_unsandboxed: bool, who: &str) -> Result<()
          --allow-unsandboxed to run that way on purpose.",
         posture.describe()
     ))
+}
+
+/// REQ-3 `a_session_that_must_be_fully_sandboxed_refuses_to_start_otherwise`: whether a server
+/// started with `--require-full-sandbox` may go on, its engine confined as `posture` on a kernel
+/// with Landlock ABI `abi`. [`admit`] lets `Partial` through without a flag, since the filesystem
+/// boundary holds; an operator who relies on the network boundary too says so with this one,
+/// which is stricter than `--allow-unsandboxed` and wins over it.
+pub fn require_full(posture: &Posture, abi: u32) -> Result<(), String> {
+    match posture.shortfall(abi) {
+        None => Ok(()),
+        Some(why) => Err(format!(
+            "--require-full-sandbox: Landlock does not fully confine the engine here ({why}). \
+             Run on Linux 6.7 or later with Landlock enabled, or start without the flag."
+        )),
+    }
 }
 
 /// The Landlock ABI this kernel speaks, or 0 where it has none. ABI 4 (Linux 6.7) is the first
@@ -332,6 +400,53 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_kernel_without_tcp_rules_is_reported_as_partial() {
+        // Below ABI 4 (Linux 6.7) every ruleset handles TCP rights the kernel lacks, and comes
+        // back `PartiallyEnforced` (landlock 0.4.7: an unsupported access under BestEffort makes
+        // the state `Partial`). Its prose said only "some newer rights unsupported", and
+        // `admit` lets it through, so nothing said the engine could open any connection. No
+        // kernel before 6.7 is to be had here, so the posture is given with its ABI.
+        use super::{require_full, Posture};
+        let partial = Posture::Partial.report(3);
+        assert_eq!(partial["posture"], "partial", "{partial}");
+        assert_eq!(partial["landlock_abi"], 3, "{partial}");
+        assert_eq!(partial["filesystem"], true, "{partial}");
+        assert_eq!(partial["network"], false, "{partial}");
+        assert!(
+            partial["reason"]
+                .as_str()
+                .is_some_and(|r| r.contains("TCP") && r.contains("6.7")),
+            "{partial}"
+        );
+        let err = require_full(&Posture::Partial, 3).expect_err("no TCP rules");
+        assert!(
+            err.contains("--require-full-sandbox") && err.contains("TCP"),
+            "{err}"
+        );
+        // Partial at an ABI with TCP rules is some other right dropped: still not full.
+        assert_eq!(Posture::Partial.report(4)["network"], false);
+        assert!(require_full(&Posture::Partial, 5).is_err());
+        // Full is full only with TCP rules to enforce.
+        let full = Posture::Full.report(4);
+        assert_eq!(full["posture"], "full", "{full}");
+        assert_eq!(full["network"], true, "{full}");
+        assert!(full["reason"].is_null(), "{full}");
+        assert_eq!(require_full(&Posture::Full, 4), Ok(()));
+        assert!(require_full(&Posture::Full, 3).is_err());
+        for (p, name) in [
+            (Posture::None, "none"),
+            (Posture::Unavailable("gone".into()), "unavailable"),
+        ] {
+            let r = p.report(4);
+            assert_eq!(r["posture"], name, "{r}");
+            assert_eq!(r["filesystem"], false, "{r}");
+            assert_eq!(r["network"], false, "{r}");
+            assert!(r["reason"].is_string(), "{r}");
+            assert!(require_full(&p, 4).is_err(), "{name}");
+        }
     }
 
     #[test]
