@@ -53,7 +53,9 @@ const CATALOGUE_BUDGET: usize = 4096;
 /// What `hello` reports: fixed for the life of the session.
 pub struct Session {
     pub engine: String,
-    pub sandbox: String,
+    /// How Landlock confines the engine, and the kernel's Landlock ABI it was confined under.
+    pub sandbox: crate::sandbox::Posture,
+    pub landlock_abi: u32,
     pub caps: Caps,
     /// What the operator set; a host's `hello` may lower them.
     pub limits: HostLimits,
@@ -243,7 +245,10 @@ fn hello_reply_where(s: &Session, unenforced: Option<&str>) -> Value {
         "protocol": Value::Null,
         "benchy": env!("CARGO_PKG_VERSION"),
         "engine": format!("DuckDB {}", s.engine),
-        "sandbox": s.sandbox,
+        // Prose, for a person; `sandbox_posture` is what a host decides on, in fixed words
+        // (`hello_says_how_the_engine_is_confined`). A reply field, so every version gets it.
+        "sandbox": s.sandbox.describe(),
+        "sandbox_posture": s.sandbox.report(s.landlock_abi),
         "caps": caps_json(&s.caps),
         "limits": limits_json_where(&s.limits, unenforced),
     });
@@ -1400,7 +1405,8 @@ mod tests {
     fn a_memory_ceiling_that_cannot_be_enforced_is_not_reported() {
         let session = super::Session {
             engine: "v1.5.5".into(),
-            sandbox: "unsandboxed".into(),
+            sandbox: crate::sandbox::Posture::None,
+            landlock_abi: 0,
             caps: Default::default(),
             limits: Default::default(),
             dir: "/nowhere".into(),

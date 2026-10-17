@@ -169,7 +169,7 @@ pub fn run() -> ! {
                         let version = ws.engine_version();
                         bench = Some(ws);
                         Reply {
-                            posture: Some(posture.describe()),
+                            posture: Some(posture),
                             ..Reply::ok(version)
                         }
                     }

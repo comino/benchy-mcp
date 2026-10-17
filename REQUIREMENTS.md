@@ -147,11 +147,19 @@ On Linux, Landlock confines every process that parses data. The engine starts se
 empty, loads nothing, and may read only its own workspace and delete within its session's
 directory; each file is parsed by a loader of its own, which may read its one input and write
 only its staging directory. A built-in source's loader (ClickHouse, HTTP) may write only its staging
-directory, read only the resolver's files, and connect only to its source's port. So neither a
+directory, read only the resolver's files, and, from Linux 6.7, connect only to its source's
+port. So neither a
 compromised engine nor a parser subverted by its input can read other files, or truncate any
 outside a loader's own staging directory. A connector's
 loader is not confined: a connector reaches whatever it fetches from. macOS has no equivalent here: there, containment is the SQL layer alone, and
 benchy refuses to serve until the operator says so with `--allow-unsandboxed`.
+
+The TCP rules need Landlock ABI 4, Linux 6.7. On an older kernel every ruleset is enforced
+partially: the files are confined as above, and the engine and every confined loader may open a
+TCP connection anywhere. benchy serves there, since the filesystem boundary holds and DuckDB's
+own network access is off (REQ-2), and says so: `hello` reports the posture as `partial` with
+`network` false, the operator's log says the network is not confined, and a server started with
+`--require-full-sandbox` does not start.
 
 - `a_thread_already_running_is_never_confined_as_if_it_were_not` — Landlock confines only the
   threads started after it, so the engine and every file loader confine themselves as their only
@@ -178,6 +186,9 @@ benchy refuses to serve until the operator says so with `--allow-unsandboxed`.
   enforced, and every check it made: what the child could do, and what it must (`null` where the
   right is not Landlock's to withhold on this kernel). Where the restriction cannot be applied it
   still prints JSON, saying so.
+- `the_doctor_json_has_the_documented_keys` — that JSON's keys, at the top, in each mechanism and
+  in each check, are exactly the ones the README's table lists, so a host can rely on them and a
+  key added or dropped fails until the table says so.
 - `doctor_without_landlock_says_not_enforced` — on a kernel without Landlock (ABI 0), or below
   the minimum ABI, every check is above what the kernel can refuse and none counts, so nothing
   checked once passed as `enforced`. Now that verdict is `not_enforced`, in prose and JSON alike,
@@ -226,6 +237,19 @@ benchy refuses to serve until the operator says so with `--allow-unsandboxed`.
   (Linux 6.7). On an older kernel the filesystem is confined all the same and the network is not
   Landlock's to refuse, and the doctor says so rather than failing; and only `EACCES` is Landlock's
   refusal — `EPERM` is somebody else's.
+- `a_kernel_without_tcp_rules_is_reported_as_partial` — below ABI 4 the posture is `partial`,
+  reported with the filesystem confined, the network not, and why; only `full` at ABI 4 or later
+  reports `network` true, and only it passes `--require-full-sandbox`. Tested on the posture with
+  the ABI given: no kernel before 6.7 is to be had here.
+- `hello_says_how_the_engine_is_confined` — `hello`'s `sandbox_posture` says how Landlock
+  confines the engine in fixed words and booleans (`posture`, `landlock_abi`, `filesystem`,
+  `network`, `reason`), beside the prose of `sandbox`, which a host once matched word for word:
+  `full` here, and `unavailable` with both false where Landlock's layers are used up and the
+  operator served anyway.
+- `a_session_that_must_be_fully_sandboxed_refuses_to_start_otherwise` — `--require-full-sandbox`
+  starts a server or a host session only where the engine's posture is `full` with TCP rules, and
+  wins over `--allow-unsandboxed`. Short of that it says why and exits, a server before any source
+  loads, since a network loader would otherwise reach its source under the posture refused.
 
 ## REQ-4 — Sources
 
@@ -540,6 +564,12 @@ kill. So is one loader's: each is read the same way while it loads, with the con
   `limits.memory_ceiling` is `null`, `unenforced.memory_ceiling` says why, and `doctor` says it
   is not enforced, rather than a number nothing applies (an engine with a 128 MB ceiling reached
   243 MB on macOS). On Linux the reply is unchanged. Tested with the platform given.
+- `a_session_that_must_have_memory_ceilings_refuses_to_start_without_them` — with
+  `--require-memory-ceilings` a server or a host session starts only where both the engine's and
+  the loaders' memory ceilings are enforced: on Linux it changes nothing, and elsewhere it says why
+  and exits, rather than leave a host to check `hello` for numbers.
+  `ceilings_that_cannot_be_enforced_are_refused_when_required` holds the check to each ceiling
+  unenforced, with the platform given.
 - `a_loader_past_its_memory_ceiling_is_killed_and_attaches_nothing` — a loader is read from
   outside every 50 ms while it runs, and past `--loader-memory-ceiling` (default 1 GB) it is
   killed: the table is not loaded, nothing of it is attached, the operator's log says it was the

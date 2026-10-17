@@ -102,7 +102,7 @@ pub struct Reply {
     pub tables: Vec<(String, u64)>,
     /// How Landlock confines the engine, reported at load for the startup log.
     #[serde(default)]
-    pub posture: Option<String>,
+    pub posture: Option<crate::sandbox::Posture>,
     /// Why it failed, as a code a host can act on: `E_SQL`, `E_DEADLINE`, `E_NO_RESULT`,
     /// `E_DATA`, `E_NAME`, `E_REBUILT`, `E_UNAVAILABLE` (docs/HOST-PROTOCOL.md).
     #[serde(default)]

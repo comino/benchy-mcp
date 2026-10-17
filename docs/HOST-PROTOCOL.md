@@ -109,11 +109,37 @@ The first three are the whole string; the last begins with `unavailable: `.
 | 6 | `loader_memory_ceiling` in `hello`'s `limits`, reported and lowered (**Memory** below) | `limits.loader_memory_ceiling`, and the session ends; it is not reported |
 
 Replies only grow: a field a reply gained in a later version (`results` beside a query's text,
-`sql` on a page, `unenforced` beside the limits) is sent whatever version was agreed, and a host
-that does not know it ignores it. The one exception is a field of `limits`: a host may send
-`limits` back as it got it, and a field there that its version does not take would end its
-session, so `limits.loader_memory_ceiling` (and `unenforced.loader_memory_ceiling`) is reported
-only to a session that agrees on 6.
+`sql` on a page, `unenforced` beside the limits, `sandbox_posture` in `hello`) is sent whatever
+version was agreed, and a host that does not know it ignores it. The one exception is a field of
+`limits`: a host may send `limits` back as it got it, and a field there that its version does not
+take would end its session, so `limits.loader_memory_ceiling` (and
+`unenforced.loader_memory_ceiling`) is reported only to a session that agrees on 6.
+
+**The sandbox.** `sandbox` is prose for a person, and its wording may change between releases.
+A host that decides on it reads `sandbox_posture`, how Landlock confines the session's engine,
+measured as it was confined:
+
+```json
+"sandbox_posture": {"posture": "full", "landlock_abi": 4, "filesystem": true, "network": true, "reason": null}
+```
+
+- `posture` — one of four words: `full`, every right of the ruleset enforced; `partial`, some not
+  (in practice a kernel before Linux 6.7, Landlock ABI 4, which has no TCP rules); `none`, nothing
+  enforced; `unavailable`, no Landlock to apply (off Linux, or where the kernel refused it).
+  Anything but `full` and `partial` serves only with `--allow-unsandboxed`.
+- `landlock_abi` — the kernel's Landlock ABI, 0 where it has none.
+- `filesystem` — whether the engine is kept to its own files: true under `full` and `partial`.
+- `network` — whether it is kept off TCP too: true under `full` at ABI 4 or later. Under `partial` a
+  compromised engine, file loader or ClickHouse or HTTP loader may connect anywhere; its files
+  are confined all the same, and DuckDB's own network access is off (REQ-2).
+- `reason` — why `network` or `filesystem` is false, as prose; `null` where both are true.
+
+A host that relies on the network boundary need not check: the operator starts it with
+`--require-full-sandbox`, and a session whose engine is not `full` with `network` true does not
+start, before any table is loaded, whatever `--allow-unsandboxed` says. `--require-memory-ceilings`
+does the same for the engine's and the loaders' memory ceilings: where they are not enforced (off
+Linux, **Memory** below), the session does not start. Either way the reason goes to stderr and
+there is no `hello` to answer. Neither is a protocol field, so neither needs a version.
 
 **The limits are the operator's, and a host may lower them** (version 3). The operator sets the
 attach and budget limits for every session of `benchy-mcp host`, raised or lowered from the
