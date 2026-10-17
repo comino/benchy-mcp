@@ -19,7 +19,10 @@
 //! one implementation, so a file and a stream cannot drift apart. Each was chosen by measurement
 //! on the 840,960-row eval CSV: `timezone('UTC', ts)` cost about 0.2 s of CPU, a third of the
 //! whole load, where `make_timestamptz(epoch_us(ts))` — the same instant, without ICU's calendar
-//! — cost 0.01 s.
+//! — cost 0.01 s. That one gives NULL for `infinity` and `-infinity`, so ICU's cast is kept as
+//! the fallback for the rows it returns nothing for: 47 M instructions where it cost 29 M, where
+//! `timezone` costs 1,269 M (docs/PERFORMANCE.md, "Infinite timestamps kept on load";
+//! REQ-15 `an_infinite_timestamp_is_kept_from_every_source`).
 
 /// The zone a zone-less timestamp is read in when its source names none.
 pub const UTC: &str = "UTC";
@@ -57,14 +60,19 @@ pub fn convert(ident: &str, name: &str, from: &str, to: &str, zone: &str) -> Opt
     let instant = |naive: &str| {
         if zone == UTC {
             // The same instant as `timezone('UTC', …)`, without the calendar: see the module.
-            format!("make_timestamptz(epoch_us({naive}))")
+            // `epoch_us` of `infinity` or `-infinity` is NULL, which made either a null; ICU's
+            // cast keeps them, and is paid only for the rows `epoch_us` gives nothing for.
+            format!("coalesce(make_timestamptz(epoch_us({naive})), CAST({naive} AS TIMESTAMPTZ))")
         } else {
             format!("timezone({}, {naive})", literal(zone))
         }
     };
     Some(match (from, to) {
+        // `epoch_ns` of an infinity is the sentinel itself, `i64::MAX` nanoseconds, whose last
+        // digits are not zero: it was refused as finer than a microsecond.
         ("TIMESTAMP_NS", "TIMESTAMP WITH TIME ZONE") => format!(
-            "CASE WHEN epoch_ns({ident}) % 1000 <> 0 THEN error({}) ELSE {} END",
+            "CASE WHEN isfinite({ident}) AND epoch_ns({ident}) % 1000 <> 0 THEN error({}) \
+             ELSE {} END",
             literal(&sub_microsecond(name)),
             instant(&format!("CAST({ident} AS TIMESTAMP)"))
         ),
