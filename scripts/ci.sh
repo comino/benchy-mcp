@@ -61,4 +61,11 @@ python3 eval/test_eval.py
 step "what this machine enforces"
 ./target/release/benchy-mcp doctor
 
+step "advisories, licences and sources of Cargo.lock"
+if command -v cargo-deny >/dev/null; then
+  cargo deny --locked check
+else
+  echo "cargo deny: skipped, cargo-deny is not installed (ci.yml runs it)"
+fi
+
 printf '\nci.sh: everything passed\n'

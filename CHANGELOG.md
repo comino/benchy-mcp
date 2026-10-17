@@ -15,6 +15,10 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 - The Rust compiler is pinned to 1.98.1 in `rust-toolchain.toml`, used by local builds, CI, the
   release and the Dockerfile alike, with `rust-version` in Cargo.toml; `scripts/check_toolchain.py`
   keeps them in step.
+- SECURITY.md (private vulnerability reporting), issue and pull request templates, Dependabot for
+  crates and actions, and `cargo deny check` in CI. The macOS CI job also runs on pull requests.
+  `packaging/container-smoke.sh` stages its fixtures under `$HOME` on macOS, where Colima does not
+  share `/var/folders`.
 
 ## [0.1.0] — 2026-10-16
 

@@ -1,0 +1,26 @@
+name: Feature
+description: Something benchy should do that it does not.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        benchy does one job: load time-series data into a sealed workspace as fast as it can, and
+        let an agent explore it with SQL. Some things it will not grow, by design: a load tool, or
+        any tool or protocol parameter that names a path, workspace, session, URL or database
+        (REQUIREMENTS.md, REQ-1).
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you, your host or your agent is trying to do, and where benchy gets in the way.
+    validations: { required: true }
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like instead
+  - type: textarea
+    id: measured
+    attributes:
+      label: Numbers, if it is about speed or memory
+      description: Rows, columns, source, time and peak memory today; bench/ and docs/PERFORMANCE.md say how they are measured.

@@ -96,7 +96,9 @@ It runs what `.github/workflows/ci.yml` runs, in this order: `cargo fmt --check`
 and the checked DuckDB fetch, clippy with warnings as errors, `cargo test --release`, the
 ClickHouse tests when `BENCHY_CLICKHOUSE_BIN` is set (and fails if one of them was skipped),
 `examples/verify.py`, `examples/host.py`, `examples/host-node.mjs` (when `node` is installed),
-`eval/test_eval.py` (Linux 6.7 or later: the eval's jail is Landlock) and `doctor`. Run it before opening a pull request, and say in the pull
+`eval/test_eval.py` (Linux 6.7 or later: the eval's jail is Landlock), `doctor`, and
+`cargo deny check` (RustSec advisories, licences and sources, by `deny.toml`) when cargo-deny is
+installed; CI always runs that one. Run it before opening a pull request, and say in the pull
 request that it passed.
 
 clippy builds into its own `CARGO_TARGET_DIR`, `target/clippy`, so its check-level artifacts and
@@ -166,7 +168,9 @@ gh api repos/actions/checkout/git/tags/<sha> --jq .object        # until the typ
 
 Pick a release at least two weeks old, and read what changed. `dtolnay/rust-toolchain` has no
 release tags, so it is pinned to a commit of its `stable` branch and given the version in
-`rust-toolchain.toml` as `toolchain:`.
+`rust-toolchain.toml` as `toolchain:`. Dependabot (`.github/dependabot.yml`) opens weekly
+pull requests for the crates and the actions; each is a change like any other, verified with
+`scripts/ci.sh` before it is merged.
 
 Only the release job may sign: it alone has `id-token: write` and `attestations: write`, and it
 runs in the `release` environment after the tests pass. An owner can configure required reviewers
