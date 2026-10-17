@@ -101,6 +101,18 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 - **`doctor --probe --json`'s keys are documented**, in the README, and pinned
   (`the_doctor_json_has_the_documented_keys`). The README says that its verdict counts what the
   kernel can refuse, so below ABI 4 `enforced` comes with the network unconfined.
+- **An NDJSON or JSON file holding `infinity` in a timestamp or date column is refused**
+  (`an_ndjson_infinity_is_refused`). DuckDB's JSON reader reads `infinity` and `-infinity` there
+  as 1900-01-01 00:00:00, and the file loaded with that time. The refusal names the file and the
+  column and says what to do: null or a real timestamp, the column's type declared in
+  `[[source.schema]]` (which keeps the infinity), or CSV or Parquet. A genuine 1900-01-01 still
+  loads. The check costs about 1.5 ms of CPU for a file read the sniffed way, whatever its size,
+  and nothing for one whose timestamps are read as text (docs/PERFORMANCE.md).
+- **`doctor --probe` says "partial" below Landlock ABI 4** (`doctor_without_tcp_rules_says_partial`).
+  Where every check that counts held but the kernel has no TCP rules, the verdict is `partial`
+  (PARTIAL in prose), with the same `reason` as `hello`'s `sandbox_posture`, rather than
+  `enforced` and VERIFIED. The exit status stays 0, since benchy serves there without a flag;
+  only `not_enforced` is non-zero.
 
 ## [0.1.0] — 2026-10-16
 

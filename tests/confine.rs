@@ -345,6 +345,16 @@ fn kernel_landlock_abi() -> u32 {
     u32::try_from(v).unwrap_or(0)
 }
 
+/// The doctor's verdict, in prose and JSON, where everything Landlock can refuse here is refused:
+/// partial below ABI 4, which has no TCP rules (`doctor_without_tcp_rules_says_partial`).
+fn confined_verdict() -> (&'static str, &'static str) {
+    if kernel_landlock_abi() >= 4 {
+        ("VERIFIED", "enforced")
+    } else {
+        ("PARTIAL", "partial")
+    }
+}
+
 #[test]
 fn doctor_probes_the_restriction_the_server_applies() {
     // The probe used to apply a stricter deny-everything ruleset than the engine does, so it
@@ -400,7 +410,7 @@ fn doctor_probes_the_restriction_the_server_applies() {
         &truncate("truncate its input", "no"),
         &truncate("truncate anything else", "no"),
         tcp,
-        "VERIFIED",
+        confined_verdict().0,
     ] {
         assert!(loader.contains(line), "loader: missing `{line}`:\n{text}");
     }
@@ -432,8 +442,8 @@ fn doctor_says_in_json_what_each_mechanism_enforces() {
     let v: serde_json::Value =
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON alone ({e}):\n{text}"));
     assert!(out.status.success(), "{text}");
-    assert_eq!(v["verdict"], "enforced", "{v}");
-    assert!(v["reason"].is_null(), "{v}");
+    assert_eq!(v["verdict"], confined_verdict().1, "{v}");
+    assert_eq!(v["reason"].is_null(), kernel_landlock_abi() >= 4, "{v}");
     assert!(
         v["engine"]
             .as_str()
@@ -621,7 +631,7 @@ fn a_network_loader_reaches_only_its_source_and_its_staging() {
         tcp("connect to its source's port", "yes"),
         tcp("connect to another port", "no"),
         tcp("listen on a port", "no"),
-        "VERIFIED".to_string(),
+        confined_verdict().0.to_string(),
     ] {
         assert!(
             net.contains(&line),

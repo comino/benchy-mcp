@@ -305,7 +305,8 @@ fn load_file_with(
 /// [`stage_and_write`], an NDJSON file's or body's timestamps read as text where
 /// [`text_timestamps`] can (R3-1), and the sniffed way where it cannot or where the text read
 /// fails: that read's table, or its refusal, in its words. Neither way leaves a table behind.
-/// A file of fewer than [`TEXT_STAMPS_FROM`] `bytes` is read the sniffed way.
+/// A file of fewer than [`TEXT_STAMPS_FROM`] `bytes` is read the sniffed way, and a JSON file
+/// read the sniffed way is refused where it held an infinity ([`no_infinity_read_as_1900`]).
 fn write_stamps_as_text(
     conn: &duckdb::Connection,
     name: &str,
@@ -315,21 +316,126 @@ fn write_stamps_as_text(
     bytes: u64,
     head: Option<&Path>,
 ) -> Result<Written, Staged> {
+    let sniffed = || {
+        stage_and_write(conn, name, reader, zone, hold, head).and_then(|w| {
+            crate::trace::span("file.infinity", || {
+                no_infinity_read_as_1900(conn, name, reader, zone, w)
+            })
+        })
+    };
     let text = (bytes >= TEXT_STAMPS_FROM)
         .then(|| text_timestamps(conn, reader))
         .flatten();
     let Some(text) = text else {
-        return stage_and_write(conn, name, reader, zone, hold, head);
+        return sniffed();
     };
     #[cfg(test)]
     TEXT_STAMPS.with(|u| u.set((u.get().0 + 1, u.get().1)));
+    // Read as text, an infinity is never taken (it is under 19 bytes, and not whole
+    // microseconds), so a table read so holds none read as 1900.
     stage_and_write(conn, name, &text, zone, hold, head).or_else(|_| {
         #[cfg(test)]
         TEXT_STAMPS.with(|u| u.set((u.get().0, u.get().1 + 1)));
-        crate::trace::span("file.reread", || {
-            stage_and_write(conn, name, reader, zone, hold, head)
-        })
+        crate::trace::span("file.reread", sniffed)
     })
+}
+
+/// REQ-15 `an_ndjson_infinity_is_refused`: `written`, unless the JSON file `reader` read the
+/// sniffed way held `infinity` or `-infinity` in a column it typed as a timestamp or a date,
+/// which then is dropped and refused, naming the column.
+///
+/// DuckDB 1.5.5's JSON reader parses such a column with the `strptime` format its sniffer chose,
+/// which takes `infinity` and `-infinity` — any case, padded, escaped — and `epoch` as special
+/// values, and the reader turns each into 1900-01-01 00:00:00, a time that is in no row: a CSV
+/// keeps an infinity, as does a JSON column read with its type named (`columns`, a declared
+/// source). A JSON file whose column holds 1900-01-01 is rare, so the check is in two steps:
+/// whether the table holds that time, which row groups' statistics answer without reading a
+/// timestamp of another century; and, only where it does, whether the file's text says
+/// `infinity` there, in a second read of the file, so a genuine 1900-01-01 loads. `epoch` is
+/// left as it was read (`a_json_files_timestamps_read_as_text_load_as_the_sniffer_reads_them`).
+fn no_infinity_read_as_1900(
+    conn: &duckdb::Connection,
+    name: &str,
+    reader: &str,
+    zone: &str,
+    written: Written,
+) -> Result<Written, Staged> {
+    // A declared read names its `columns`, and keeps an infinity.
+    let Some(args) = reader.strip_prefix("read_json_auto(") else {
+        return Ok(written);
+    };
+    if args.contains(", columns = {") {
+        return Ok(written);
+    }
+    const NDJSON: &str = ", format = 'newline_delimited')";
+    let objects = match args.strip_suffix(NDJSON) {
+        Some(file) => format!("read_json_objects({file}{NDJSON}"),
+        None => match args.strip_suffix(')') {
+            Some(file) => format!("read_json_objects({file}, format = 'auto')"),
+            None => return Ok(written),
+        },
+    };
+    let table = quote(name);
+    let ask = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, bool>(0));
+    for (column, ty) in &written.1 {
+        if !ty.contains("TIMESTAMP") && !ty.contains("DATE") {
+            continue;
+        }
+        let c = quote(column);
+        // The time, as the table holds it: a zone-less timestamp is converted on the write.
+        let at_1900 = match ty.as_str() {
+            "DATE" => format!("{c} = DATE '1900-01-01'"),
+            // A constant, folded before the filter reaches the scan, which then skips every row
+            // group whose statistics leave 1900 out.
+            "TIMESTAMP" => {
+                let instant = crate::canonical::convert(
+                    "TIMESTAMP '1900-01-01'",
+                    column,
+                    "TIMESTAMP",
+                    &crate::canonical::held("TIMESTAMP"),
+                    zone,
+                )
+                .expect("a zone-less timestamp is converted");
+                format!("{c} = {instant}")
+            }
+            _ => format!("contains(CAST({c} AS VARCHAR), '1900-01-01')"),
+        };
+        if !ask(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {table} WHERE {at_1900})"
+        ))? {
+            continue;
+        }
+        let pointer = literal(&format!(
+            "/{}",
+            column.replace('~', "~0").replace('/', "~1")
+        ));
+        let said = if ty.contains('[') || ty.contains('(') {
+            format!(
+                "regexp_matches(CAST(json_extract(json, {pointer}) AS VARCHAR), \
+                 '(?i)\"\\s*-?infinity\\s*\"')"
+            )
+        } else {
+            format!(
+                "lower(trim(json_extract_string(json, {pointer}))) IN ('infinity', '-infinity')"
+            )
+        };
+        if !ask(&format!(
+            "SELECT EXISTS (SELECT 1 FROM {objects} WHERE {said})"
+        ))? {
+            continue;
+        }
+        conn.execute_batch(&format!("DROP TABLE {table}"))?;
+        return Err(Staged::Refused(crate::exec::Fault::host(
+            "E_SCHEMA",
+            format!(
+                "column `{column}` holds `infinity` or `-infinity`, which DuckDB's JSON reader \
+                 reads as 1900-01-01 00:00:00, not as itself; refused rather than loaded as that \
+                 time. Write it as null or as a real timestamp, declare the column's type in \
+                 `[[source.schema]]`, which keeps it, or use CSV or Parquet"
+            ),
+        )));
+    }
+    Ok(written)
 }
 
 /// The smallest NDJSON file or body whose timestamps are read as text. The `DESCRIBE` that
@@ -3500,6 +3606,9 @@ mod tests {
             Loads(&'static str),
             /// The text refused, and read the sniffed way: its table, or its refusal.
             Sniffed,
+            /// Read the sniffed way, which takes it as 1900-01-01, and refused
+            /// (`an_ndjson_infinity_is_refused`).
+            Refused,
         }
         let iso = |i: usize| format!("2026-01-01T{:02}:{:02}:00.250000Z", (i / 60) % 24, i % 60);
         // (what, each row's `ts`, the odd value at the end, how the file is read)
@@ -3585,11 +3694,12 @@ mod tests {
             ),
             // The sniffed read takes each of these, and not as the cast does.
             ("epoch", Box::new(iso), Some("\"epoch\""), Sniffed),
+            // As 1900-01-01, which is refused.
             (
                 "infinity, padded",
                 Box::new(iso),
                 Some("\"   infinity          \""),
-                Sniffed,
+                Refused,
             ),
             (
                 "a two-digit year",
@@ -3645,8 +3755,14 @@ mod tests {
                     let used = TEXT_STAMPS.with(|u| u.get());
                     let case = format!("{what}, odd row {at}");
                     assert_eq!(used.0, 1, "{case}: the timestamps were not read as text");
-                    assert_eq!(used.1 == 1, *read == Sniffed, "{case}: {used:?}");
+                    let reread = matches!(read, Sniffed | Refused);
+                    assert_eq!(used.1 == 1, reread, "{case}: {used:?}");
                     let conn = bench.connection();
+                    if *read == Refused {
+                        assert!(sniffed, "{case}: the sniffed read refused it");
+                        assert!(loaded.is_err(), "{case}: {loaded:?}");
+                        continue;
+                    }
                     if let Loads(instant) = read {
                         assert!(!sniffed, "{case}: the sniffed read took it");
                         assert!(loaded.is_ok(), "{case}: {loaded:?}");
@@ -3681,6 +3797,199 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn an_ndjson_infinity_is_refused() {
+        // DuckDB 1.5.5's JSON reader reads `infinity` and `-infinity` in a column it sniffed as
+        // a timestamp or a date, any case, padded or escaped, as 1900-01-01 00:00:00, where a CSV
+        // keeps them (`an_infinite_timestamp_is_kept_from_every_source`). Such a file loaded
+        // with that time, in a list too. It is refused, naming the file and the column; a
+        // genuine 1900-01-01 loads, and a column declared `timestamp` keeps the infinity.
+        let iso = |i: usize| format!("\"2026-01-01T00:{:02}:{:02}Z\"", (i / 60) % 60, i % 60);
+        // `rows` rows of `row(i)`, then `last`.
+        let ndjson = |rows: usize, row: &dyn Fn(usize) -> String, last: &str| {
+            let mut b: String = (0..rows).map(|i| format!("{}\n", row(i))).collect();
+            b.push_str(last);
+            b.push('\n');
+            b
+        };
+        let ts = |i: usize| format!("{{\"i\":{i},\"ts\":{},\"note\":\"n\"}}", iso(i));
+        let past_sample = 25_000;
+        // (what, file, body, the column refused, or `None` where it loads)
+        let cases: Vec<(&str, &str, String, Option<&str>)> = vec![
+            (
+                "infinity",
+                "t.ndjson",
+                ndjson(10, &ts, "{\"i\":-1,\"ts\":\"infinity\",\"note\":\"n\"}"),
+                Some("ts"),
+            ),
+            (
+                "-infinity",
+                "t.ndjson",
+                ndjson(10, &ts, "{\"i\":-1,\"ts\":\"-infinity\",\"note\":\"n\"}"),
+                Some("ts"),
+            ),
+            (
+                "Infinity past the sample",
+                "t.ndjson",
+                ndjson(
+                    past_sample,
+                    &ts,
+                    "{\"i\":-1,\"ts\":\"Infinity\",\"note\":\"n\"}",
+                ),
+                Some("ts"),
+            ),
+            (
+                "escaped past the sample",
+                "t.ndjson",
+                ndjson(
+                    past_sample,
+                    &ts,
+                    "{\"i\":-1,\"ts\":\"\\u0069nfinity\",\"note\":\"n\"}",
+                ),
+                Some("ts"),
+            ),
+            (
+                "a date",
+                "t.ndjson",
+                ndjson(
+                    10,
+                    &|i| format!("{{\"i\":{i},\"d\":\"2026-01-01\"}}"),
+                    "{\"i\":-1,\"d\":\"infinity\"}",
+                ),
+                Some("d"),
+            ),
+            (
+                "in a list",
+                "t.ndjson",
+                ndjson(
+                    10,
+                    &|i| format!("{{\"i\":{i},\"l\":[{}]}}", iso(i)),
+                    "{\"i\":-1,\"l\":[\"2026-01-01T00:00:00Z\",\"infinity\"]}",
+                ),
+                Some("l"),
+            ),
+            (
+                "a .json file",
+                "t.json",
+                format!(
+                    "[{}]",
+                    (0..10)
+                        .map(ts)
+                        .chain(["{\"i\":-1,\"ts\":\"infinity\",\"note\":\"n\"}".to_string()])
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Some("ts"),
+            ),
+            (
+                "a genuine 1900-01-01",
+                "t.ndjson",
+                ndjson(
+                    10,
+                    &ts,
+                    "{\"i\":-1,\"ts\":\"1900-01-01T00:00:00Z\",\"note\":\"n\"}",
+                ),
+                None,
+            ),
+            (
+                "a genuine 1900-01-01 beside a text infinity",
+                "t.ndjson",
+                ndjson(
+                    10,
+                    &ts,
+                    "{\"i\":-1,\"ts\":\"1900-01-01T00:00:00Z\",\"note\":\"infinity\"}",
+                ),
+                None,
+            ),
+            (
+                "a genuine 1900-01-01 date",
+                "t.ndjson",
+                ndjson(
+                    10,
+                    &|i| format!("{{\"i\":{i},\"d\":\"2026-01-01\"}}"),
+                    "{\"i\":-1,\"d\":\"1900-01-01\"}",
+                ),
+                None,
+            ),
+        ];
+        let zone = "Europe/Copenhagen";
+        for (what, file, body, refused) in &cases {
+            let mut tb = TestBench::new("ndjson-infinity");
+            let path = tb.1.join(file);
+            std::fs::write(&path, body).unwrap();
+            let bench = tb.0.as_mut().unwrap();
+            let loaded = load_file_in(bench, "t", &path, zone);
+            let Some(column) = refused else {
+                assert!(loaded.is_ok(), "{what}: {loaded:?}");
+                let conn = bench.connection();
+                let at = if what.ends_with("date") {
+                    "d = DATE '1900-01-01'"
+                } else {
+                    "ts = timezone('Europe/Copenhagen', TIMESTAMP '1900-01-01')"
+                };
+                let kept: bool = conn
+                    .query_row(&format!("SELECT {at} FROM t WHERE i = -1"), [], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert!(kept, "{what}");
+                continue;
+            };
+            let e = loaded.expect_err(what).to_string();
+            for said in [
+                &path.display().to_string(),
+                &format!("column `{column}`"),
+                "infinity",
+                "1900-01-01",
+                "null",
+                "[[source.schema]]",
+            ] {
+                assert!(e.contains(said), "{what}: `{said}` not in: {e}");
+            }
+            let conn = bench.connection();
+            assert!(columns_of(conn, "t").unwrap().is_empty(), "{what}: a table");
+        }
+
+        // An HTTP body read as its file is: refused the same.
+        let tb = TestBench::new("ndjson-infinity-body");
+        let path = tb.1.join("http-body.ndjson");
+        let body = ndjson(10, &ts, "{\"i\":-1,\"ts\":\"infinity\",\"note\":\"n\"}");
+        std::fs::write(&path, &body).unwrap();
+        let none = crate::exec::Narrowing::default();
+        let hold = Hold {
+            declared: &[],
+            narrowing: &none,
+            max_rows: u64::MAX,
+        };
+        let reader = reader_for(&path).unwrap();
+        let bytes = body.len() as u64;
+        let f = load_read(tb.bench(), "t", &reader, "UTC", &hold, "test", bytes, None)
+            .map(|_| ())
+            .expect_err("an HTTP body's infinity");
+        assert!(f.detail.contains("column `ts`"), "{}", f.detail);
+
+        // Declared `timestamp`, the column is read as one, and keeps it.
+        let mut tb = TestBench::new("ndjson-infinity-declared");
+        let path = tb.1.join("t.ndjson");
+        std::fs::write(&path, &body).unwrap();
+        let declared = [("i", "int64"), ("ts", "timestamp")].map(|(n, t)| crate::exec::FieldDecl {
+            name: n.into(),
+            ty: t.into(),
+            nullable: true,
+        });
+        let bench = tb.0.as_mut().unwrap();
+        load_file_declared(bench, "t", &path, zone, &declared, None).unwrap();
+        let infinite: bool = bench
+            .connection()
+            .query_row(
+                "SELECT ts = 'infinity'::TIMESTAMPTZ FROM t WHERE i = -1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(infinite);
     }
 
     #[test]

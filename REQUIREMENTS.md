@@ -181,7 +181,7 @@ own network access is off (REQ-2), and says so: `hello` reports the posture as `
   other name, its write-ahead log merged, never a link to one elsewhere.
 - `doctor_says_in_json_what_each_mechanism_enforces` — `benchy-mcp doctor --probe --json` prints
   one JSON object and nothing else, for a host to check at container start: an overall `verdict`
-  (`enforced` or `not_enforced`), the exit status agreeing with it, the Landlock ABI, and each
+  (`enforced`, `partial` or `not_enforced`), the exit status agreeing with it, the Landlock ABI, and each
   mechanism — the engine, a file loader, a network loader — with its posture, whether it is
   enforced, and every check it made: what the child could do, and what it must (`null` where the
   right is not Landlock's to withhold on this kernel). Where the restriction cannot be applied it
@@ -241,6 +241,12 @@ own network access is off (REQ-2), and says so: `hello` reports the posture as `
   reported with the filesystem confined, the network not, and why; only `full` at ABI 4 or later
   reports `network` true, and only it passes `--require-full-sandbox`. Tested on the posture with
   the ABI given: no kernel before 6.7 is to be had here.
+- `doctor_without_tcp_rules_says_partial` — and `doctor --probe` says the same of that kernel:
+  where every check that counts held and the TCP checks could not, its verdict is `partial` and
+  PARTIAL in prose, with `sandbox_posture`'s reason, where it said `enforced` and VERIFIED with
+  the network unconfined. Its exit status is 0, as for `enforced`: benchy serves under it without
+  a flag, since the filesystem boundary holds, and only `not_enforced`, where it refuses to, is
+  non-zero. Tested on the verdict with the ABI given.
 - `hello_says_how_the_engine_is_confined` — `hello`'s `sandbox_posture` says how Landlock
   confines the engine in fixed words and booleans (`posture`, `landlock_abi`, `filesystem`,
   `network`, `reason`), beside the prose of `sandbox`, which a host once matched word for word:
@@ -1255,7 +1261,8 @@ memory).
   a space for the `T`, nulls, with an odd value past the sniffer's sample at a vector's first row
   and inside one. A value the cast does not take as the sniffer does — nanoseconds, seven digits,
   a date alone, `epoch`, a padded `infinity`, a two-digit year, 12-hour times, a number — has the
-  file read the sniffed way, to its table or its refusal; never a null, never a rounded time. A
+  file read the sniffed way, to its table or its refusal (an infinity's,
+  `an_ndjson_infinity_is_refused`); never a null, never a rounded time. A
   value the sniffer's formats refuse and the cast reads exactly — an offset in a vector that began
   without one — loads at that instant, where the sniffed read refused the file.
 - `an_ndjson_bodys_timestamps_read_as_text_load_as_the_sniffer_reads_them` — the same for an
@@ -1293,10 +1300,14 @@ memory).
   zone-less conversion's `epoch_us` gives NULL for either, and these sources loaded both as
   nulls. A nanosecond column was refused, because `epoch_ns` of an infinity is the sentinel itself.
   `describe`'s extents leave them out.
-- `an_ndjson_infinity_is_kept` *(planned)* — DuckDB 1.5.5's JSON reader reads `infinity` and
-  `-infinity` in a timestamp column as 1900-01-01 00:00:00, and an NDJSON file loads with
-  that time. The text cast above never takes them: they are under 19 bytes, so the file is read
-  the sniffed way, which gives the same time.
+- `an_ndjson_infinity_is_refused` — DuckDB 1.5.5's JSON reader reads `infinity` and
+  `-infinity` in a column it sniffed as a timestamp or a date (any case, padded, `\u`-escaped,
+  in a list too) as 1900-01-01 00:00:00, and an NDJSON or JSON file, or an HTTP body read as one,
+  loaded with that time. The text cast above never takes them: they are under 19 bytes, so the
+  file is read the sniffed way, which gives the same time. Such a file is now refused, naming the
+  file and the column and saying what to do: write the value as null or as a real timestamp,
+  declare the column's type in `[[source.schema]]`, which reads it as itself, or use CSV or
+  Parquet. A genuine 1900-01-01 loads, beside a text column that says `infinity` too.
 - `clickhouse_looks_the_same_as_a_file` — ClickHouse's own `ArrowStream`, LZ4 bodies and zoned
   `DateTime64` included, fetched by `clickhouse local` as a connector, against the fixture as CSV.
   It needs the ClickHouse binary, named by `BENCHY_CLICKHOUSE_BIN` as for REQ-16's tests, and
