@@ -6,6 +6,43 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+## [0.2.0] — 2026-10-17
+
+Fixes from a review of 0.1.0. Still an experimental prototype: **some of these change what a
+session says or refuses**, so read "Changed behaviour" before upgrading a pinned integration.
+
+Most important:
+
+- **An empty result could cost the agent its tables.** The note that explains an empty result
+  read whole text columns after the deadline; on a large table the engine was killed. It is now
+  bounded by what is left of the deadline (#2).
+- **`describe` no longer states false facts:** a measure taken for the series key (#3), "none
+  missing or repeated" over hidden gaps (#8), counts capped at 200,001 shown as exact (#5), and
+  past 200,000 series a cut time range and "every series" (#6).
+- **`infinity` timestamps are kept**, not loaded as nulls, and render as `infinity` (#4).
+- **The release's DuckDB library is checked** against a pinned SHA-256, and the Rust toolchain
+  is pinned (#19, #21).
+- **Below Linux 6.7 the network is not confined**, and benchy now says so: `hello` has a
+  structured `sandbox_posture`, `doctor` says `partial`, and `--require-full-sandbox` refuses to
+  start there (#25).
+
+Changed behaviour:
+
+- Files whose names start with `.` in a data directory are skipped (#7).
+- An NDJSON/JSON file with `infinity` in a timestamp or date column is refused instead of loaded
+  as 1900-01-01.
+- `CREATE TABLE … AS PIVOT` and writes that read a PIVOT now run (#1).
+- With helper macros: `query()` and `json_execute_serialized_sql` are refused, and a CTE named
+  like a helper's table is refused only beside a helper call (#9, #31).
+- `describe` text changed where it was wrong (series key, regularity, counts, large tables).
+- `doctor --probe` can now report `partial` (exit status 0).
+
+Known limits, unchanged from 0.1.0: no OS sandbox on native macOS; no Windows binary; connectors
+run with their process's rights; no independent security audit; engine and loader ceilings do not
+cap the parent server or its queued requests. Report a security problem privately: SECURITY.md.
+
+### Details
+
 - DuckDB's release library is checked against a pinned SHA-256 before it is linked or shipped.
   `packaging/duckdb_lib.py` fetches the release file for CI, the release builds and the
   Dockerfile, so libduckdb-sys never downloads it unchecked there; `package.sh` checks it again,
@@ -78,6 +115,7 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   its body, and reads it through any macro it calls once that one is replaced by a helper call,
   measured). A view the batch calls is bound on its own and does not count. The refusal names
   the call and says the name is fine elsewhere, so the model renames once.
+
 ### The sandbox's posture, for a host to read (#25)
 
 - **`hello` reports `sandbox_posture`** (`hello_says_how_the_engine_is_confined`):
@@ -99,8 +137,7 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   (`a_session_that_must_have_memory_ceilings_refuses_to_start_without_them`): start only where the
   engine's and the loaders' memory ceilings are enforced, which is Linux.
 - **`doctor --probe --json`'s keys are documented**, in the README, and pinned
-  (`the_doctor_json_has_the_documented_keys`). The README says that its verdict counts what the
-  kernel can refuse, so below ABI 4 `enforced` comes with the network unconfined.
+  (`the_doctor_json_has_the_documented_keys`).
 - **An NDJSON or JSON file holding `infinity` in a timestamp or date column is refused**
   (`an_ndjson_infinity_is_refused`). DuckDB's JSON reader reads `infinity` and `-infinity` there
   as 1900-01-01 00:00:00, and the file loaded with that time. The refusal names the file and the

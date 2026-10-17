@@ -69,9 +69,9 @@ has the rules and the measurements.
 ## Quickstart
 
 ```sh
-curl -fsSL https://github.com/comino/benchy-mcp/releases/download/v0.1.0/install.sh -o install-benchy.sh
-BENCHY_VERSION=0.1.0 sh install-benchy.sh
-claude mcp add benchy -- "$HOME/.local/bin/benchy-mcp" "$HOME/.local/lib/benchy-mcp/0.1.0/example-data"
+curl -fsSL https://github.com/comino/benchy-mcp/releases/download/v0.2.0/install.sh -o install-benchy.sh
+BENCHY_VERSION=0.2.0 sh install-benchy.sh
+claude mcp add benchy -- "$HOME/.local/bin/benchy-mcp" "$HOME/.local/lib/benchy-mcp/0.2.0/example-data"
 ```
 
 That registers benchy with Claude Code, serving the small example folder (on macOS, add
@@ -361,13 +361,13 @@ the filesystem boundary it relies on holds. A host that relies on the network bo
 
 ### Bundles
 
-Download a bundle from [Releases](https://github.com/comino/benchy-mcp/releases/tag/v0.1.0),
+Download a bundle from [Releases](https://github.com/comino/benchy-mcp/releases/tag/v0.2.0),
 or use the installer in [Quickstart](#quickstart). Linux bundles need glibc 2.35 or newer
 (Ubuntu 22.04 or newer); Alpine's musl is not supported. macOS bundles are not notarized:
 a browser download may need approval in System Settings → Privacy & Security.
 
 Each bundle carries the binary, DuckDB's library, licenses and example data. Keep them together;
-the installer unpacks to `~/.local/lib/benchy-mcp/0.1.0/` and links `~/.local/bin/benchy-mcp`.
+the installer unpacks to `~/.local/lib/benchy-mcp/0.2.0/` and links `~/.local/bin/benchy-mcp`.
 It checks the download's SHA-256. Inside, `SHA256SUMS` lists every file, and the README names
 the DuckDB release file the library came from and the SHA-256 it was checked against before the
 build. You can also verify its GitHub build attestation:
@@ -381,7 +381,7 @@ gh attestation verify benchy-mcp-linux-x86_64.tar.gz --repo comino/benchy-mcp
 
 ### Docker
 
-`ghcr.io/comino/benchy-mcp:0.1.0` supports Linux amd64 and arm64, including Docker Desktop's
+`ghcr.io/comino/benchy-mcp:0.2.0` supports Linux amd64 and arm64, including Docker Desktop's
 Linux VM on macOS and Windows. It speaks MCP over stdio: use `-i`, without `-t` or a published
 port. The image runs as UID/GID `65532:65532`; mounted files must be readable by that user.
 
@@ -393,7 +393,7 @@ docker run --rm --init -i --read-only --cap-drop=ALL --security-opt=no-new-privi
   --network=none --memory=2g --memory-swap=2g --pids-limit=256 \
   --tmpfs=/tmp:rw,nosuid,nodev,size=1g \
   --mount "type=bind,src=/absolute/path/to/data,dst=/data,readonly" \
-  ghcr.io/comino/benchy-mcp:0.1.0
+  ghcr.io/comino/benchy-mcp:0.2.0
 ```
 
 Configure an MCP client with `docker` as its command and these `run` arguments. For example:
@@ -409,7 +409,7 @@ Configure an MCP client with `docker` as its command and these `run` arguments. 
         "--memory=2g", "--memory-swap=2g", "--pids-limit=256",
         "--tmpfs=/tmp:rw,nosuid,nodev,size=1g",
         "--mount", "type=bind,src=/absolute/path/to/data,dst=/data,readonly",
-        "ghcr.io/comino/benchy-mcp:0.1.0"
+        "ghcr.io/comino/benchy-mcp:0.2.0"
       ]
     }
   }
@@ -428,11 +428,11 @@ mounted files over stdio; descriptor passing and inherited stream-channel descri
 cross `docker run`.
 
 The container uses its host's Linux kernel and Docker's default seccomp profile. Check the actual
-runtime with `docker run --rm ghcr.io/comino/benchy-mcp:0.1.0 doctor --probe --json`.
+runtime with `docker run --rm ghcr.io/comino/benchy-mcp:0.2.0 doctor --probe --json`.
 If Landlock is unavailable, serving refuses to start; `--allow-unsandboxed` is an explicit opt-out
 with the limitations described below. The image does not enable it automatically.
 
-To build the current checkout: `docker build -t benchy-mcp:local .`. Pin `0.1.0` or an image
+To build the current checkout: `docker build -t benchy-mcp:local .`. Pin `0.2.0` or an image
 digest for integrations; `0.1` and `latest` move as new prototype releases are published.
 
 ### Use it with…

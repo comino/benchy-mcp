@@ -72,7 +72,7 @@ the session ends: a host that cannot open a session has nothing else it can do i
 ```
 
 ```json
-{"id": 1, "ok": true, "protocol": 5, "benchy": "0.1.0", "engine": "DuckDB v1.5.5",
+{"id": 1, "ok": true, "protocol": 5, "benchy": "0.2.0", "engine": "DuckDB v1.5.5",
  "sandbox": "fully enforced",
  "caps": {"max_rows": 200, "max_bytes": 8192, "max_cell_bytes": 256, "deadline_secs": 20},
  "limits": {"attach_rows": 10000000, "attach_bytes": 268435456, "attachments": 64,
