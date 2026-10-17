@@ -264,6 +264,25 @@ kind = "TRANSACTION"
 allowlist = "refuse"
 engine = "ok"
 
+# DuckDB runs a PIVOT into a table as a TRANSACTION, the pivot's CREATE TYPE, the statement and a
+# TRANSACTION, so a TRANSACTION before a CREATE passes the allowlist's up-front pass. One the
+# agent writes around its own CREATE is refused when the CREATE makes no pivot's type, and what
+# it made undone (`a_pivot_into_a_table_runs`). Before a CREATE that does not bind, as one that
+# reads a file does not under the lock, it is refused up front; around a SET, the SET is.
+[[case]]
+sql = "BEGIN TRANSACTION; CREATE TABLE w AS SELECT * FROM read_text('{canary}'); COMMIT"
+category = "transaction"
+kind = "TRANSACTION"
+allowlist = "refuse"
+engine = "error"
+
+[[case]]
+sql = "BEGIN TRANSACTION; CREATE TEMP TYPE \"__pivot_enum_z\" AS ENUM ('a'); SET enable_external_access = true; COMMIT"
+category = "transaction"
+kind = "SET"
+allowlist = "refuse"
+engine = "error"
+
 [[case]]
 sql = "SELECT 1; ATTACH '{canary}' AS e"
 category = "multi-statement"

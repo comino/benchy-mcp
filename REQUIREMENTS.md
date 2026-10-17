@@ -103,6 +103,14 @@ table functions are typed `SELECT`, and only the engine lock stops them.
   gets that far: under the lock DuckDB will not prepare it.
 - `a_dynamic_pivot_still_runs` — legitimate dependent SQL still runs: DuckDB splits a dynamic
   `PIVOT` into a `CREATE` plus a statement that depends on it.
+- `a_pivot_into_a_table_runs` — `CREATE TABLE … AS PIVOT`, alone or wrapped in a SELECT, and an
+  INSERT from a PIVOT run. DuckDB 1.5.5 runs each as a TRANSACTION, the pivot's `CREATE TYPE`,
+  the statement and a TRANSACTION, and the first was refused as a `TRANSACTION` the agent never
+  wrote. Neither TRANSACTION of that shape runs; one the agent writes is still refused, around
+  its own CREATE (undone), around a PIVOT (which DuckDB does not wrap), alone or left open.
+  Over a table made earlier in the same call the pivot's type does not bind up front, and the
+  shape cannot be told from `COPY FROM DATABASE`'s: refused, and the refusal says to make that
+  table in a call of its own first.
 - `each_statement_kind_is_named_as_duckdb_types_it` — a refusal names the kind it refused, and
   the corpus records each case's kind, so every kind the classifier can meet under the lock is
   pinned. `MERGE` and `UPDATE EXTENSIONS` were both refused as "UNKNOWN". So are the typings that
@@ -739,6 +747,16 @@ error that can have one.
 - `empty_results_say_what_exists` — an empty result whose filter used an unknown value says what
   the column holds.
 - `a_non_empty_result_never_carries_a_note` — and only then.
+- `the_empty_result_note_stays_inside_the_deadline` — the note ran after the watchdog had
+  stopped, a full `SELECT DISTINCT … ORDER BY` per text column the query named, and on ten
+  million rows of unique values took long enough to carry a batch past the server's hard
+  deadline: the engine was killed, the agent's tables lost, and the error blamed planning. A
+  column whose first 2,048 values already hold more than the note lists is not read further,
+  and the note gets what is left of the deadline, at most 0.5 s, past which its query is
+  interrupted and the result goes back without one. On four million rows, six such columns
+  took 8.7 s against a one-second deadline before and now take milliseconds, and the column
+  that explains the result still does; a column whose head is one value is stopped at a 300 ms
+  deadline.
 - `mentions_survives_a_name_that_starts_with_a_multibyte_letter` — the empty-result note's name
   matching stepped one byte past a match, into `Ü`: a panic in the engine, and the agent's tables
   lost with it.

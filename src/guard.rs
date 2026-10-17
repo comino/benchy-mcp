@@ -123,6 +123,17 @@ impl Classifier {
                 return Verdict::Unparseable(msg.lines().next().unwrap_or("").to_string());
             }
             let mut kinds = Vec::with_capacity(n as usize);
+            // DuckDB 1.5.5 runs a statement that keeps a dynamic PIVOT, `CREATE TABLE … AS PIVOT`
+            // or an INSERT, UPDATE, DELETE or MERGE that reads one, as a transaction of its own:
+            // a TRANSACTION, the pivot's CREATE TYPE, the statement, a TRANSACTION. So a
+            // TRANSACTION before a CREATE passes here, as does the next one; the run holds them
+            // to that shape, and runs neither (`Workspace::work`, `a_pivot_into_a_table_runs`).
+            // Those and the CREATE after the first are not the agent's, so a refusal does not
+            // count them; a second pivot's CREATE TYPE is not told apart here, only when the
+            // batch runs.
+            let mut opening: Option<usize> = None;
+            let mut open: Option<usize> = None;
+            let mut added = 0usize;
             for i in 0..n {
                 let mut prep: ffi::duckdb_prepared_statement = ptr::null_mut();
                 let ok = ffi::duckdb_prepare_extracted_statement(self.con, ex, i, &mut prep)
@@ -130,8 +141,36 @@ impl Classifier {
                 // A statement that will not bind yet is not refused here: it may depend on an
                 // object an earlier statement in the batch creates. It is classified again when
                 // it is prepared to run, where that object exists.
-                let verdict = if ok {
-                    let t = ffi::duckdb_prepared_statement_type(prep);
+                let t = if ok {
+                    Some(ffi::duckdb_prepared_statement_type(prep))
+                } else {
+                    None
+                };
+                if let Some(at) = opening.take() {
+                    // Not one that does not bind yet: `COPY FROM DATABASE` is a TRANSACTION and
+                    // two statements that do not bind under the lock, as a pivot's CREATE TYPE
+                    // over a table made earlier in the batch would be.
+                    if t != Some(ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE) {
+                        ffi::duckdb_destroy_prepare(&mut prep);
+                        ffi::duckdb_destroy_extracted(&mut ex);
+                        return Verdict::Refuse {
+                            index: at + 1,
+                            kind: "TRANSACTION",
+                        };
+                    }
+                    open = Some(at);
+                    added += 1;
+                }
+                let transaction =
+                    t == Some(ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_TRANSACTION);
+                let verdict = if transaction && open.take().is_some() {
+                    added += 1;
+                    Ok("TRANSACTION")
+                } else if transaction {
+                    opening = Some(i as usize - added);
+                    added += 1;
+                    Ok("TRANSACTION")
+                } else if let Some(t) = t {
                     if is_allowed(t) {
                         Ok(type_name(t))
                     } else {
@@ -146,13 +185,20 @@ impl Classifier {
                     Err(k) => {
                         ffi::duckdb_destroy_extracted(&mut ex);
                         return Verdict::Refuse {
-                            index: i as usize + 1,
+                            index: i as usize - added + 1,
                             kind: k,
                         };
                     }
                 }
             }
             ffi::duckdb_destroy_extracted(&mut ex);
+            // A TRANSACTION that ends the batch, or one the batch never closes, wraps nothing.
+            if let Some(at) = opening.or(open) {
+                return Verdict::Refuse {
+                    index: at + 1,
+                    kind: "TRANSACTION",
+                };
+            }
             Verdict::Allow(kinds)
         }
     }

@@ -145,6 +145,31 @@ would have to come from a second SQL parser of benchy's own. That parser would b
 escaped and quoted spellings are aimed at, and it would never see the `CREATE TYPE` DuckDB adds
 for a dynamic `PIVOT`. After execution the catalog names the object as DuckDB will resolve it.
 
+### The empty-result note
+
+An empty result whose query quotes a string gets a note saying what the text columns it names
+hold (REQ-11). It read each such column whole, `SELECT DISTINCT … ORDER BY 1 LIMIT 21`, even a
+column of unique values that can never give a note, and it ran after the watchdog, so it could
+carry a batch past the server's hard deadline
+(`the_empty_result_note_stays_inside_the_deadline`). Now each column's first 2,048 values are
+read first, and a column with more than 20 distinct among them is not read further; the rest
+runs under an interrupt at what is left of the deadline, at most 0.5 s.
+
+Measured over `benchy-mcp <dir>` through MCP, one CSV of 3,000,000 rows with eight columns of
+unique text and a three-valued `kind`, `perf stat -e instructions:u` across every process, the
+session with no call subtracted, medians of three runs, `2e5400a` against the change. The
+session's own load varied by about 15 G between runs, so the after column is read over 100
+calls and is good to about 0.1 G a call:
+
+| Each call | Before | After |
+|---|---|---|
+| `SELECT c1, …, c8, kind FROM w WHERE id = -1 AND kind = 'K0'` (a note on `kind`) | 11 G | 0.1 G |
+
+At `--deadline 3 --hard-grace 1` the same query with `c1 <> 'zz'` in place of the filter on
+`kind` killed the engine at 4.2 s before; it now answers in 20 ms, and after 2.25 s of other
+work in the same batch the batch finishes and the agent's tables stay. A query that quotes no
+string, or names no text column, pays nothing: the note returns before it reads.
+
 ## Helpers
 
 REQ-18's helpers. Measured with `perf stat -e instructions:u` over a whole `benchy-mcp

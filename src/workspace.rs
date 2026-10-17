@@ -244,6 +244,41 @@ fn enum_refused(what: &str) -> String {
     )
 }
 
+/// Where a batch is in the transaction DuckDB 1.5.5 wraps around a statement that keeps a dynamic
+/// PIVOT: a TRANSACTION, the pivot's CREATE TYPE for each pivot, the statement, a TRANSACTION.
+/// Measured, it wraps every statement that is not a SELECT: `CREATE TABLE … AS PIVOT`, and an
+/// INSERT, UPDATE, DELETE or MERGE that reads one. Each holds the agent's statement number the
+/// first TRANSACTION stands at (`a_pivot_into_a_table_runs`).
+///
+/// The C API gives a statement's type and not its text, so a TRANSACTION of DuckDB's is told
+/// from the agent's by what follows it, which the agent cannot forge: a type only a dynamic
+/// PIVOT makes (`pivots_type`), then a statement that is not a SELECT. Neither TRANSACTION runs.
+/// A batch that only looks like one is refused as the agent's TRANSACTION where the shape breaks;
+/// what ran inside it before then was a pivot's CREATE TYPE or an allowed statement, each as it
+/// would run alone, and a CREATE of the agent's own after its TRANSACTION is undone. A
+/// TRANSACTION that ends the batch, or is never closed, is refused up front (`crate::guard`).
+#[derive(Debug, Clone, Copy)]
+enum Wrap {
+    None,
+    /// A TRANSACTION, not run: a CREATE must follow, and make a pivot's type.
+    Opened(u64),
+    /// A pivot's type made; another may follow, then the statement that is not a SELECT.
+    Typed(u64),
+    /// The statement ran; a TRANSACTION must follow, which closes it.
+    Ran(u64),
+}
+
+impl Wrap {
+    /// The agent's own TRANSACTION, at statement `at` counted from 0, refused.
+    fn refused(at: u64) -> WorkError {
+        WorkError::Denied {
+            index: at as usize + 1,
+            kind: "TRANSACTION",
+            allowed: ALLOWED,
+        }
+    }
+}
+
 /// What a CREATE or ALTER left in the agent's catalogs (`Workspace::inspect`).
 #[derive(Debug, PartialEq, Eq)]
 enum Made {
@@ -472,7 +507,19 @@ impl std::fmt::Display for WorkError {
                 write!(
                 f, "statement {index} is {kind}, which is not allowed here; nothing after it ran. \
                     Allowed: {allowed}. The data is already loaded as tables — file and network \
-                    functions are unavailable.")
+                    functions are unavailable.")?;
+                // DuckDB's own transaction around a PIVOT into a table, over a table the same
+                // batch makes, is refused up front (`crate::guard`, `a_pivot_into_a_table_runs`).
+                if *kind == "TRANSACTION" {
+                    write!(
+                        f,
+                        " Transactions are not available. If statement {index} keeps a \
+                        PIVOT (CREATE TABLE … AS PIVOT, or an INSERT, UPDATE, DELETE or MERGE \
+                        that reads one) over a table made earlier in the same call, make that \
+                        table in a call of its own first."
+                    )?;
+                }
+                Ok(())
             }
             WorkError::Parse(m, hint) => {
                 write!(f, "could not parse: {m}")?;
@@ -640,6 +687,19 @@ pub fn fresh_name(prefix: &str) -> String {
 
 /// How many results are kept for paging.
 pub const RETAINED_RESULTS: usize = 32;
+
+/// The most an empty result's note may take (REQ-11), and never more than the batch has left of
+/// its deadline (`Workspace::why_empty`). Past it the note's query is interrupted and the result
+/// goes back without a note: a note is a convenience, and the batch's deadline is not.
+const NOTE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The most text values an empty result's note lists for one column (REQ-11).
+const NOTE_VALUES: usize = 20;
+
+/// Rows read from the head of a column before its full distinct values are: more than
+/// [`NOTE_VALUES`] distinct among them proves the column cannot give a note, after one vector
+/// instead of the whole table (`Workspace::distinct`).
+const NOTE_HEAD_ROWS: usize = 2048;
 
 /// REQ-14: the profile a loader left in table `name`'s comment in catalog `db`, if it left one
 /// this version can read. Read once, at attach: `describe` only renders it.
@@ -1553,6 +1613,9 @@ impl Workspace {
         let mut added = 0u64;
         // Whether a dynamic PIVOT made a type, which goes when the batch does.
         let mut pivoted = false;
+        // Where the batch is in a transaction DuckDB wrapped around a statement that keeps a
+        // dynamic PIVOT (`Wrap`), and the agent's statement it wraps.
+        let mut wrap = Wrap::None;
         let mut watchdog = Some(watchdog);
         let mut failure = None;
         unsafe {
@@ -1589,6 +1652,44 @@ impl Workspace {
                 // statement that depends on an earlier one in this batch; now it is bound, so it
                 // can be classified — and a refused kind is refused here, before it executes.
                 let kind = ffi::duckdb_prepared_statement_type(prep);
+                // DuckDB's own transaction around a statement that keeps a dynamic PIVOT
+                // (`Wrap`): neither of its TRANSACTIONs runs, and what it wraps runs as every
+                // statement does, each CREATE in a transaction of benchy's. Any other TRANSACTION
+                // is the agent's, and refused where it stands.
+                let transaction =
+                    kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_TRANSACTION;
+                let refused = match wrap {
+                    Wrap::None | Wrap::Ran(_) if transaction => {
+                        wrap = match wrap {
+                            Wrap::None => Wrap::Opened(mine),
+                            _ => Wrap::None,
+                        };
+                        ffi::duckdb_destroy_prepare(&mut prep);
+                        added += 1;
+                        continue;
+                    }
+                    Wrap::Opened(at)
+                        if kind != ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE =>
+                    {
+                        Some(at)
+                    }
+                    Wrap::Typed(at)
+                        if transaction
+                            || kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT =>
+                    {
+                        Some(at)
+                    }
+                    Wrap::Ran(at) => Some(at),
+                    _ => None,
+                };
+                if let Some(at) = refused {
+                    ffi::duckdb_destroy_prepare(&mut prep);
+                    if let Some(w) = watchdog.take() {
+                        finish(&done, w);
+                    }
+                    failure = Some(Wrap::refused(at));
+                    break;
+                }
                 if !crate::guard::is_allowed(kind) {
                     ffi::duckdb_destroy_prepare(&mut prep);
                     if let Some(w) = watchdog.take() {
@@ -1660,17 +1761,32 @@ impl Workspace {
                     // by_its_own_deadline`). The statement itself has finished; what is held up
                     // is benchy's own bounded work, a listing or two. A deadline that passes
                     // meanwhile stops the next statement, before it starts.
+                    let opened = matches!(wrap, Wrap::Opened(_));
                     let made = {
                         let _hold = done.0.lock().unwrap_or_else(|e| e.into_inner());
                         self.inspect(alter, sql).and_then(|made| match made {
                             Made::Taken(why) => Ok(Err(why)),
+                            // Not DuckDB's: undone below.
+                            made if opened && made != Made::PivotType => Ok(Ok(made)),
                             made => self.settle(true).map(|()| Ok(made)),
                         })
                     };
                     match made {
                         Ok(Ok(made)) => {
+                            if let (Wrap::Opened(at), false) = (wrap, made == Made::PivotType) {
+                                // A TRANSACTION of the agent's own, before a CREATE of its own.
+                                if let Some(w) = watchdog.take() {
+                                    finish(&done, w);
+                                }
+                                let _ = self.settle(false);
+                                failure = Some(Wrap::refused(at));
+                                break;
+                            }
                             if made == Made::PivotType {
                                 pivoted = true;
+                                if let Wrap::Opened(at) = wrap {
+                                    wrap = Wrap::Typed(at);
+                                }
                                 if result.rows.is_empty() {
                                     added += 1;
                                     continue;
@@ -1697,6 +1813,9 @@ impl Workspace {
                         }
                     }
                 }
+                if let Wrap::Typed(at) = wrap {
+                    wrap = Wrap::Ran(at);
+                }
                 self.next_result_id += 1;
                 queries.push(kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT);
                 answers.push(mine as usize);
@@ -1712,11 +1831,15 @@ impl Workspace {
         }
 
         // REQ-11, and deliberately after the deadline is settled: this costs extra queries, so
-        // it must never be what pushes a batch past its budget.
+        // it must never be what pushes a batch past its budget. It gets what is left of the
+        // deadline and no more than `NOTE_BUDGET` of it: the server's hard deadline counts from
+        // the request, so time spent here past the batch's own deadline is time the engine is
+        // killed in (`the_empty_result_note_stays_inside_the_deadline`).
         let unexplained =
             |r: &QueryResult, query: bool| query && r.rows.is_empty() && !r.columns.is_empty();
         if out.iter().zip(&queries).any(|(r, q)| unexplained(r, *q)) {
-            if let Some(note) = self.why_empty(sql) {
+            let left = cap.deadline.saturating_sub(started.elapsed());
+            if let Some(note) = self.why_empty(sql, left.min(NOTE_BUDGET)) {
                 for (r, q) in out.iter_mut().zip(&queries) {
                     if unexplained(r, *q) {
                         r.note = Some(note.clone());
@@ -2395,14 +2518,19 @@ impl Workspace {
     /// - only when the column is small enough to enumerate honestly;
     /// - and only when one of those literals is **not** among the values. A correct filter over
     ///   genuinely absent data stays quiet.
-    fn why_empty(&self, sql: &str) -> Option<String> {
+    ///
+    /// And only within `budget`: past it the query reading a column is interrupted and no other
+    /// column is read (`the_empty_result_note_stays_inside_the_deadline`).
+    fn why_empty(&self, sql: &str, budget: std::time::Duration) -> Option<String> {
         let wanted = crate::hint::literals(sql);
-        if wanted.is_empty() {
+        if wanted.is_empty() || budget.is_zero() {
             return None;
         }
-        const MAX_VALUES: usize = 20;
+        let until = std::time::Instant::now() + budget;
+        // Set at the first column read, so a note that reads nothing starts no thread.
+        let mut alarm = None;
         let mut notes = Vec::new();
-        for t in &self.loaded {
+        'tables: for t in &self.loaded {
             if !crate::hint::mentions(sql, &t.name) {
                 continue;
             }
@@ -2413,10 +2541,14 @@ impl Workspace {
                 if !ty.contains("VARCHAR") || !crate::hint::mentions(sql, col) {
                     continue;
                 }
-                let Some(values) = self.distinct(&t.name, col, MAX_VALUES + 1) else {
+                if std::time::Instant::now() >= until {
+                    break 'tables;
+                }
+                alarm.get_or_insert_with(|| Alarm::set(self.ingest.interrupt_handle(), until));
+                let Some(values) = self.distinct(&t.name, col, NOTE_VALUES + 1) else {
                     continue;
                 };
-                if values.len() > MAX_VALUES {
+                if values.len() > NOTE_VALUES {
                     continue; // too many to enumerate without becoming the noise we avoid
                 }
                 // Fire only when *nothing* the query quoted is in this column. Comparison is
@@ -2433,6 +2565,7 @@ impl Workspace {
                 }
             }
         }
+        drop(alarm);
         if notes.is_empty() {
             return None;
         }
@@ -2443,26 +2576,90 @@ impl Workspace {
         ))
     }
 
-    /// Distinct values of a loaded column, capped. `None` if it cannot be read at all.
+    /// Distinct values of a loaded column, capped at `limit`. `None` if it cannot be read at
+    /// all, or was interrupted.
+    ///
+    /// The head of the column first: a column with `limit` distinct values among its first
+    /// [`NOTE_HEAD_ROWS`] has too many for a note, and reading the rest only to sort them cost a
+    /// hash aggregate of every value in the table. A column that can give a note is still read
+    /// whole, within the note's budget.
     fn distinct(&self, table: &str, column: &str, limit: usize) -> Option<Vec<String>> {
-        let q = format!(
-            "SELECT DISTINCT \"{}\" FROM {}.main.\"{}\" WHERE \"{}\" IS NOT NULL \
-             ORDER BY 1 LIMIT {limit}",
-            column.replace('"', "\"\""),
+        let column = format!("\"{}\"", column.replace('"', "\"\""));
+        let from = format!(
+            "{}.main.\"{}\"",
             self.catalog_of(table),
-            table.replace('"', "\"\""),
-            column.replace('"', "\"\""),
+            table.replace('"', "\"\"")
         );
-        let mut st = self.ingest.prepare(&q).ok()?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
+        let read = |q: &str| -> Option<Vec<String>> {
+            let mut st = self.ingest.prepare(q).ok()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
+            rows.collect::<Result<Vec<_>, _>>().ok()
+        };
+        let head = read(&format!(
+            "SELECT DISTINCT {column} FROM (SELECT {column} FROM {from} \
+             WHERE {column} IS NOT NULL LIMIT {NOTE_HEAD_ROWS}) LIMIT {limit}"
+        ))?;
+        if head.len() >= limit {
+            return Some(head);
+        }
+        let values = read(&format!(
+            "SELECT DISTINCT {column} FROM {from} WHERE {column} IS NOT NULL \
+             ORDER BY 1 LIMIT {limit}"
+        ))?;
         // Quoted back to the agent in the note, so each is cut: a value can be any length.
-        let values = rows.collect::<Result<Vec<_>, _>>().ok()?;
         Some(
             values
                 .into_iter()
                 .map(|v| crate::result::cut(v, 64))
                 .collect(),
         )
+    }
+}
+
+/// Interrupts what runs on a connection once `until` has passed, and again every few
+/// milliseconds after, until it is dropped: DuckDB clears a pending interrupt when the next
+/// statement starts, as the batch's watchdog found. It fires under the lock the drop takes, so
+/// it never fires once the drop has returned.
+struct Alarm {
+    done: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Alarm {
+    fn set(handle: std::sync::Arc<duckdb::InterruptHandle>, until: std::time::Instant) -> Self {
+        const REFIRE: std::time::Duration = std::time::Duration::from_millis(5);
+        let done = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let flag = done.clone();
+        let thread = std::thread::spawn(move || {
+            let (lock, cv) = &*flag;
+            let mut finished = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*finished {
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    handle.interrupt();
+                }
+                let wait = if left.is_zero() { REFIRE } else { left };
+                finished = cv
+                    .wait_timeout(finished, wait)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        });
+        Self {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Alarm {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
