@@ -336,6 +336,32 @@ than ICU's. A nanosecond column's check for digits finer than a microsecond now 
 infinity (`isfinite(ts) AND …`). `epoch_ns` of `infinity` returns the sentinel itself, which had
 the column refused.
 
+## An NDJSON infinity refused: about 1.5 ms of a sniffed JSON load
+
+DuckDB 1.5.5's JSON reader reads `infinity` and `-infinity` in a column it sniffed as a timestamp
+or a date as 1900-01-01 00:00:00 (any case, padded, or `\u`-escaped), so such a file loaded with
+that time. It is now refused (REQ-15 `an_ndjson_infinity_is_refused`). A byte search of the file
+for the word would have cost a pass over it on every load and still had to allow for every case
+and escape the reader takes. The check is instead on the table written: whether a timestamp or
+date column holds 1900-01-01 00:00:00, a filter on a constant that the row groups' statistics
+answer, and, only where one does, a second read of the file (`read_json_objects`) for an
+infinity in that column's text, so that a genuine 1900-01-01 loads. A file whose timestamps were
+read as text (R3-1) is not checked: that read never takes an infinity.
+
+Measured on this machine (aarch64, shared), with the loader's `file.infinity` span:
+
+| file | read | `file.infinity` CPU |
+|---|---|---|
+| the harness's 1,000-row NDJSON (`ndjson-1k`, `http-ndjson-1k`) | sniffed | 1.7–1.8 ms (min of five), of the loader's 128–144 ms |
+| its 1,000,000 rows as a `.json` file | sniffed | 1.4 ms, of the read's 777 ms |
+| its 1,000,000 rows as NDJSON (`ndjson-1m`) | as text | not run |
+
+The cost does not grow with the file: the statistics skip every row group. Whole-session
+instructions (`bench/ingest.py`, five runs each, before and after) moved within their spread on
+this machine: `ndjson-1k` 498–543 M before and 530–759 M after, `http-ndjson-1k` 507–615 M and
+513–619 M, `ndjson-1m` 5,635–6,836 M and 5,697–5,836 M. A file that does hold a genuine
+1900-01-01 timestamp pays the second read, about what parsing the file once more costs.
+
 ## R6-W. Wide rows on one thread
 
 A CSV or JSON file's stage is held to 256 MiB and spills past it (R4, "Memory and disk"). A stage

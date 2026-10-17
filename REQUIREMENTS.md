@@ -1261,7 +1261,8 @@ memory).
   a space for the `T`, nulls, with an odd value past the sniffer's sample at a vector's first row
   and inside one. A value the cast does not take as the sniffer does — nanoseconds, seven digits,
   a date alone, `epoch`, a padded `infinity`, a two-digit year, 12-hour times, a number — has the
-  file read the sniffed way, to its table or its refusal; never a null, never a rounded time. A
+  file read the sniffed way, to its table or its refusal (an infinity's,
+  `an_ndjson_infinity_is_refused`); never a null, never a rounded time. A
   value the sniffer's formats refuse and the cast reads exactly — an offset in a vector that began
   without one — loads at that instant, where the sniffed read refused the file.
 - `an_ndjson_bodys_timestamps_read_as_text_load_as_the_sniffer_reads_them` — the same for an
@@ -1299,10 +1300,14 @@ memory).
   zone-less conversion's `epoch_us` gives NULL for either, and these sources loaded both as
   nulls. A nanosecond column was refused, because `epoch_ns` of an infinity is the sentinel itself.
   `describe`'s extents leave them out.
-- `an_ndjson_infinity_is_kept` *(planned)* — DuckDB 1.5.5's JSON reader reads `infinity` and
-  `-infinity` in a timestamp column as 1900-01-01 00:00:00, and an NDJSON file loads with
-  that time. The text cast above never takes them: they are under 19 bytes, so the file is read
-  the sniffed way, which gives the same time.
+- `an_ndjson_infinity_is_refused` — DuckDB 1.5.5's JSON reader reads `infinity` and
+  `-infinity` in a column it sniffed as a timestamp or a date (any case, padded, `\u`-escaped,
+  in a list too) as 1900-01-01 00:00:00, and an NDJSON or JSON file, or an HTTP body read as one,
+  loaded with that time. The text cast above never takes them: they are under 19 bytes, so the
+  file is read the sniffed way, which gives the same time. Such a file is now refused, naming the
+  file and the column and saying what to do: write the value as null or as a real timestamp,
+  declare the column's type in `[[source.schema]]`, which reads it as itself, or use CSV or
+  Parquet. A genuine 1900-01-01 loads, beside a text column that says `infinity` too.
 - `clickhouse_looks_the_same_as_a_file` — ClickHouse's own `ArrowStream`, LZ4 bodies and zoned
   `DateTime64` included, fetched by `clickhouse local` as a connector, against the fixture as CSV.
   It needs the ClickHouse binary, named by `BENCHY_CLICKHOUSE_BIN` as for REQ-16's tests, and

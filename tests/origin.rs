@@ -1058,7 +1058,8 @@ fn an_infinite_timestamp_is_kept_from_every_source() {
     // made both a null, on a column declared non-nullable too: from a Parquet file, a host's
     // Arrow stream (zoned as well, as it is staged zone-less) and a connector's. A nanosecond
     // one was refused as finer than a microsecond. A CSV kept them, and is held to it here.
-    // NDJSON is not here: DuckDB 1.5.5's own JSON reader reads `infinity` as 1900-01-01.
+    // NDJSON is not here: DuckDB 1.5.5's own JSON reader reads `infinity` as 1900-01-01, and
+    // such a file is refused (`an_ndjson_infinity_is_refused`).
     const KEPT: &str = "TIMESTAMP WITH TIME ZONE: 0 null, 1 infinity, 1 -infinity, 1 finite";
     let dir = unique("infinity");
     let mut sources = Vec::new();
