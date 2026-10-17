@@ -23,6 +23,10 @@ fn the_engine_inherits_no_environment_and_no_descriptor() {
     let dir = common::data_dir();
     let held = unique("held");
     std::fs::write(&held, "held open").unwrap();
+    // `/proc/<pid>/fd` gives the resolved path. Under a TMPDIR reached through a symlink the path
+    // as spelt never matched it: the check that the server holds the file failed, and the one
+    // that the engine does not would have passed without looking.
+    let held = std::fs::canonicalize(&held).unwrap();
     let c = std::ffi::CString::new(held.to_str().unwrap()).unwrap();
     // Without O_CLOEXEC: inherited by whatever this process starts next.
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
