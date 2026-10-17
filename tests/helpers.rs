@@ -552,14 +552,16 @@ fn a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads() {
     for sql in [
         format!("WITH meters AS ({forged}) {hours}"),
         format!("WITH Meters AS ({forged}) SELECT lab_peak() AS p"),
-        format!("WITH \"METERS\" AS ({forged}) SELECT 1 AS x"),
+        format!("WITH \"METERS\" AS ({forged}) SELECT lab_peak() AS x"),
         "WITH hourly AS (SELECT 'lab' AS meter, 1.0 AS peak_kw) SELECT * FROM peak_of('lab')"
             .to_string(),
-        format!("WITH a AS (WITH meters AS ({forged}) SELECT * FROM meters) SELECT * FROM a"),
+        format!(
+            "WITH a AS (WITH meters AS ({forged}) SELECT * FROM meters) SELECT lab_peak() FROM a"
+        ),
         format!("SELECT * FROM (WITH meters AS ({forged}) {hours}) s"),
         format!("SELECT 1 AS x WHERE 1 < (WITH meters AS ({forged}) {hours})"),
         "WITH RECURSIVE meters(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM meters WHERE n < 3) \
-         SELECT * FROM meters"
+         SELECT n, lab_peak() FROM meters"
             .to_string(),
         format!("SELECT 1 AS x; WITH meters AS ({forged}) {hours}"),
         format!("CREATE TABLE forged AS WITH meters AS ({forged}) {hours}"),
@@ -731,6 +733,152 @@ fn a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads() {
     ] {
         ok(&mut s, sql);
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn sql_run_from_a_string_is_refused_beside_helper_macros() {
+    // From a host's report: `query('WITH meters AS (…) SELECT * FROM total_kw(''m0'')')` returned
+    // the CTE's value, and a view over it kept doing so. The string is SQL DuckDB parses only
+    // when it runs, and it can be built then (`||`, `replace()`), so no parse beforehand reads
+    // it. Measured on DuckDB 1.5.5: `query` and `json_execute_serialized_sql` run a string as a
+    // query, a helper macro in it reads the string's CTE, and the latter reaches a helper by its
+    // catalog's name; `query_table` reads only a table named in the string.
+    let extra = "CREATE MACRO total() AS (SELECT count(*) FROM meters);\n";
+    let (mut s, dir) = start(&format!("{EXAMPLE}\n{extra}"), &[]);
+    let catalog = rows(&ok(
+        &mut s,
+        "SELECT database_name, 1 AS one FROM duckdb_functions() WHERE function_name = 'total'",
+    ))
+    .pop()
+    .and_then(|r| r.split(' ').next().map(str::to_string))
+    .expect("the helpers' catalog");
+    let f = "WITH meters AS (SELECT ''X'' AS meter FROM range(999))";
+    for sql in [
+        format!("SELECT * FROM query('{f} SELECT total() AS n')"),
+        format!(
+            "SELECT * FROM query('WITH me' || 'ters' || '{} SELECT total() AS n')",
+            &f[11..]
+        ),
+        "SELECT * FROM query(replace('WITH m_ AS (SELECT ''X'' AS meter FROM range(999)) \
+         SELECT total() AS n', 'm_', 'meters'))"
+            .to_string(),
+        format!("CREATE VIEW forged AS SELECT * FROM query('{f} SELECT total() AS n')"),
+        format!("CREATE MACRO forged() AS TABLE SELECT * FROM query('{f} SELECT total() AS n')"),
+        format!(
+            "SELECT * FROM json_execute_serialized_sql(json_serialize_sql('{f} SELECT \
+             {catalog}.main.total() AS n'))"
+        ),
+        format!("select * from QUERY ('{f} SELECT total() AS n')"),
+        format!("SELECT * FROM \"Query\"('{f} SELECT total() AS n')"),
+        format!("SELECT * FROM system.main.query /* c */ ('{f} SELECT total() AS n')"),
+        "SELECT 1 AS x; SELECT * FROM query('SELECT 42 AS x')".to_string(),
+    ] {
+        let e = err(&mut s, &sql);
+        assert!(
+            e.contains("string") && e.contains("helper") && e.contains("Nothing ran"),
+            "{sql}: {e}"
+        );
+    }
+    let e = err(&mut s, "SELECT * FROM forged");
+    assert!(e.contains("does not exist"), "{e}");
+    answers(&mut s);
+    // A table named in a string is still the agent's to read, and a name that only looks like
+    // the function is not a call of it.
+    for sql in [
+        "SELECT count(*) AS n FROM query_table('meters')",
+        "SELECT count(*) AS n FROM query_table(['meters', 'meters'])",
+        "SELECT 'query' AS query, 'query_table' AS q, count(*) AS my_query FROM meters",
+    ] {
+        ok(&mut s, sql);
+    }
+    let _ = std::fs::remove_dir_all(dir);
+
+    // Without helper macros a string's SQL reads nothing a CTE could take, and runs.
+    let mut plain = Server::start(Path::new(DATA), &[]);
+    assert!(ok(&mut plain, "SELECT * FROM query('SELECT 42 AS x')").contains("42"));
+}
+
+#[test]
+fn a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call() {
+    // From a host whose helpers read `hourly`: every `WITH hourly AS (…)` was refused, though only
+    // a helper macro expanded in the same query reads the CTE. Measured on DuckDB 1.5.5: a macro
+    // of the agent's that calls a helper macro reads the caller's CTE too, a view does not (it
+    // is bound on its own), and a view or macro whose body holds the CTE reads it through any
+    // macro that body calls, replaced later by one that calls a helper.
+    let extra = "CREATE MACRO total() AS (SELECT count(*) FROM meters);\n";
+    let (mut s, dir) = start(&format!("{EXAMPLE}\n{extra}"), &[]);
+    let f = "WITH meters AS (SELECT 'X' AS meter FROM range(999))";
+    ok(&mut s, "CREATE TABLE m AS SELECT 1 AS k, 0::BIGINT AS v");
+    // No helper macro is called: the CTE is the agent's.
+    for sql in [
+        format!("{f} SELECT count(*) AS n FROM meters"),
+        "WITH hourly AS (SELECT 1 AS x) SELECT * FROM hourly".to_string(),
+        "WITH \"METERS\" AS (SELECT 1 AS x) SELECT * FROM meters".to_string(),
+        "WITH RECURSIVE meters(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM meters WHERE n < 3) \
+         SELECT * FROM meters"
+            .to_string(),
+        format!("CREATE TABLE copied AS {f} SELECT count(*) AS n FROM meters"),
+        format!("UPDATE m SET v = ({f} SELECT count(*) FROM meters)"),
+        format!("{f} SELECT count(*) AS n FROM meters, hourly"),
+    ] {
+        ok(&mut s, &sql);
+    }
+    // The agent's macros: one that calls no helper leaves the CTE alone; one that does, at any
+    // depth, takes it. Made after a CTE was let through, so what benchy knew of them then is
+    // not what it goes by.
+    ok(&mut s, "CREATE MACRO twice(x) AS x * 2");
+    ok(
+        &mut s,
+        &format!("{f} SELECT twice(count(*)) AS n FROM meters"),
+    );
+    ok(&mut s, "CREATE MACRO mine() AS TABLE SELECT total() AS n");
+    ok(
+        &mut s,
+        "CREATE MACRO mine_too() AS TABLE SELECT * FROM mine()",
+    );
+    ok(&mut s, "CREATE MACRO benign() AS TABLE SELECT 1 AS n");
+    ok(&mut s, "CREATE VIEW mine_view AS SELECT * FROM mine()");
+    let real = ok(&mut s, "SELECT n || '!' AS n FROM mine()");
+    assert!(!real.contains("999!"), "{real}");
+    for (sql, names) in [
+        (format!("{f} SELECT total() AS n"), "`total`"),
+        (format!("{f} SELECT * FROM mine()"), "`mine`"),
+        (format!("{f} SELECT * FROM mine_too()"), "`mine_too`"),
+        (
+            format!("{f} SELECT * FROM benign(), mine_too()"),
+            "`mine_too`",
+        ),
+        (
+            format!("UPDATE m SET v = ({f} SELECT n FROM mine())"),
+            "`mine`",
+        ),
+        // A view or macro keeps the CTE in its body: `benign` could be replaced later.
+        (
+            format!("CREATE VIEW forged AS {f} SELECT * FROM benign()"),
+            "view or macro",
+        ),
+        (
+            format!("CREATE MACRO forged() AS TABLE {f} SELECT * FROM benign()"),
+            "view or macro",
+        ),
+        (
+            format!("CREATE TEMP VIEW forged AS {f} SELECT 1 AS n"),
+            "view or macro",
+        ),
+    ] {
+        let e = err(&mut s, &sql);
+        assert!(
+            e.contains("CTE") && e.contains(names) && e.contains("another"),
+            "{sql}: {e}"
+        );
+    }
+    // A view is bound on its own: its macro reads the table, so the CTE beside it is the agent's.
+    let v = ok(&mut s, &format!("{f} SELECT n || '!' AS n FROM mine_view"));
+    assert!(!v.contains("999!"), "{v}");
+    let e = err(&mut s, "SELECT * FROM forged");
+    assert!(e.contains("does not exist"), "{e}");
+    answers(&mut s);
     let _ = std::fs::remove_dir_all(dir);
 }
 

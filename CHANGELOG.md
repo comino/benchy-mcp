@@ -6,6 +6,25 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **SQL run from a string no longer gets past the helper CTE rule**
+  (`sql_run_from_a_string_is_refused_beside_helper_macros`). From a host's report:
+  `query('WITH meters AS (…) SELECT * FROM total_kw(''m0'')')` returned the CTE's value, built
+  with `||` or `replace()` too, and a view over it kept doing so. DuckDB parses that string only
+  when it runs, so no look beforehand can read it. With helper macros that read a table, a batch
+  that may call `query` or `json_execute_serialized_sql` (which reached a helper by its catalog's
+  name) is refused before anything runs, by any spelling. `query_table`, which reads only a
+  table named in its string, stays, and so does `query()` in a session without helper macros.
+  The escape corpus records both on the locked engine.
+- **A CTE named like a helper's table is refused only beside a helper call**
+  (`a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`). From a host whose
+  helpers read `hourly`: every `WITH hourly AS (…)` was refused, though only a helper macro
+  expanded in the same query reads the CTE. Now the rule applies to a batch that names a helper
+  macro, a macro of the agent's that calls one at any depth (measured: DuckDB 1.5.5 expands
+  both in the caller's query), or `view`, `macro` or `function` (a view or macro keeps the CTE in
+  its body, and reads it through any macro it calls once that one is replaced by a helper call,
+  measured). A view the batch calls is bound on its own and does not count. The refusal names
+  the call and says the name is fine elsewhere, so the model renames once.
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,
