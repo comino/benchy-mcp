@@ -240,8 +240,13 @@ sources (ClickHouse, REQ-16; HTTP, REQ-17) and exec connectors.
 - `table_names_are_plain_identifiers` — a file name becomes a table name the agent can type, by
   the rules the README states.
 - `a_skipped_file_is_named_in_the_operator_log` — a folder is read at its top level; each
-  subdirectory and file of another kind is named in the operator's log, with the reason, and
-  nothing of it reaches the agent.
+  subdirectory, hidden file and file of another kind is named in the operator's log, with the
+  reason, and nothing of it reaches the agent.
+- `a_hidden_file_in_a_directory_is_not_a_table` — a folder's dotfiles, any name starting with
+  `.`, are skipped: `.secret.csv` is no table, and macOS's AppleDouble `._meters.csv` beside
+  `meters.csv` does not stop startup as a second `meters`.
+- `a_hidden_file_named_explicitly_still_loads` — a dotfile named with `--source` or in a config
+  loads: the operator chose it.
 - `the_help_example_names_the_binary_by_absolute_path` — `--help`'s JSON example gives the
   command as an absolute path, since desktop apps do not read `PATH`.
 - `the_catalogue_is_bounded` — the catalogue is in the agent's context on every turn, so it is

@@ -14,8 +14,9 @@ agent explores them with SQL and gets small answers back.
 
 USAGE
   benchy-mcp <dir>                    every .csv/.tsv/.parquet/.json/.ndjson/.jsonl
-                                      at the top of <dir> becomes a table named after
-                                      the file; what is skipped is logged on stderr
+                                      at the top of <dir>, but no dotfile, becomes a
+                                      table named after the file; what is skipped is
+                                      logged on stderr
   benchy-mcp --source name=path ...   name files explicitly
   benchy-mcp --config benchy.toml     ClickHouse tables, URLs, exec connectors, per-source limits,
                                       narrowing, session budget, SQL helpers ([helpers]: views and

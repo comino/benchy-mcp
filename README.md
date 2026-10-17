@@ -94,8 +94,8 @@ meters (8 rows)
 ```
 
 To serve your own data, give a folder of your own instead. Every `.csv`, `.tsv`, `.parquet`,
-`.json`, `.ndjson` and `.jsonl` file in it becomes a table named after its file: no config, no
-schema. Other clients are under [Use it with…](#use-it-with).
+`.json`, `.ndjson` and `.jsonl` file at its top level, dotfiles aside, becomes a table named after
+its file: no config, no schema. Other clients are under [Use it with…](#use-it-with).
 
 ## Efficient by design
 
@@ -169,11 +169,12 @@ set by the operator or the host, never by the model. The agent always writes Duc
 **ClickHouse** and **HTTP** are built in.
 A folder of files and an exec connector cover the rest. Whatever the source, it lands in DuckDB.
 
-**A folder.** `benchy-mcp /path/to/data` reads the folder's top level; subdirectories and other
-kinds of file are skipped and named in the log. A table is named after its file, lower-cased,
+**A folder.** `benchy-mcp /path/to/data` reads the folder's top level; subdirectories, hidden
+files (any name starting with `.`, such as macOS's `._meters.csv`) and other kinds of file are
+skipped and named in the log. A table is named after its file, lower-cased,
 with `_`, `-`, `.` and spaces turned into `_` and other characters dropped: `Sales Q1.csv` is
 `sales_q1`, and `2026-data.parquet` is `t_2026_data`. Two files with the same name stop startup;
-`--source name=path` names a file yourself.
+`--source name=path` names a file yourself, a hidden one too.
 
 **ClickHouse.** Name the tables in a config file:
 
@@ -475,8 +476,9 @@ As `benchy-mcp --help` prints them:
 ```
 USAGE
   benchy-mcp <dir>                    every .csv/.tsv/.parquet/.json/.ndjson/.jsonl
-                                      at the top of <dir> becomes a table named after
-                                      the file; what is skipped is logged on stderr
+                                      at the top of <dir>, but no dotfile, becomes a
+                                      table named after the file; what is skipped is
+                                      logged on stderr
   benchy-mcp --source name=path ...   name files explicitly
   benchy-mcp --config benchy.toml     ClickHouse tables, URLs, exec connectors, per-source limits,
                                       narrowing, session budget, SQL helpers ([helpers]: views and

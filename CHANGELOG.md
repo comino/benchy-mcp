@@ -6,6 +6,12 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **A folder's dotfiles are skipped** (REQ-4 `a_hidden_file_in_a_directory_is_not_a_table`).
+  `.secret.csv` became a table `secret`, and the AppleDouble `._meters.csv` macOS writes beside
+  `meters.csv` stopped startup as a second `meters`. Every name starting with `.` is now skipped
+  and named in the operator's log; a dotfile named with `--source` or in a config still loads
+  (`a_hidden_file_named_explicitly_still_loads`).
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,

@@ -163,6 +163,40 @@ fn a_name_collision_is_refused_with_both_paths() {
 }
 
 #[test]
+fn a_hidden_file_in_a_directory_is_not_a_table() {
+    // A dotfile is one the operator may not know is there: `.secret.csv` became `secret`, and the
+    // AppleDouble `._meters.csv` that macOS writes beside `meters.csv` on a non-APFS volume
+    // stopped startup as a second `meters`.
+    let dir = fixture_dir();
+    std::fs::write(dir.join(".secret.csv"), "a\n1\n").unwrap();
+    std::fs::write(dir.join("._meters.csv"), "\0\x05\x16\x07").unwrap();
+    let planned = source::plan_dir(&dir).expect("the hidden files do not stop startup");
+    let names: Vec<&str> = planned.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["meters"], "{planned:?}");
+
+    // A folder of nothing but dotfiles has nothing to load, and says so as an empty one does.
+    let hidden = common::unique("hidden");
+    std::fs::create_dir(&hidden).unwrap();
+    std::fs::write(hidden.join(".only.csv"), "a\n1\n").unwrap();
+    let err = source::plan_dir(&hidden).unwrap_err().to_string();
+    assert!(err.contains("no readable data files"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&hidden);
+}
+
+#[test]
+fn a_hidden_file_named_explicitly_still_loads() {
+    // Named with --source or in a config, the operator chose it: only the folder scan skips it.
+    let dir = common::unique("named-hidden");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join(".secret.csv"), "a\n1\n2\n").unwrap();
+    let mut bench = common::bench();
+    let t = source::load_file(&mut bench, "secret", &dir.join(".secret.csv")).expect("loads");
+    assert_eq!((t.name.as_str(), t.rows), ("secret", 2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_empty_directory_says_what_to_do() {
     let dir = std::env::temp_dir().join(format!("benchy-empty-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
