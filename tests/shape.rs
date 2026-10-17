@@ -124,6 +124,16 @@ fn has(text: &str, want: &str) {
     assert!(text.contains(want), "expected {want:?} in:\n{text}");
 }
 
+/// Series `key`'s line of notes says `want`.
+fn noted(text: &str, key: &str, want: &str) {
+    let head = format!("    {key}: ");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with(&head) && l.contains(want)),
+        "expected {want:?} in the notes of {key} in:\n{text}"
+    );
+}
+
 #[test]
 fn describe_tells_the_time_column_its_range_and_cadence() {
     let d = described();
@@ -743,5 +753,201 @@ fn a_data_value_in_describe_is_a_quoted_literal() {
     let mut s = common::Server::start(&dir, &[]);
     let r = s.call("tools/call", json!({"name": "describe", "arguments": {}}));
     common::assert_values_quoted(r["result"]["content"][0]["text"].as_str().unwrap(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_integer_reading_is_not_taken_for_the_series_key() {
+    // Integer device ids beside integer readings: CO₂ in ppm and RSSI in dBm both have more
+    // values than there are devices, and each still leaves ten rows a value. The most values
+    // picked `co2`: 1600 series, none on a step, thousands of invented gaps.
+    let mut csv = String::from("ts,device_id,co2,rssi\n");
+    let mut x: u64 = 1;
+    let mut rand = |n: u64| {
+        x = x
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (x >> 33) % n
+    };
+    for i in 0..2000 {
+        let t = stamp(START + i * MIN15);
+        for d in 1..=50 {
+            let (co2, rssi) = (400 + rand(1600), -30 - rand(91) as i64);
+            csv.push_str(&format!("{t},{d},{co2},{rssi}\n"));
+        }
+    }
+    let dir = dir_with("air.csv", &csv);
+    let d = sealed(&dir, &[]).describe(4096);
+    has(
+        &d,
+        "series key device_id (looks like it): 50 series (1 … 50)",
+    );
+    has(
+        &d,
+        "every series has a row every 15 minutes from its first to its last, none missing or \
+         repeated; all span the whole range",
+    );
+    assert!(!d.contains("missing in all"), "{d}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn anomalies_past_any_limit_are_counted_exactly() {
+    // 300,001 rows of `a` at one time, then a row a second: the anomalies were listed row by
+    // row up to 200,001 and counted from that list, so `a` showed 200,001 repeats as if exact,
+    // and `b`, after `a` by key, lost its gap.
+    let mut csv = String::from("t,s,v\n");
+    let sec = |n: i64| stamp(START + n);
+    for _ in 0..300_001 {
+        csv.push_str(&format!("{},a,1\n", sec(0)));
+    }
+    for n in 1..=100 {
+        csv.push_str(&format!("{},a,1\n", sec(n)));
+    }
+    for n in (0..=100).filter(|n| *n != 50) {
+        csv.push_str(&format!("{},b,1\n", sec(n)));
+    }
+    let dir = dir_with("burst.csv", &csv);
+    let shape = Shape {
+        time_column: Some("t".into()),
+        series: vec!["s".into()],
+    };
+    let d = sealed(&dir, &[("burst", shape)]).describe(4096);
+    noted(&d, "'a'", "300000 rows repeat a time already present");
+    noted(
+        &d,
+        "'b'",
+        "1 gap, 1 row missing in all; the longest 1 second (no rows after 2014-03-27 \
+         00:00:49+00 until 2014-03-27 00:00:51+00)",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn many_series_keep_the_tables_own_extent() {
+    // 200,000 regular series, then `zzz`, which ends later and misses three rows. Past 200,000
+    // series the profile examines the first by key; the extent, the key's range and "every
+    // series" were said of those as if of the table.
+    let mut bench = common::bench();
+    bench
+        .connection()
+        .execute_batch(
+            "CREATE TABLE many AS SELECT TIMESTAMP '2026-01-01' + to_minutes(15 * (i % 10)) \
+             AS ts, 's' || lpad((i // 10)::VARCHAR, 6, '0') AS sensor, 1.5 AS v \
+             FROM range(2000000) r(i) \
+             UNION ALL SELECT TIMESTAMP '2026-01-01' + to_minutes(15 * x), 'zzz', 1.5 \
+             FROM unnest([0, 1, 2, 3, 5, 6, 8, 9, 11]) u(x)",
+        )
+        .unwrap();
+    bench.declare(
+        "many",
+        Shape {
+            time_column: Some("ts".into()),
+            series: vec!["sensor".into()],
+        },
+    );
+    bench
+        .record(benchy_mcp::LoadedTable {
+            name: "many".into(),
+            rows: 2_000_009,
+            columns: vec![
+                ("ts".into(), "TIMESTAMP".into()),
+                ("sensor".into(), "VARCHAR".into()),
+                ("v".into(), "DECIMAL(2,1)".into()),
+            ],
+            source: "test".into(),
+            profile: None,
+            seen: None,
+        })
+        .unwrap();
+    let d = bench.seal("1GB").unwrap().describe(4096);
+    has(
+        &d,
+        "time column ts: 2026-01-01 00:00:00 to 2026-01-01 02:45:00",
+    );
+    has(&d, "series key sensor: more than 200000 series\n");
+    has(
+        &d,
+        "200000 of the first 200000 series by key, to 's199999', have a row every 15 minutes",
+    );
+    has(
+        &d,
+        "the series after 's199999' were not examined one by one",
+    );
+    for wrong in ["every series has", "all span the whole range", "'s199999')"] {
+        assert!(!d.contains(wrong), "{wrong:?} in:\n{d}");
+    }
+}
+
+#[test]
+fn three_gaps_hidden_by_three_repeats_are_found() {
+    // The count, the sum and the sum of squares of the step indices are those of a row every
+    // step for each of `a`, `c` and `d`: three (or four) rows missing and as many repeated,
+    // placed so that both checksums still match. Only `b` is regular.
+    let a: Vec<i64> = vec![0, 1, 1, 4, 5, 5, 6, 6, 8, 9];
+    let b: Vec<i64> = (0..10).collect();
+    let mut c: Vec<i64> = (0..2000)
+        .filter(|i| ![1002, 1003, 1007].contains(i))
+        .collect();
+    c.extend([1001, 1005, 1006]);
+    let mut d: Vec<i64> = (0..=20).filter(|i| ![1, 2, 4, 7].contains(i)).collect();
+    d.extend([0, 3, 5, 6]);
+    d.sort();
+    let mut rows: Vec<(i64, &str)> = Vec::new();
+    for (s, ix) in [("a", &a), ("b", &b), ("c", &c), ("d", &d)] {
+        rows.extend(ix.iter().map(|i| (*i, s)));
+    }
+    rows.sort();
+    let csv = |rows: &mut dyn Iterator<Item = &(i64, &str)>| {
+        let mut out = String::from("ts,meter,kw\n");
+        for (i, s) in rows {
+            out.push_str(&format!("{},{s},1.5\n", stamp(START + i * MIN15)));
+        }
+        out
+    };
+    let shape = Shape {
+        time_column: None,
+        series: vec!["meter".into()],
+    };
+    let mut seen = Vec::new();
+    // In time order, backwards, and shuffled, where no series' times come in order and only an
+    // exact count tells `b` regular.
+    let mut shuffled = rows.clone();
+    shuffled.sort_by_key(|(i, s)| (i * 7919 + s.len() as i64 * 31 + s.as_bytes()[0] as i64) % 101);
+    for text in [
+        csv(&mut rows.iter()),
+        csv(&mut rows.iter().rev()),
+        csv(&mut shuffled.iter()),
+    ] {
+        let dir = dir_with("hidden.csv", &text);
+        let got = sealed(&dir, &[("hidden", shape.clone())]).describe(8192);
+        has(&got, "1 of 4 series has a row every 15 minutes");
+        for (key, gaps, missing) in [("'a'", 2, 3), ("'c'", 2, 3), ("'d'", 3, 4)] {
+            noted(
+                &got,
+                key,
+                &format!("{gaps} gaps, {missing} rows missing in all"),
+            );
+            noted(
+                &got,
+                key,
+                &format!("{missing} rows repeat a time already present"),
+            );
+        }
+        seen.push(got);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert_eq!(seen[0], seen[1]);
+    assert_eq!(seen[0], seen[2]);
+
+    // And one series with no key: it was said to be "a row every 15 minutes from first to last,
+    // none missing or repeated" beside "no column looks like a series key".
+    let mut out = String::from("ts,kw\n");
+    for i in &d {
+        out.push_str(&format!("{},1.5\n", stamp(START + i * MIN15)));
+    }
+    let dir = dir_with("one.csv", &out);
+    let got = sealed(&dir, &[]).describe(4096);
+    assert!(!got.contains("none missing or repeated"), "{got}");
     let _ = std::fs::remove_dir_all(&dir);
 }

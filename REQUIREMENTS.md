@@ -973,8 +973,12 @@ host per attachment. Units are never guessed.
 The profile is computed **once, by the loader**, and kept in the table's comment, so `describe`
 only renders text and a rebuilt engine does not profile again. It is built from one scan of
 aggregates, then one pass over the rows that DuckDB streams to the loader, which adds up each
-series — with checksums of its timestamps that prove it regular without ordering it — each time,
-and the rows that are 0 or null; bounded windows run only over what failed that proof. Measured
+series — its count, extent, phase and two checksums of its timestamps, and whether its times came
+in order, rising or falling — each time, and the rows that are 0 or null. The checksums alone
+prove nothing: three gaps hidden by three repeats can leave them as they were. A series that fits
+them is proven regular, without ordering it, only when its times came in order, so none repeats;
+one that fits but came in no order is settled by an exact count of its distinct times, and
+bounded windows run only over what failed. Measured
 on a 4-core ARM box under heavy load from other work, in CPU time (user and system) and
 instructions, median of four alternating runs: 0.22 s and 1.1 billion instructions on the
 840,960-row meter data, whose load took 0.84 s and 5.0 billion; 0.74 s and 4.0 billion on five
@@ -1000,6 +1004,11 @@ statement, and the agent made them.
 - `describe_tells_the_series_key` — the text column with the most values that still leaves each
   series rows to spare, named as a guess; its values; how many series are on their step with
   nothing missing or repeated; each numeric column's range, nulls and zeros.
+- `an_integer_reading_is_not_taken_for_the_series_key` — 50 integer device ids beside an integer
+  CO₂ reading of 1,600 values and an RSSI of 91: where two columns of a kind could be the key, the
+  one that cuts the table's first slice of time into series that keep a step wins over the one
+  with the most values, when clearly more of its rows keep it. One query per such column over
+  that slice, as the step's sample reads; none when only one column could be the key.
 - `a_small_table_still_finds_its_series_key` — the bundled example, eight rows in two series:
   too few for ten rows a series, so the key is the column whose every value has rows at two
   times or more and which, with the time, tells apart at least 80% of the rows, more than the
@@ -1021,6 +1030,15 @@ statement, and the agent made them.
 - `describe_names_gaps_and_repeated_times` — rows missing and rows repeated, where, including a
   series whose gap is hidden by as many repeats: its row count is right, and only the checksums
   of its timestamps give it away.
+- `three_gaps_hidden_by_three_repeats_are_found` — series whose count, sum and sum of squares of
+  step indices are those of a regular series (`{0,1,1,4,5,5,6,6,8,9}`; 2,000 steps missing
+  1002, 1003 and 1007 and repeating 1001, 1005 and 1006; `0..20` without 1, 2, 4 and 7 and with
+  0, 3, 5 and 6 twice) are not called regular, and their gaps and repeats are counted; the same
+  rows backwards, and shuffled so that no series' times come in order, describe the same; and one
+  series with no key is not called regular on its checksums.
+- `anomalies_past_any_limit_are_counted_exactly` — gaps, repeats and rows off the step are
+  counted per series by DuckDB, not listed and counted up to a limit: 300,000 repeats in one
+  series are said as 300,000, and the series after it keeps its notes.
 - `describe_names_a_moment_every_series_shares` — a time when every series reads 0, or their
   total is twice what it was a day either side; a day clocks change is said to be one.
 - `the_public_meter_data_shows_its_quirks` — on the eval's public data, when it has been fetched:
@@ -1040,7 +1058,11 @@ statement, and the agent made them.
 - `an_integer_series_key_is_listed_in_number_order` — the keys are held as text, and were listed
   in text order (`50 series (1 … 9)`); they are listed in the order of the key's type, an
   integer column's by number. Past 200,000 series, where the ones kept are the first in text
-  order, an integer key gets no range.
+  order, the key gets no range.
+- `many_series_keep_the_tables_own_extent` — past 200,000 series the time column's range is the
+  table's, from the scan, not that of the series examined; and the line on regular series says
+  how many of the first 200,000 by key are, and that the series after the last examined were not
+  examined and have no notes, never "every series" or "all span the whole range".
 - `the_shape_is_summarised_never_cut_silently` — 300 series with notes: the first forty, then
   how many more; with less room, how many lines are not shown; with almost none, that the shape
   is not shown. Always within the byte budget.

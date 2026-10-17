@@ -16,10 +16,12 @@
 //! **Cheap on purpose.** A full window over the table is what a naive profile costs, and on five
 //! million rows it took as long as loading them (measured 2.2–5.3 s against a 2.5 s load on the
 //! development box). So the profile is built from aggregates: one scan for the columns, then one
-//! pass over the rows ([`pass`]) for per-series counts, extents, zero counts and two checksums of
-//! the timestamps, which prove a series sits on its step with nothing missing or repeated without
-//! ordering it — and, in the same pass, each time's totals and the rows that are 0 or null. Only
-//! irregular series are read again, by a bounded window. A `GROUP BY` series and a `GROUP BY`
+//! pass over the rows ([`pass`]) for per-series counts, extents, zero counts, two checksums of
+//! the timestamps and whether they came in order, which together prove a series sits on its step
+//! with nothing missing or repeated without ordering it — and, in the same pass, each time's
+//! totals and the rows that are 0 or null. A series whose checksums fit but whose times came in
+//! no order is settled by an exact distinct count of its times; only irregular series are read
+//! again, by a bounded window. A `GROUP BY` series and a `GROUP BY`
 //! time per measure, with a window over the zero rows, had cost a third as much CPU as the load
 //! itself on the meter data; the pass costs a fifth.
 //!
@@ -490,6 +492,15 @@ struct Series {
     gcd: u64,
     sum_d: i128,
     sum_d2: i128,
+    /// Whether its times came in order, in the order the rows were read: each later than every
+    /// one before it, or each earlier. Then no time repeats, which no checksum proves
+    /// ([`Series::regular`]). `rising` and `falling` are each way, and `top` and `bottom` the
+    /// latest and earliest so far, for [`Series::note`].
+    ordered: bool,
+    rising: bool,
+    falling: bool,
+    top: i64,
+    bottom: i64,
     measures: Vec<SeriesMeasure>,
     /// Filled in by the checks below.
     notes: Vec<(u64, String)>,
@@ -508,8 +519,18 @@ impl Series {
     #[inline]
     fn note(&mut self, t: i64) {
         match self.t0 {
-            None => self.t0 = Some(t),
+            None => {
+                self.t0 = Some(t);
+                (self.rising, self.falling) = (true, true);
+                (self.top, self.bottom) = (t, t);
+                self.ordered = true;
+            }
             Some(t0) => {
+                self.rising &= t > self.top;
+                self.falling &= t < self.bottom;
+                self.top = self.top.max(t);
+                self.bottom = self.bottom.min(t);
+                self.ordered = self.rising || self.falling;
                 let d = t.wrapping_sub(t0);
                 let u = d.unsigned_abs();
                 // Most distances are a multiple of what is already kept: one division.
@@ -548,13 +569,23 @@ impl Series {
             / (st * st);
     }
 
-    /// On its step from first to last, nothing missing and nothing repeated — proven from the
-    /// count, the extent, the phase and two checksums of the step indices, so no ordering is
-    /// needed. A missing row and a repeated one in the same series would leave the count right;
-    /// they cannot also leave both the sum and the sum of squares of the indices unchanged unless
-    /// the repeat and the gap coincide, and then nothing is missing. `origin` is the table's first
-    /// time; the indices count steps from it.
+    /// On its step from first to last, nothing missing and nothing repeated — proven, without
+    /// ordering the rows, from the count, the extent and the phase, and from its times having
+    /// come in order ([`Series::ordered`]): as many distinct indices as the extent holds, each
+    /// on the step, are every index once. Times that came in no order may still be regular,
+    /// and only an exact count of their distinct times settles it (`settle`).
     fn regular(&self, step: i64, origin: i64) -> bool {
+        self.ordered && self.fits(step, origin)
+    }
+
+    /// What a row every step from first to last would give: the count, the extent, the phase
+    /// and two checksums of the step indices. Necessary, not sufficient. One missing row and one
+    /// repeated change the sum or the sum of squares unless they coincide, but three of each need
+    /// not: `{0,1,1,4,5,5,6,6,8,9}` has the count, the sum (45) and the sum of squares (285) of
+    /// `0..9` (`three_gaps_hidden_by_three_repeats_are_found`). So a series that fits is
+    /// regular only once no time is known to repeat. `origin` is the table's first time; the
+    /// indices count steps from it.
+    fn fits(&self, step: i64, origin: i64) -> bool {
         let (Some(a), Some(b)) = (self.first, self.last) else {
             return false;
         };
@@ -831,20 +862,61 @@ fn profile(
         };
     }
 
+    // The first time as a literal of its own type, for the samples of the table's first slice
+    // of time ([`first_literal`]): asked once, for the key's sample and the step's.
+    let first_lit = time
+        .as_ref()
+        .and_then(|t| first_literal(conn, &from, &quote(t)));
     // The series key: stated, or the text (else integer) column with the most distinct values
     // that still leaves every series ten rows on average, the leftmost on a tie — and only when
     // timestamps repeat, since a table whose every timestamp is distinct reads as one series
-    // however it is cut.
+    // however it is cut. Where two columns of a kind could be the key, the one whose values cut
+    // the first slice of time into series that keep a step wins ([`step_share`]): an integer
+    // reading, CO₂ in ppm beside a device id, has more values than the devices, but its
+    // "series" do not keep one (`an_integer_reading_is_not_taken_for_the_series_key`).
     let mut series_cols: Vec<String> = shape.series.clone();
     if !series_stated && time.is_some() && !time_unique {
         let pick = |want: Kind| {
-            candidates
+            let able: Vec<(&String, i64)> = candidates
                 .iter()
                 .zip(&distinct)
                 .filter(|((_, k), d)| *k == want && **d >= 2 && **d * 10 <= total)
+                .map(|((n, _), d)| (n, *d))
+                .collect();
+            let most = able
+                .iter()
                 .rev()
-                .max_by_key(|(_, d)| **d)
-                .map(|((n, _), _)| n.clone())
+                .max_by_key(|(_, d)| *d)
+                .map(|(n, _)| (*n).clone())?;
+            if able.len() < 2 {
+                return Some(most);
+            }
+            let (Some(t), Some(ms), Some(lit)) = (&time, &t_ms, &first_lit) else {
+                return Some(most);
+            };
+            let width = sample_width(origin, end, timed);
+            let shares: Vec<(&String, f64)> = able
+                .iter()
+                .map(|(n, _)| {
+                    let sh = crate::trace::span("profile.key", || {
+                        step_share(conn, &from, &quote(n), ms, &quote(t), lit, width)
+                    });
+                    (*n, sh.unwrap_or(0.0))
+                })
+                .collect();
+            let of = |name: &str| shares.iter().find(|(n, _)| *n == name).map_or(0.0, |s| s.1);
+            // The leftmost of the most regular, and only when clearly more regular than the
+            // most values: two columns that cut alike keep the rule above.
+            let best = shares
+                .iter()
+                .rev()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(n, sh)| ((*n).clone(), *sh))?;
+            Some(if best.1 > of(&most) + 0.1 {
+                best.0
+            } else {
+                most
+            })
         };
         if let Some(k) = pick(Kind::Text).or_else(|| pick(Kind::Integer)) {
             series_cols.push(k);
@@ -952,7 +1024,14 @@ fn profile(
         .collect();
 
     let step = crate::trace::span("profile.step", || {
-        measure_step(&cx, &quote(&time), origin, end, timed)
+        measure_step(
+            &cx,
+            &quote(&time),
+            first_lit.as_deref()?,
+            origin,
+            end,
+            timed,
+        )
     });
     // Per series, in one pass: rows, extent, phase, the checksums of the step indices, and each
     // examined measure's nulls, zeros and range — and each time's rows, zeros and sum, from which
@@ -984,9 +1063,18 @@ fn profile(
     };
     let too_many = series.len() > SERIES_MAX;
     series.truncate(SERIES_MAX);
+    // The last key examined, when series after it were not.
+    let examined_to = too_many
+        .then(|| series.last().map(|s| s.key.clone()))
+        .flatten();
 
-    let first = series.iter().filter_map(|s| s.first).min();
-    let last = series.iter().filter_map(|s| s.last).max();
+    // The table's extent, from the scan: past `SERIES_MAX`, the series kept are the first by key,
+    // and their extent was said as the table's (`many_series_keep_the_tables_own_extent`).
+    let (first, last) = if timed > 0 {
+        (Some(origin), Some(end))
+    } else {
+        (None, None)
+    };
     // Past three billion steps from the first time, a series is not proven regular: an index
     // squared, summed over as many rows as a table can hold, must stay inside an i128.
     let step = step.filter(|st| {
@@ -1022,10 +1110,15 @@ fn profile(
     }
 
     // Which series are on the step, with nothing missing or repeated.
-    let regular: Vec<bool> = series
+    let mut regular: Vec<bool> = series
         .iter()
         .map(|s| step.is_some_and(|st| s.regular(st, origin)))
         .collect();
+    if let Some(st) = step {
+        crate::trace::span("profile.settle", || {
+            settle(&cx, &series, &mut regular, st, origin)
+        });
+    }
     let n_regular = regular.iter().filter(|r| **r).count();
     let full_range = |s: &Series| s.first == first && s.last == last;
     if keyed {
@@ -1042,9 +1135,9 @@ fn profile(
         );
         let mut keys: Vec<&str> = series.iter().map(|s| s.key.as_str()).collect();
         keys.sort_by(|a, b| key_order(a, b));
-        // Past `SERIES_MAX`, the series kept are the first in text order, so the least and the
-        // greatest of them by number would not be the table's: no range is shown then.
-        let ranged = !too_many || !integer_key.iter().any(|i| *i);
+        // Past `SERIES_MAX`, the series kept are the first in text order, so the greatest of them
+        // is not the table's, and by number neither is the least: no range is shown then.
+        let ranged = !too_many;
         if series.len() <= 12 {
             // Every value when they fit the line, else the first ones that do and how many more.
             let all: Vec<String> = keys.iter().map(|k| key_shown(k)).collect();
@@ -1077,7 +1170,19 @@ fn profile(
                 .zip(&regular)
                 .filter(|(s, r)| **r && full_range(s))
                 .count();
-            let mut l = if n_regular == series.len() {
+            let mut l = if let Some(to) = &examined_to {
+                let to = key_shown(to);
+                format!(
+                    "{n_regular} of the first {} series by key, to {to}, {} a row every {} from \
+                     {} first to {} last, none missing or repeated; the series after {to} were \
+                     not examined one by one and have no notes below",
+                    series.len(),
+                    if n_regular == 1 { "has" } else { "have" },
+                    span(st),
+                    if n_regular == 1 { "its" } else { "their" },
+                    if n_regular == 1 { "its" } else { "their" },
+                )
+            } else if n_regular == series.len() {
                 format!(
                     "every series has a row every {} from its first to its last, none missing \
                      or repeated",
@@ -1096,7 +1201,7 @@ fn profile(
                     span(st)
                 )
             };
-            if whole == series.len() {
+            if whole == series.len() && !too_many {
                 l.push_str("; all span the whole range");
             }
             p.lines.push(l);
@@ -1670,6 +1775,9 @@ struct Hot {
     gcd: u64,
     sum_d: i128,
     sum_d2: i128,
+    /// [`Series::ordered`], each way; `last` and `first` are the latest and earliest so far.
+    rising: bool,
+    falling: bool,
 }
 
 /// What a row changes of one of its series' measures. `min` starts as NaN, which DuckDB orders
@@ -2095,6 +2203,8 @@ impl Tally {
             gcd: 0,
             sum_d: 0,
             sum_d2: 0,
+            rising: true,
+            falling: true,
         });
         self.measures
             .extend(std::iter::repeat_n(HotMeasure::NONE, self.nm));
@@ -2160,6 +2270,7 @@ impl Tally {
             s.gcd = h.gcd;
             s.sum_d = h.sum_d;
             s.sum_d2 = h.sum_d2;
+            s.ordered = timed && (h.rising || h.falling);
             s.measures = measures[x * nm..(x + 1) * nm]
                 .iter()
                 .map(|m| {
@@ -2224,6 +2335,12 @@ impl Hot {
                 .sum_d2
                 .wrapping_add((d as i128).wrapping_mul(d as i128));
         }
+        // A compare each way a row, beside the extent's: before the first row `last` is still
+        // `i64::MIN` and `first` `i64::MAX`. A table written newest first is in order too: with
+        // only `rising`, the meter data written backwards cost 1.5–1.9 billion instructions
+        // more, in `settle`'s exact count, than written forwards.
+        self.rising &= t > self.last;
+        self.falling &= t < self.first;
         self.timed += 1;
         self.first = self.first.min(t);
         self.last = self.last.max(t);
@@ -3278,24 +3395,15 @@ const FLAT_MAX: usize = 2 * WINDOW_ROWS as usize;
 /// to find a sample did not (measured on five million rows: a top-N took 0.15–0.5 s and the
 /// filter 0.05 s). The mode, ties to the shorter step, so the same data always gives the same
 /// answer.
-fn measure_step(cx: &Ctx, raw: &str, origin: i64, end: i64, total: i64) -> Option<i64> {
-    let mut width = ((end - origin) as i128 * STEP_SAMPLE_ROWS as i128 / total.max(1) as i128)
-        .clamp(1, i64::MAX as i128) as i64;
-    // The first time as a literal of its own type, exactly: compared with a constant, the filter
-    // goes into the scan, where each row group's range can skip it unread. Compared with a
-    // subquery's answer it cannot.
-    let (first, ty): (String, String) = cx
-        .conn
-        .query_row(
-            &format!(
-                "SELECT min({raw})::VARCHAR, typeof(min({raw})) FROM {f}",
-                f = cx.from
-            ),
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok()?;
-    let first = format!("CAST({} AS {ty})", literal(&first));
+fn measure_step(
+    cx: &Ctx,
+    raw: &str,
+    first: &str,
+    origin: i64,
+    end: i64,
+    total: i64,
+) -> Option<i64> {
+    let mut width = sample_width(origin, end, total);
     for _ in 0..4 {
         let sql = format!(
             "SELECT d, count(*) FROM (SELECT t - lag(t) OVER (PARTITION BY k ORDER BY t) AS d \
@@ -3320,6 +3428,56 @@ fn measure_step(cx: &Ctx, raw: &str, origin: i64, end: i64, total: i64) -> Optio
         width = width.saturating_mul(16);
     }
     None
+}
+
+/// How much of the table's first slice of time holds about [`STEP_SAMPLE_ROWS`] rows, in
+/// milliseconds, if rows are spread evenly.
+fn sample_width(origin: i64, end: i64, total: i64) -> i64 {
+    ((end - origin) as i128 * STEP_SAMPLE_ROWS as i128 / total.max(1) as i128)
+        .clamp(1, i64::MAX as i128) as i64
+}
+
+/// The first time of column `raw` as a literal of its own type, exactly: compared with a
+/// constant, the filter of a sample goes into the scan, where each row group's range can skip
+/// it unread. Compared with a subquery's answer it cannot.
+fn first_literal(conn: &Connection, from: &str, raw: &str) -> Option<String> {
+    let (first, ty): (String, String) = conn
+        .query_row(
+            &format!("SELECT min({raw})::VARCHAR, typeof(min({raw})) FROM {from}"),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()?;
+    Some(format!("CAST({} AS {ty})", literal(&first)))
+}
+
+/// How well column `col` cuts the table's first slice of time, `width` wide, into series that
+/// keep a step: the share of its rows that follow the row before in their series by the most
+/// common distance. A device id's series are nearly all on their step; a reading's values, taken
+/// as series, are a scatter of distances, repeats among them. One slice, as [`measure_step`]
+/// reads, so the filter skips most of the table unread; asked only of the columns that could be
+/// the key, and only when there are two of a kind.
+fn step_share(
+    conn: &Connection,
+    from: &str,
+    col: &str,
+    t: &str,
+    raw: &str,
+    first: &str,
+    width: i64,
+) -> Option<f64> {
+    let sql = format!(
+        "SELECT max(n)::DOUBLE, sum(n)::DOUBLE FROM (SELECT d, count(*) AS n FROM \
+           (SELECT t - lag(t) OVER (PARTITION BY k ORDER BY t) AS d \
+            FROM (SELECT {col} AS k, {t} AS t FROM {from} \
+                  WHERE {raw} < {first} + to_milliseconds({width}))) \
+         WHERE d IS NOT NULL GROUP BY d)"
+    );
+    let v = values(conn, &sql)?;
+    match (v.first().copied().flatten(), v.get(1).copied().flatten()) {
+        (Some(most), Some(all)) if all > 0.0 => Some(most / all),
+        _ => Some(0.0),
+    }
 }
 
 /// The series key of a table too small for the ten-rows rule, or `None`. The bundled example
@@ -3397,6 +3555,47 @@ fn note_extent(
     }
 }
 
+/// Series that fit their step ([`Series::fits`]) but whose times came in no order, so a
+/// repeat could hide a gap: regular exactly when they have as many distinct times as rows. One
+/// `GROUP BY` over those series alone, by an exact distinct count; a table whose series' times
+/// come in order as it is read, oldest or newest first, asks nothing here. The meter data
+/// shuffled row by row paid 334 ms of CPU for it, against 257 ms for the rest of its profile;
+/// `SELECT DISTINCT k, t` counted per key took 382 ms.
+fn settle(cx: &Ctx, series: &[Series], regular: &mut [bool], step: i64, origin: i64) {
+    let unsure: std::collections::HashMap<&str, usize> = (0..series.len())
+        .filter(|i| !regular[*i] && series[*i].fits(step, origin))
+        .map(|i| (series[i].key.as_str(), i))
+        .collect();
+    if unsure.is_empty() {
+        return;
+    }
+    // Past as many keys as the gaps' window lists, the whole table is counted rather than a
+    // list that long parsed.
+    let only = if unsure.len() <= 2000 {
+        let mut keys: Vec<String> = unsure.keys().map(|k| literal(k)).collect();
+        keys.sort();
+        format!(" AND {} IN ({})", cx.k, keys.join(", "))
+    } else {
+        String::new()
+    };
+    let sql = format!(
+        "SELECT {k} AS k, count(DISTINCT {t})::BIGINT FROM {f} WHERE {t} IS NOT NULL{only} \
+         GROUP BY ALL",
+        k = cx.k,
+        t = cx.t,
+        f = cx.from,
+    );
+    let found = rows(cx.conn, &sql, |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })
+    .unwrap_or_default();
+    for (k, distinct) in found {
+        if let Some(i) = unsure.get(k.as_str()) {
+            regular[*i] = distinct == series[*i].timed;
+        }
+    }
+}
+
 /// Where irregular series break their step: gaps, repeated timestamps, rows off the step. A
 /// bounded window over those series alone; the rest were proven regular without one.
 fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clock) {
@@ -3428,10 +3627,20 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
         keys.push(literal(&series[*i].key));
     }
     if !keys.is_empty() {
+        // Counted per series by DuckDB, not listed row by row: a list cut at a limit counted
+        // only the anomalies before the cut, as if exact, and left the series after it
+        // without notes (`anomalies_past_any_limit_are_counted_exactly`). The longest gap is
+        // the earliest of the longest, as the list in time order found it.
         let sql = format!(
-            "SELECT k, p, t FROM (SELECT {k} AS k, {t} AS t, lag({t}) OVER (PARTITION BY {k} \
-             ORDER BY {t}) AS p FROM {f} WHERE {k} IN ({keys}) AND {t} IS NOT NULL) \
-             WHERE p IS NOT NULL AND t - p <> {step} ORDER BY k, t LIMIT 200001",
+            "SELECT k, count(*) FILTER (d = 0)::BIGINT, \
+               count(*) FILTER (g)::BIGINT, coalesce(sum(d // {step} - 1) FILTER (g), 0)::BIGINT, \
+               count(*) FILTER (d <> 0 AND NOT g)::BIGINT, \
+               arg_max(p, (d, -p)) FILTER (g), max(d) FILTER (g) \
+             FROM (SELECT k, p, t - p AS d, t - p > {step} AND (t - p) % {step} = 0 AS g \
+               FROM (SELECT {k} AS k, {t} AS t, lag({t}) OVER (PARTITION BY {k} ORDER BY {t}) \
+                 AS p FROM {f} WHERE {k} IN ({keys}) AND {t} IS NOT NULL) \
+               WHERE p IS NOT NULL AND t - p <> {step}) \
+             GROUP BY k",
             k = cx.k,
             t = cx.t,
             f = cx.from,
@@ -3440,32 +3649,22 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
         let found = rows(cx.conn, &sql, |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, i64>(2)?,
+                [
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ],
+                (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?),
             ))
         })
         .unwrap_or_default();
-        let mut i = 0;
-        while i < found.len() {
-            let key = found[i].0.clone();
-            let (mut gaps, mut longest, mut dups, mut off) = (0u64, (0i64, 0i64), 0u64, 0u64);
-            let mut missing = 0i64;
-            while i < found.len() && found[i].0 == key {
-                let (_, p, t) = found[i];
-                let d = t - p;
-                if d == 0 {
-                    dups += 1;
-                } else if d > step && d % step == 0 {
-                    gaps += 1;
-                    missing += d / step - 1;
-                    if d > longest.1 - longest.0 {
-                        longest = (p, t);
-                    }
-                } else {
-                    off += 1;
-                }
-                i += 1;
-            }
+        for (key, [dups, gaps, missing, off], longest) in found {
+            let (dups, gaps, off) = (dups as u64, gaps as u64, off as u64);
+            let longest = match longest {
+                (Some(p), Some(d)) => (p, p + d),
+                _ => (0, 0),
+            };
             let Some(s) = series.iter_mut().find(|s| s.key == key) else {
                 continue;
             };
