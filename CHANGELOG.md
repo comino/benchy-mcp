@@ -6,6 +6,10 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- The Rust compiler is pinned to 1.98.1 in `rust-toolchain.toml`, used by local builds, CI, the
+  release and the Dockerfile alike, with `rust-version` in Cargo.toml; `scripts/check_toolchain.py`
+  keeps them in step.
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,

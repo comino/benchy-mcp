@@ -16,6 +16,7 @@ on:
       - Cargo.toml
       - Cargo.lock
       - packaging/**
+      - rust-toolchain.toml
       - install.sh
       - build.rs
       - .cargo/config.toml
@@ -48,7 +49,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
-        with: { toolchain: stable, targets: "${{ matrix.target }}" }
+        with: { toolchain: "1.98.1", targets: "${{ matrix.target }}" }
       # No build cache: a release is built the way a stranger's first build is, from nothing.
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - run: packaging/package.sh ${{ matrix.target }} ${{ matrix.platform }} dist

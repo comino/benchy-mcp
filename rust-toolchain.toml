@@ -1,0 +1,8 @@
+# The compiler every build uses: cargo here, the CI and release runners, and the Dockerfile's
+# build image, so a native bundle and the image of one tag are built alike, and so is a rebuild
+# of that tag later. scripts/check_toolchain.py fails if any of them names another. rustup
+# installs it on the first cargo command; without the components listed, its auto-install would
+# leave out what `scripts/ci.sh` runs.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]

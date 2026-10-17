@@ -17,6 +17,9 @@ cargo fmt --check
 step "requirements name tests that exist"
 python3 scripts/check_requirements.py
 
+step "one Rust compiler everywhere"
+python3 scripts/check_toolchain.py
+
 step "clippy, warnings are errors"
 CARGO_TARGET_DIR="$PWD/target/clippy" CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
 

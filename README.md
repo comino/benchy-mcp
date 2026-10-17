@@ -292,7 +292,8 @@ pass `--allow-unsandboxed`, and the SQL layer is the only boundary.
 
 ### Build from source
 
-You need a stable Rust toolchain.
+You need rustup: `rust-toolchain.toml` pins the compiler (Rust 1.98.1), and rustup
+fetches it on the first build.
 
 ```sh
 git clone https://github.com/comino/benchy-mcp && cd benchy-mcp

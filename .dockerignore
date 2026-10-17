@@ -11,6 +11,7 @@
 !docs/DIALECT.md
 !packaging/
 !packaging/package.sh
+!rust-toolchain.toml
 !packaging/third_party_licenses.py
 !packaging/README.md
 !examples/

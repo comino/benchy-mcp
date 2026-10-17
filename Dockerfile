@@ -16,6 +16,8 @@ CMD ["/data"]
 FROM runtime AS release
 COPY . /opt/benchy/
 
+# The same Rust as rust-toolchain.toml, which the native bundles are built with;
+# scripts/check_toolchain.py keeps the two in step.
 FROM rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 \

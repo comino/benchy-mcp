@@ -57,8 +57,11 @@ export DUCKDB_LIB_DIR=/path DUCKDB_INCLUDE_DIR=/path LD_LIBRARY_PATH=/path
 Do not switch DuckDB to its `bundled` feature. The crates.io sources cannot build ICU, and
 without it a TIMESTAMPTZ column loses date_trunc, time_bucket and interval arithmetic.
 
-Use the stable Rust toolchain, and `--release` for tests too: the integration tests drive the
-built binary, and `scripts/ci.sh` tests the release build.
+`rust-toolchain.toml` pins the compiler, which rustup installs on the first cargo command: every
+build, local, CI, release and the Dockerfile's, uses that one, and `scripts/check_toolchain.py`
+fails if the workflows, the Dockerfile or `rust-version` in Cargo.toml name another. To update
+it, change all of them in one commit. Use `--release` for tests too: the integration tests drive
+the built binary, and `scripts/ci.sh` tests the release build.
 
 ```sh
 cargo test --release --test escape          # one test file, tests/escape.rs
@@ -76,7 +79,7 @@ BENCHY_CLICKHOUSE_BIN=/path/to/clickhouse scripts/ci.sh  # and the ClickHouse te
 ```
 
 It runs what `.github/workflows/ci.yml` runs, in this order: `cargo fmt --check`,
-`scripts/check_requirements.py`, clippy with warnings as errors, `cargo test --release`, the
+`scripts/check_requirements.py`, `scripts/check_toolchain.py`, clippy with warnings as errors, `cargo test --release`, the
 ClickHouse tests when `BENCHY_CLICKHOUSE_BIN` is set (and fails if one of them was skipped),
 `examples/verify.py`, `examples/host.py`, `examples/host-node.mjs` (when `node` is installed),
 `eval/test_eval.py` (Linux 6.7 or later: the eval's jail is Landlock) and `doctor`. Run it before opening a pull request, and say in the pull
@@ -148,7 +151,8 @@ gh api repos/actions/checkout/git/tags/<sha> --jq .object        # until the typ
 ```
 
 Pick a release at least two weeks old, and read what changed. `dtolnay/rust-toolchain` has no
-release tags, so it is pinned to a commit of its `stable` branch and given `toolchain: stable`.
+release tags, so it is pinned to a commit of its `stable` branch and given the version in
+`rust-toolchain.toml` as `toolchain:`.
 
 Only the release job may sign: it alone has `id-token: write` and `attestations: write`, and it
 runs in the `release` environment after the tests pass. An owner can configure required reviewers
