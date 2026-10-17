@@ -676,6 +676,12 @@ fetched again by id.
 - `a_timestamptz_arrives_intact` — a value is never silently blank.
 - `nested_types_render_rather_than_vanishing` — lists, structs and maps render.
 - `every_common_type_renders_as_something_a_reader_can_use` — one sweep across the common types.
+- `an_infinite_time_renders_as_duckdb_writes_it` — an infinite DATE, TIMESTAMP at every
+  precision or TIMESTAMPTZ renders as `infinity` or `-infinity`, at the top level, in a list and
+  in a struct. Arrow carries these values as plain numbers. A TIMESTAMPTZ rendered as the year
+  294247, and a TIMESTAMP or a DATE as an `ERROR: Cast error` cell, in a result marked complete.
+  A TIMESTAMPTZ in a list renders as its instant, where before it rendered as a "not rendered"
+  marker.
 - `cap_measured_on_the_wire` — the whole response, JSON-escaped as the client receives it, stays
   under the byte cap, and says it was cut. Nine shapes at two caps, among them one 1 MB value,
   200 columns, 60 statements in a batch, and text that escaping inflates sixfold.
@@ -1205,6 +1211,16 @@ memory).
   zone-less timestamp is read as UTC, or in the zone its source's `timezone` names; a zone the
   engine does not know stops startup.
 - `a_zone_less_timestamp_is_read_in_its_sources_zone` — the conversion itself, at the SQL.
+- `an_infinite_timestamp_is_kept_from_every_source` — `infinity` and `-infinity` load as
+  themselves, never as a null, from a CSV, a Parquet file at every precision, a host's Arrow
+  stream at every unit, zone-less and zoned, declared non-nullable, and a connector's. The
+  zone-less conversion's `epoch_us` gives NULL for either, and these sources loaded both as
+  nulls. A nanosecond column was refused, because `epoch_ns` of an infinity is the sentinel itself.
+  `describe`'s extents leave them out.
+- `an_ndjson_infinity_is_kept` *(planned)* — DuckDB 1.5.5's JSON reader reads `infinity` and
+  `-infinity` in a timestamp column as 1900-01-01 00:00:00, and an NDJSON file loads with
+  that time. The text cast above never takes them: they are under 19 bytes, so the file is read
+  the sniffed way, which gives the same time.
 - `clickhouse_looks_the_same_as_a_file` — ClickHouse's own `ArrowStream`, LZ4 bodies and zoned
   `DateTime64` included, fetched by `clickhouse local` as a connector, against the fixture as CSV.
   It needs the ClickHouse binary, named by `BENCHY_CLICKHOUSE_BIN` as for REQ-16's tests, and

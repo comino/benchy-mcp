@@ -6,6 +6,14 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- Keep `infinity` and `-infinity` timestamps on load. A zone-less or zoned timestamp from
+  Parquet, a host's Arrow stream or a connector used to become a null, even in a column
+  declared non-nullable. A nanosecond one used to be refused as finer than a microsecond.
+  Results now show an infinite DATE, TIMESTAMP (any precision) or TIMESTAMPTZ as `infinity` or
+  `-infinity`, both at the top level and in lists and structs. Before, a result showed the year
+  294247 or an `ERROR: Cast error` cell and was still marked complete. A TIMESTAMPTZ inside a
+  list or struct now shows its UTC instant.
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,

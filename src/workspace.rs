@@ -2847,7 +2847,7 @@ unsafe fn collect_arrow(
 ) -> Option<QueryResult> {
     use duckdb::arrow::array::{Array, StructArray};
     use duckdb::arrow::ffi::{from_ffi, FFI_ArrowArray, FFI_ArrowSchema};
-    use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
+    use duckdb::arrow::util::display::{ArrayFormatter, ArrayFormatterFactory, FormatOptions};
 
     let cols = ffi::duckdb_column_count(r) as usize;
     if cols == 0 {
@@ -2894,7 +2894,8 @@ unsafe fn collect_arrow(
     let fmt = FormatOptions::default()
         .with_display_error(true)
         .with_timestamp_format(Some("%Y-%m-%d %H:%M:%S%.f"))
-        .with_timestamp_tz_format(Some("%Y-%m-%d %H:%M:%S%.f%:z"));
+        .with_timestamp_tz_format(Some("%Y-%m-%d %H:%M:%S%.f%:z"))
+        .with_formatter_factory(Some(&TIMES));
 
     let mut keep = Keep::new();
     let mut partial = None;
@@ -2931,16 +2932,18 @@ unsafe fn collect_arrow(
                 .map(|i| format!("col{i}"))
                 .collect();
         }
+        // A date or a timestamp at the top level is [`Times`]'s too: arrow-rs asks the factory
+        // only for what is inside a list, a struct or a map.
         let formatters: Vec<_> = batch
             .columns()
             .iter()
-            .map(|c| ArrayFormatter::try_new(c.as_ref(), &fmt))
+            .map(|c| {
+                TIMES
+                    .create_array_formatter(c.as_ref(), &fmt, None)
+                    .transpose()
+                    .unwrap_or_else(|| ArrayFormatter::try_new(c.as_ref(), &fmt))
+            })
             .collect();
-        // arrow-rs refuses to format a timestamp whose zone is *named* ("Etc/UTC", which is what
-        // DuckDB reports) without its chrono-tz feature. The session is pinned to UTC and that is
-        // verified at seal, so these are rendered from the raw instant instead — which also keeps
-        // the output byte-identical to DuckDB's own `::VARCHAR`.
-        let utc: Vec<Option<Vec<i64>>> = batch.columns().iter().map(utc_micros).collect();
 
         for row in 0..batch.len() {
             let mut cells = Vec::with_capacity(batch.num_columns());
@@ -2949,8 +2952,6 @@ unsafe fn collect_arrow(
                     Cell::Null
                 } else if let Some(what) = unfaithful.get(col).copied().flatten() {
                     not_rendered(what)
-                } else if let Some(v) = &utc[col] {
-                    Cell::Text(crate::result::timestamp_utc(v[row]))
                 } else {
                     match f {
                         Ok(f) => keep.value(f.value(row).to_string(), cap.max_cell_bytes),
@@ -2980,38 +2981,127 @@ unsafe fn collect_arrow(
     })
 }
 
-/// Microsecond instants for a UTC timestamp column, or `None` for anything else.
+/// Dates and timestamps, rendered as DuckDB's own `::VARCHAR` renders them, at the top level of
+/// a result and inside a list, a struct or a map.
 ///
-/// DuckDB hands us `Timestamp(_, Some("Etc/UTC"))`. arrow-rs cannot format a named zone without
-/// chrono-tz, and pulling in a timezone database to print `+00` on data we have already pinned to
-/// UTC would be a strange trade. If the zone is ever *not* UTC we return `None` and the value
-/// takes the normal path, so a wrong offset is never invented.
-fn utc_micros(a: &duckdb::arrow::array::ArrayRef) -> Option<Vec<i64>> {
-    use duckdb::arrow::array::{
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray,
-    };
-    use duckdb::arrow::datatypes::{DataType, TimeUnit};
+/// - **`infinity` and `-infinity`.** DuckDB holds them as the largest value of the type and its
+///   negation (`i32::MAX` days, `i64::MAX` ticks at every unit), which Arrow carries as plain
+///   numbers. Formatted as numbers, a TIMESTAMPTZ's was the year 294247, and a TIMESTAMP's or a
+///   DATE's an `ERROR: Cast error` cell in a result marked complete
+///   (`an_infinite_time_renders_as_duckdb_writes_it`).
+/// - **A UTC instant.** DuckDB hands us `Timestamp(_, Some("Etc/UTC"))`, and arrow-rs cannot
+///   format a named zone without chrono-tz; pulling in a timezone database to print `+00` on
+///   data we have already pinned to UTC (verified at seal) would be a strange trade. These are
+///   rendered from the raw instant instead, which also keeps the output byte-identical to
+///   DuckDB's `::VARCHAR`. A zone that is ever *not* UTC takes arrow-rs's own path, so a wrong
+///   offset is never invented.
+///
+/// Anything else, and a finite zone-less value, is arrow-rs's own formatting.
+#[derive(Debug)]
+struct Times;
 
-    let DataType::Timestamp(unit, Some(tz)) = a.data_type() else {
-        return None;
-    };
-    let z = tz.as_ref();
-    if !matches!(z, "UTC" | "Etc/UTC" | "utc" | "Z" | "+00:00" | "00:00") {
-        return None;
-    }
-    macro_rules! scale {
-        ($t:ty, $f:expr) => {
-            a.as_any()
-                .downcast_ref::<$t>()
-                .map(|v| v.values().iter().map($f).collect())
+static TIMES: Times = Times;
+
+/// The raw values of a column [`Times`] renders: days, or a timestamp's ticks, with the unit
+/// that makes them microseconds when they are a UTC instant.
+enum Ticks<'a> {
+    Days(&'a [i32]),
+    Time(&'a [i64], Option<duckdb::arrow::datatypes::TimeUnit>),
+}
+
+struct TimeFormat<'a> {
+    array: &'a dyn duckdb::arrow::array::Array,
+    ticks: Ticks<'a>,
+    /// arrow-rs's formatter, for a finite value that is not a UTC instant.
+    finite: Option<duckdb::arrow::util::display::ArrayFormatter<'a>>,
+    null: &'a str,
+}
+
+impl duckdb::arrow::util::display::ArrayFormatterFactory for Times {
+    fn create_array_formatter<'a>(
+        &self,
+        array: &'a dyn duckdb::arrow::array::Array,
+        options: &duckdb::arrow::util::display::FormatOptions<'a>,
+        _field: Option<&'a duckdb::arrow::datatypes::Field>,
+    ) -> Result<
+        Option<duckdb::arrow::util::display::ArrayFormatter<'a>>,
+        duckdb::arrow::error::ArrowError,
+    > {
+        use duckdb::arrow::array::AsArray;
+        use duckdb::arrow::datatypes::{
+            DataType, Date32Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+            TimestampNanosecondType, TimestampSecondType,
         };
+        use duckdb::arrow::util::display::ArrayFormatter;
+        let ticks = match array.data_type() {
+            DataType::Date32 => Ticks::Days(array.as_primitive::<Date32Type>().values()),
+            DataType::Timestamp(unit, zone) => {
+                let raw: &[i64] = match unit {
+                    TimeUnit::Second => array.as_primitive::<TimestampSecondType>().values(),
+                    TimeUnit::Millisecond => {
+                        array.as_primitive::<TimestampMillisecondType>().values()
+                    }
+                    TimeUnit::Microsecond => {
+                        array.as_primitive::<TimestampMicrosecondType>().values()
+                    }
+                    TimeUnit::Nanosecond => {
+                        array.as_primitive::<TimestampNanosecondType>().values()
+                    }
+                };
+                let utc = zone.as_deref().is_some_and(|z| {
+                    matches!(z, "UTC" | "Etc/UTC" | "utc" | "Z" | "+00:00" | "00:00")
+                });
+                Ticks::Time(raw, utc.then_some(*unit))
+            }
+            _ => return Ok(None),
+        };
+        let finite = match ticks {
+            Ticks::Time(_, Some(_)) => None,
+            _ => Some(ArrayFormatter::try_new(array, options)?),
+        };
+        Ok(Some(ArrayFormatter::new(
+            Box::new(TimeFormat {
+                array,
+                ticks,
+                finite,
+                null: options.null(),
+            }),
+            options.safe(),
+        )))
     }
-    match unit {
-        TimeUnit::Second => scale!(TimestampSecondArray, |x| x * 1_000_000),
-        TimeUnit::Millisecond => scale!(TimestampMillisecondArray, |x| x * 1_000),
-        TimeUnit::Microsecond => scale!(TimestampMicrosecondArray, |x| *x),
-        TimeUnit::Nanosecond => scale!(TimestampNanosecondArray, |x| x.div_euclid(1_000)),
+}
+
+impl duckdb::arrow::util::display::DisplayIndex for TimeFormat<'_> {
+    fn write(
+        &self,
+        idx: usize,
+        f: &mut dyn std::fmt::Write,
+    ) -> duckdb::arrow::util::display::FormatResult {
+        use duckdb::arrow::datatypes::TimeUnit;
+        if self.array.is_null(idx) {
+            f.write_str(self.null)?;
+            return Ok(());
+        }
+        let (v, top) = match self.ticks {
+            Ticks::Days(d) => (i64::from(d[idx]), i64::from(i32::MAX)),
+            Ticks::Time(t, _) => (t[idx], i64::MAX),
+        };
+        if v == top {
+            f.write_str("infinity")?;
+        } else if v == -top {
+            f.write_str("-infinity")?;
+        } else if let Ticks::Time(_, Some(unit)) = self.ticks {
+            let micros = match unit {
+                TimeUnit::Second => v.saturating_mul(1_000_000),
+                TimeUnit::Millisecond => v.saturating_mul(1_000),
+                TimeUnit::Microsecond => v,
+                TimeUnit::Nanosecond => v.div_euclid(1_000),
+            };
+            f.write_str(&crate::result::timestamp_utc(micros))?;
+        } else if let Some(finite) = &self.finite {
+            finite.value(idx).write(f)?;
+        }
+        Ok(())
     }
 }
 
