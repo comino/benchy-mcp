@@ -663,6 +663,151 @@ fn a_dynamic_pivot_still_runs() {
 }
 
 #[test]
+fn a_pivot_into_a_table_runs() {
+    // DuckDB 1.5.5 runs `CREATE TABLE … AS PIVOT`, and an INSERT from a PIVOT, as a transaction
+    // of its own: BEGIN, the pivot's CREATE TYPE, the statement, COMMIT. The BEGIN was refused as
+    // the agent's `TRANSACTION`, which it never wrote.
+    let mut ws = sealed();
+    let run = |ws: &mut Workspace, sql: &str| {
+        ws.work(sql, &Caps::default())
+            .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    };
+    run(
+        &mut ws,
+        "CREATE TABLE s AS SELECT * FROM (VALUES ('a', 1, 'x'), ('b', 2, 'y'), ('a', 3, 'x')) \
+         t(k, v, j)",
+    );
+    for (sql, made) in [
+        (
+            "CREATE TABLE p AS PIVOT s ON k USING sum(v) GROUP BY j",
+            "p",
+        ),
+        (
+            "CREATE TABLE q AS SELECT * FROM (PIVOT s ON k USING sum(v) GROUP BY j)",
+            "q",
+        ),
+        (
+            "CREATE TABLE r AS SELECT * FROM (PIVOT s ON k USING sum(v)) \
+             JOIN (PIVOT s ON j USING sum(v)) ON true",
+            "r",
+        ),
+    ] {
+        let out = run(&mut ws, sql);
+        assert_eq!(out.len(), 1, "{sql}: one result, the CREATE's: {out:?}");
+        let out = run(&mut ws, &format!("SELECT * FROM {made} ORDER BY ALL"));
+        assert!(
+            out[0].columns.contains(&"a".to_string()) && out[0].columns.contains(&"b".to_string()),
+            "{sql}: {out:?}"
+        );
+    }
+    // Over a table the same call makes, the pivot's CREATE TYPE does not bind before the batch
+    // runs, and DuckDB's transaction cannot be told from `COPY FROM DATABASE`'s, which looks the
+    // same: refused, saying what to do instead, and that works.
+    let e = ws
+        .work(
+            "CREATE TABLE s2 AS SELECT * FROM s; CREATE TABLE u AS PIVOT s2 ON k USING sum(v)",
+            &Caps::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.starts_with("statement 2 is TRANSACTION")
+            && e.contains("make that table in a call of its own first"),
+        "{e}"
+    );
+    run(&mut ws, "CREATE TABLE s2 AS SELECT * FROM s");
+    run(&mut ws, "CREATE TABLE u AS PIVOT s2 ON k USING sum(v)");
+
+    let out = run(&mut ws, "SELECT j, a, b FROM p ORDER BY j");
+    assert_eq!(flatten(&out).trim(), "x 4 y 2", "{out:?}");
+    // an INSERT from a PIVOT too, and the statements after it are numbered as the agent wrote them
+    let e = ws
+        .work(
+            "INSERT INTO p SELECT * FROM (PIVOT s ON k USING sum(v) GROUP BY j); SELECT nope FROM p",
+            &Caps::default(),
+        )
+        .unwrap_err();
+    match e.cause() {
+        benchy_mcp::WorkError::Sql { index, .. } => assert_eq!(*index, 2, "{e}"),
+        other => panic!("{other:?}"),
+    }
+    let out = run(&mut ws, "SELECT count(*) FROM p");
+    assert_eq!(flatten(&out).trim(), "4");
+    // and an UPDATE, a DELETE and a MERGE that read one, which DuckDB wraps the same way
+    run(
+        &mut ws,
+        "UPDATE p SET a = (SELECT max(a) FROM (PIVOT s ON k USING sum(v))) WHERE j = 'x'; \
+         DELETE FROM p WHERE j IN (SELECT j FROM (PIVOT s ON k USING sum(v) GROUP BY j) \
+         WHERE a IS NULL); \
+         MERGE INTO p USING (PIVOT s ON k USING sum(v) GROUP BY j) src ON p.j = src.j \
+         WHEN MATCHED THEN UPDATE SET b = 7",
+    );
+    let out = run(&mut ws, "SELECT j, a, b FROM p");
+    assert_eq!(flatten(&out).trim(), "x 4 7 x 4 7", "{out:?}");
+    // and the pivots' types went with their batches
+    let out = run(
+        &mut ws,
+        "SELECT count(*) FROM duckdb_types() WHERE database_name = 'temp' AND NOT internal",
+    );
+    assert_eq!(flatten(&out).trim(), "0");
+
+    // A transaction the agent writes is still refused, and nothing it held stays: around a CREATE
+    // of its own, around a PIVOT, which DuckDB does not wrap, left open, or alone. A refusal
+    // after a wrapped statement counts the statements the agent wrote.
+    for (sql, at, refused) in [
+        (
+            "BEGIN TRANSACTION; CREATE TABLE t1 AS SELECT 1 AS n; COMMIT",
+            1,
+            "TRANSACTION",
+        ),
+        (
+            "BEGIN TRANSACTION; CREATE TABLE t2 AS SELECT 1 AS n",
+            1,
+            "TRANSACTION",
+        ),
+        (
+            "SELECT 1; BEGIN TRANSACTION; PIVOT s ON k USING sum(v); COMMIT",
+            2,
+            "TRANSACTION",
+        ),
+        (
+            "BEGIN; CREATE TABLE t3 AS PIVOT s ON k USING sum(v); COMMIT",
+            1,
+            "TRANSACTION",
+        ),
+        (
+            "CREATE TABLE t4 AS PIVOT s ON k USING sum(v); ROLLBACK",
+            2,
+            "TRANSACTION",
+        ),
+        ("COMMIT", 1, "TRANSACTION"),
+        (
+            "CREATE TABLE t5 AS PIVOT s ON k USING sum(v); SET threads = 1",
+            2,
+            "SET",
+        ),
+    ] {
+        match ws
+            .work(sql, &Caps::default())
+            .as_ref()
+            .map_err(|e| e.cause())
+        {
+            Err(benchy_mcp::WorkError::Denied { index, kind, .. }) => {
+                assert_eq!((*index, *kind), (at, refused), "{sql}")
+            }
+            other => panic!("{sql}: must be refused as {refused}, got {other:?}"),
+        }
+    }
+    let out = run(
+        &mut ws,
+        "SELECT count(*) FROM duckdb_tables() WHERE table_name IN ('t1', 't2', 't3', 't4', 't5') \
+         UNION ALL SELECT count(*) FROM duckdb_types() WHERE database_name = 'temp' \
+         AND NOT internal",
+    );
+    assert_eq!(flatten(&out).trim(), "0 0", "{out:?}");
+}
+
+#[test]
 fn each_statement_kind_is_named_as_duckdb_types_it() {
     // The kind is what a refusal names and what the corpus records. Named wrong, a refusal tells
     // the agent it did something it did not do — `MERGE` and `UPDATE EXTENSIONS` were both

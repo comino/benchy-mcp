@@ -11,6 +11,10 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   what is left of the batch's deadline, at most 0.5 s. On a large table of unique text it had
   carried a batch past the hard deadline: the engine was killed, the agent's own tables were
   lost, and the error blamed planning.
+- `CREATE TABLE … AS PIVOT`, and an INSERT, UPDATE, DELETE or MERGE that reads a PIVOT, now
+  run. DuckDB wraps each in a transaction of its own, which was refused as the agent's
+  `TRANSACTION`. A transaction the agent writes is still refused, and a refused `TRANSACTION`
+  now says what to do when the PIVOT reads a table made earlier in the same call.
 
 ## [0.1.0] — 2026-10-16
 

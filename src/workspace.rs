@@ -244,6 +244,41 @@ fn enum_refused(what: &str) -> String {
     )
 }
 
+/// Where a batch is in the transaction DuckDB 1.5.5 wraps around a statement that keeps a dynamic
+/// PIVOT: a TRANSACTION, the pivot's CREATE TYPE for each pivot, the statement, a TRANSACTION.
+/// Measured, it wraps every statement that is not a SELECT: `CREATE TABLE … AS PIVOT`, and an
+/// INSERT, UPDATE, DELETE or MERGE that reads one. Each holds the agent's statement number the
+/// first TRANSACTION stands at (`a_pivot_into_a_table_runs`).
+///
+/// The C API gives a statement's type and not its text, so a TRANSACTION of DuckDB's is told
+/// from the agent's by what follows it, which the agent cannot forge: a type only a dynamic
+/// PIVOT makes (`pivots_type`), then a statement that is not a SELECT. Neither TRANSACTION runs.
+/// A batch that only looks like one is refused as the agent's TRANSACTION where the shape breaks;
+/// what ran inside it before then was a pivot's CREATE TYPE or an allowed statement, each as it
+/// would run alone, and a CREATE of the agent's own after its TRANSACTION is undone. A
+/// TRANSACTION that ends the batch, or is never closed, is refused up front (`crate::guard`).
+#[derive(Debug, Clone, Copy)]
+enum Wrap {
+    None,
+    /// A TRANSACTION, not run: a CREATE must follow, and make a pivot's type.
+    Opened(u64),
+    /// A pivot's type made; another may follow, then the statement that is not a SELECT.
+    Typed(u64),
+    /// The statement ran; a TRANSACTION must follow, which closes it.
+    Ran(u64),
+}
+
+impl Wrap {
+    /// The agent's own TRANSACTION, at statement `at` counted from 0, refused.
+    fn refused(at: u64) -> WorkError {
+        WorkError::Denied {
+            index: at as usize + 1,
+            kind: "TRANSACTION",
+            allowed: ALLOWED,
+        }
+    }
+}
+
 /// What a CREATE or ALTER left in the agent's catalogs (`Workspace::inspect`).
 #[derive(Debug, PartialEq, Eq)]
 enum Made {
@@ -472,7 +507,19 @@ impl std::fmt::Display for WorkError {
                 write!(
                 f, "statement {index} is {kind}, which is not allowed here; nothing after it ran. \
                     Allowed: {allowed}. The data is already loaded as tables — file and network \
-                    functions are unavailable.")
+                    functions are unavailable.")?;
+                // DuckDB's own transaction around a PIVOT into a table, over a table the same
+                // batch makes, is refused up front (`crate::guard`, `a_pivot_into_a_table_runs`).
+                if *kind == "TRANSACTION" {
+                    write!(
+                        f,
+                        " Transactions are not available. If statement {index} keeps a \
+                        PIVOT (CREATE TABLE … AS PIVOT, or an INSERT, UPDATE, DELETE or MERGE \
+                        that reads one) over a table made earlier in the same call, make that \
+                        table in a call of its own first."
+                    )?;
+                }
+                Ok(())
             }
             WorkError::Parse(m, hint) => {
                 write!(f, "could not parse: {m}")?;
@@ -1566,6 +1613,9 @@ impl Workspace {
         let mut added = 0u64;
         // Whether a dynamic PIVOT made a type, which goes when the batch does.
         let mut pivoted = false;
+        // Where the batch is in a transaction DuckDB wrapped around a statement that keeps a
+        // dynamic PIVOT (`Wrap`), and the agent's statement it wraps.
+        let mut wrap = Wrap::None;
         let mut watchdog = Some(watchdog);
         let mut failure = None;
         unsafe {
@@ -1602,6 +1652,44 @@ impl Workspace {
                 // statement that depends on an earlier one in this batch; now it is bound, so it
                 // can be classified — and a refused kind is refused here, before it executes.
                 let kind = ffi::duckdb_prepared_statement_type(prep);
+                // DuckDB's own transaction around a statement that keeps a dynamic PIVOT
+                // (`Wrap`): neither of its TRANSACTIONs runs, and what it wraps runs as every
+                // statement does, each CREATE in a transaction of benchy's. Any other TRANSACTION
+                // is the agent's, and refused where it stands.
+                let transaction =
+                    kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_TRANSACTION;
+                let refused = match wrap {
+                    Wrap::None | Wrap::Ran(_) if transaction => {
+                        wrap = match wrap {
+                            Wrap::None => Wrap::Opened(mine),
+                            _ => Wrap::None,
+                        };
+                        ffi::duckdb_destroy_prepare(&mut prep);
+                        added += 1;
+                        continue;
+                    }
+                    Wrap::Opened(at)
+                        if kind != ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE =>
+                    {
+                        Some(at)
+                    }
+                    Wrap::Typed(at)
+                        if transaction
+                            || kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT =>
+                    {
+                        Some(at)
+                    }
+                    Wrap::Ran(at) => Some(at),
+                    _ => None,
+                };
+                if let Some(at) = refused {
+                    ffi::duckdb_destroy_prepare(&mut prep);
+                    if let Some(w) = watchdog.take() {
+                        finish(&done, w);
+                    }
+                    failure = Some(Wrap::refused(at));
+                    break;
+                }
                 if !crate::guard::is_allowed(kind) {
                     ffi::duckdb_destroy_prepare(&mut prep);
                     if let Some(w) = watchdog.take() {
@@ -1673,17 +1761,32 @@ impl Workspace {
                     // by_its_own_deadline`). The statement itself has finished; what is held up
                     // is benchy's own bounded work, a listing or two. A deadline that passes
                     // meanwhile stops the next statement, before it starts.
+                    let opened = matches!(wrap, Wrap::Opened(_));
                     let made = {
                         let _hold = done.0.lock().unwrap_or_else(|e| e.into_inner());
                         self.inspect(alter, sql).and_then(|made| match made {
                             Made::Taken(why) => Ok(Err(why)),
+                            // Not DuckDB's: undone below.
+                            made if opened && made != Made::PivotType => Ok(Ok(made)),
                             made => self.settle(true).map(|()| Ok(made)),
                         })
                     };
                     match made {
                         Ok(Ok(made)) => {
+                            if let (Wrap::Opened(at), false) = (wrap, made == Made::PivotType) {
+                                // A TRANSACTION of the agent's own, before a CREATE of its own.
+                                if let Some(w) = watchdog.take() {
+                                    finish(&done, w);
+                                }
+                                let _ = self.settle(false);
+                                failure = Some(Wrap::refused(at));
+                                break;
+                            }
                             if made == Made::PivotType {
                                 pivoted = true;
+                                if let Wrap::Opened(at) = wrap {
+                                    wrap = Wrap::Typed(at);
+                                }
                                 if result.rows.is_empty() {
                                     added += 1;
                                     continue;
@@ -1709,6 +1812,9 @@ impl Workspace {
                             break;
                         }
                     }
+                }
+                if let Wrap::Typed(at) = wrap {
+                    wrap = Wrap::Ran(at);
                 }
                 self.next_result_id += 1;
                 queries.push(kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT);

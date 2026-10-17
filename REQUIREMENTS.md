@@ -103,6 +103,14 @@ table functions are typed `SELECT`, and only the engine lock stops them.
   gets that far: under the lock DuckDB will not prepare it.
 - `a_dynamic_pivot_still_runs` — legitimate dependent SQL still runs: DuckDB splits a dynamic
   `PIVOT` into a `CREATE` plus a statement that depends on it.
+- `a_pivot_into_a_table_runs` — `CREATE TABLE … AS PIVOT`, alone or wrapped in a SELECT, and an
+  INSERT from a PIVOT run. DuckDB 1.5.5 runs each as a TRANSACTION, the pivot's `CREATE TYPE`,
+  the statement and a TRANSACTION, and the first was refused as a `TRANSACTION` the agent never
+  wrote. Neither TRANSACTION of that shape runs; one the agent writes is still refused, around
+  its own CREATE (undone), around a PIVOT (which DuckDB does not wrap), alone or left open.
+  Over a table made earlier in the same call the pivot's type does not bind up front, and the
+  shape cannot be told from `COPY FROM DATABASE`'s: refused, and the refusal says to make that
+  table in a call of its own first.
 - `each_statement_kind_is_named_as_duckdb_types_it` — a refusal names the kind it refused, and
   the corpus records each case's kind, so every kind the classifier can meet under the lock is
   pinned. `MERGE` and `UPDATE EXTENSIONS` were both refused as "UNKNOWN". So are the typings that
