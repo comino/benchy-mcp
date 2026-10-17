@@ -146,6 +146,61 @@ fn every_common_type_renders_as_something_a_reader_can_use() {
 }
 
 #[test]
+fn an_infinite_time_renders_as_duckdb_writes_it() {
+    // DuckDB holds `infinity` and `-infinity` as the largest and smallest values of a date or a
+    // timestamp. Read through Arrow they are plain numbers: a TIMESTAMPTZ rendered as the year
+    // 294247, and a TIMESTAMP or a DATE as an `ERROR: Cast error` cell in a result marked
+    // complete. Each must render as its own `::VARCHAR` does, at the top level and nested.
+    let mut ws = bench();
+    for ty in [
+        "TIMESTAMPTZ",
+        "TIMESTAMP",
+        "TIMESTAMP_S",
+        "TIMESTAMP_MS",
+        "TIMESTAMP_NS",
+        "DATE",
+    ] {
+        for v in ["infinity", "-infinity"] {
+            let sql = format!("SELECT '{v}'::{ty}");
+            let out = ws.work(&sql, &Caps::default()).expect("runs");
+            assert!(out[0].partial.is_none(), "{sql}: {:?}", out[0].partial);
+            assert_eq!(cells(&mut ws, &sql), [v], "{sql}");
+            // A list or a struct is rendered as Arrow writes one, not as DuckDB's `::VARCHAR`
+            // does, so what is held to is the value inside it.
+            for (shape, sql, want) in [
+                ("list", format!("SELECT ['{v}'::{ty}]"), format!("[{v}]")),
+                (
+                    "struct",
+                    format!("SELECT {{'a': '{v}'::{ty}}}"),
+                    format!("{{a: {v}}}"),
+                ),
+            ] {
+                assert_eq!(
+                    cells(&mut ws, &sql),
+                    [want.as_str()],
+                    "{ty} {v} in a {shape}"
+                );
+            }
+        }
+    }
+    // And a finite value beside them, in the same column, is untouched.
+    let got = cells(
+        &mut ws,
+        "SELECT v FROM (VALUES (TIMESTAMP 'infinity'), (TIMESTAMP '2026-01-01 10:00:00'), \
+         (TIMESTAMP '-infinity')) t(v) ORDER BY v",
+    );
+    assert_eq!(got, ["-infinity", "2026-01-01 10:00:00", "infinity"]);
+    // A finite TIMESTAMPTZ inside a list is the instant, as at the top level.
+    assert_eq!(
+        cells(
+            &mut ws,
+            "SELECT [TIMESTAMPTZ '2026-01-01 10:00:00.5+00', NULL]"
+        ),
+        ["[2026-01-01 10:00:00.5+00, ]"]
+    );
+}
+
+#[test]
 fn a_value_arrow_cannot_carry_faithfully_says_so() {
     // BIT, BIGNUM and TIME WITH TIME ZONE come through Arrow as bytes or without their offset.
     // Rendering those bytes produces a confident wrong value — `04f5` for the bits 0101 — which

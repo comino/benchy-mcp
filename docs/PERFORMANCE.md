@@ -257,6 +257,33 @@ aarch64 box under load 4–8 from other work. Whole sessions (load, profile, one
 - **`profile.gaps`** counts per series in DuckDB rather than listing the anomalies in order:
   the same window, one aggregate over its anomalous rows.
 
+## Infinite timestamps kept on load: 21 instructions a row
+
+A zone-less timestamp is converted with `make_timestamptz(epoch_us(ts))` (src/canonical.rs),
+chosen over `timezone('UTC', ts)` because it skips ICU's calendar. `epoch_us` of `infinity` and
+`-infinity` is NULL, so both were loaded as nulls from Parquet, Arrow and connector sources
+(REQ-15 `an_infinite_timestamp_is_kept_from_every_source`). Now the conversion is
+`coalesce(make_timestamptz(epoch_us(ts)), CAST(ts AS TIMESTAMPTZ))`, so ICU's cast handles only
+the rows `epoch_us` returned nothing for: the infinities and the nulls.
+
+Measured with DuckDB 1.5.5 alone (its Python package), on one thread: the eval CSV's 840,960
+timestamps, converted into a table ten times, three runs of each, minus the same run with no
+conversion. The spread was under 1%.
+
+| conversion | per load of the CSV | per row |
+|---|---|---|
+| `make_timestamptz(epoch_us(ts))`, before | 29 M | 35 |
+| `coalesce(…, CAST(ts AS TIMESTAMPTZ))`, taken | 47 M | 56 |
+| `CASE WHEN isfinite(ts) THEN … ELSE CAST(ts AS TIMESTAMPTZ) END` | 50 M | 60 |
+| `timezone('UTC', ts)` | 1,269 M | 1,509 |
+
+The change costs 18 M instructions per load of that CSV. A whole session that loads it and asks
+`describe` counts 5.2–5.5 G both before and after (five runs of each, interleaved), so the
+difference is lost in a file load's 3–5% spread. The fast path is still about 27 times cheaper
+than ICU's. A nanosecond column's check for digits finer than a microsecond now skips an
+infinity (`isfinite(ts) AND …`). `epoch_ns` of `infinity` returns the sentinel itself, which had
+the column refused.
+
 ## R6-W. Wide rows on one thread
 
 A CSV or JSON file's stage is held to 256 MiB and spills past it (R4, "Memory and disk"). A stage

@@ -1039,3 +1039,139 @@ fn a_stated_shape_looks_the_same_from_every_source() {
     assert!(!describe.contains("looks like"), "{describe}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What [`an_infinite_timestamp_is_kept_from_every_source`] asks of each table: its type, and how
+/// many of its three rows are null, `infinity`, `-infinity` and finite.
+fn infinities(table: &str) -> String {
+    format!(
+        "SELECT any_value(typeof(ts)) || ': ' || count(*) FILTER (WHERE ts IS NULL) || ' null, ' \
+         || count(*) FILTER (WHERE ts = TIMESTAMPTZ 'infinity') || ' infinity, ' \
+         || count(*) FILTER (WHERE ts = TIMESTAMPTZ '-infinity') || ' -infinity, ' \
+         || count(*) FILTER (WHERE isfinite(ts)) || ' finite' AS seen FROM {table}"
+    )
+}
+
+#[test]
+fn an_infinite_timestamp_is_kept_from_every_source() {
+    // DuckDB holds `infinity` and `-infinity` as timestamps — an open-ended validity range, a
+    // meter not yet retired. The zone-less conversion's `epoch_us` gives NULL for either, which
+    // made both a null, on a column declared non-nullable too: from a Parquet file, a host's
+    // Arrow stream (zoned as well, as it is staged zone-less) and a connector's. A nanosecond
+    // one was refused as finer than a microsecond. A CSV kept them, and is held to it here.
+    // NDJSON is not here: DuckDB 1.5.5's own JSON reader reads `infinity` as 1900-01-01.
+    const KEPT: &str = "TIMESTAMP WITH TIME ZONE: 0 null, 1 infinity, 1 -infinity, 1 finite";
+    let dir = unique("infinity");
+    let mut sources = Vec::new();
+    std::fs::write(
+        dir.join("csv_naive.csv"),
+        "ts,kw\n1970-01-01 00:00:00,1\ninfinity,2\n-infinity,3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("csv_zoned.csv"),
+        "ts,kw\n1970-01-01 00:00:00+00,1\ninfinity,2\n-infinity,3\n",
+    )
+    .unwrap();
+    for name in ["csv_naive", "csv_zoned"] {
+        sources.push(format!(
+            "{name}={}",
+            dir.join(format!("{name}.csv")).display()
+        ));
+    }
+    let c = duckdb::Connection::open_in_memory().unwrap();
+    // No TIMESTAMP_S: DuckDB 1.5.5 cannot write its infinity to Parquet ("Could not convert
+    // Timestamp(S) to Timestamp(US)"), so no Parquet file holds one.
+    for ty in ["TIMESTAMP", "TIMESTAMP_MS", "TIMESTAMP_NS", "TIMESTAMPTZ"] {
+        let p = dir.join(format!("parquet_{ty}.parquet"));
+        c.execute_batch(&format!(
+            "COPY (SELECT v::{ty} AS ts, k AS kw FROM (VALUES ('1970-01-01 00:00:00', 1), \
+             ('infinity', 2), ('-infinity', 3)) t(v, k)) TO '{}' (FORMAT parquet)",
+            p.display()
+        ))
+        .unwrap();
+        sources.push(format!("parquet_{}={}", ty.to_lowercase(), p.display()));
+    }
+    let args: Vec<&str> = sources
+        .iter()
+        .flat_map(|s| ["--source", s.as_str()])
+        .collect();
+    let mut files = Server::launch(&args, &[]);
+    for s in &sources {
+        let table = s.split_once('=').unwrap().0;
+        let got = files.ask(&infinities(table));
+        assert!(got.contains(KEPT), "{table}: {got}");
+    }
+    // The profile's extents leave the infinities out rather than print them as a year.
+    let described = files.describe();
+    assert!(
+        !described.contains("294247") && !described.contains("290308"),
+        "{described}"
+    );
+
+    // A host's Arrow stream, as it was reported: non-nullable, DuckDB's sentinels, at every
+    // unit, zone-less and zoned.
+    use arrow::array::{TimestampMicrosecondArray, TimestampNanosecondArray};
+    let sentinels = vec![0, i64::MAX, -i64::MAX];
+    let mut host = Host::start(&[]);
+    for unit in [
+        TimeUnit::Second,
+        TimeUnit::Millisecond,
+        TimeUnit::Microsecond,
+        TimeUnit::Nanosecond,
+    ] {
+        for zone in [None, Some("UTC")] {
+            let v = sentinels.clone();
+            let array: ArrayRef = match (unit, zone) {
+                (TimeUnit::Second, None) => Arc::new(TimestampSecondArray::from(v)),
+                (TimeUnit::Second, Some(z)) => {
+                    Arc::new(TimestampSecondArray::from(v).with_timezone(z))
+                }
+                (TimeUnit::Millisecond, None) => Arc::new(TimestampMillisecondArray::from(v)),
+                (TimeUnit::Millisecond, Some(z)) => {
+                    Arc::new(TimestampMillisecondArray::from(v).with_timezone(z))
+                }
+                (TimeUnit::Microsecond, None) => Arc::new(TimestampMicrosecondArray::from(v)),
+                (TimeUnit::Microsecond, Some(z)) => {
+                    Arc::new(TimestampMicrosecondArray::from(v).with_timezone(z))
+                }
+                (TimeUnit::Nanosecond, None) => Arc::new(TimestampNanosecondArray::from(v)),
+                (TimeUnit::Nanosecond, Some(z)) => {
+                    Arc::new(TimestampNanosecondArray::from(v).with_timezone(z))
+                }
+            };
+            let schema = Schema::new(vec![Field::new("ts", array.data_type().clone(), false)]);
+            let batch = RecordBatch::try_new(Arc::new(schema), vec![array]).unwrap();
+            let table = format!("arrow_{unit:?}_{}", zone.unwrap_or("naive")).to_lowercase();
+            let p = dir.join(format!("{table}.arrows"));
+            write_stream(&p, &batch);
+            let r = host.call("attach", json!({"name": table, "path": p}));
+            assert_eq!(r["ok"], true, "{table}: {r}");
+            let got = host.ask(&infinities(&table));
+            assert!(got.contains(KEPT), "{table}: {got}");
+        }
+    }
+    let described = host.describe();
+    assert!(
+        !described.contains("294247") && !described.contains("290308"),
+        "{described}"
+    );
+
+    // And a connector's, declared zone-less and zoned.
+    for (declared, array) in [
+        (
+            "timestamp",
+            Arc::new(TimestampMicrosecondArray::from(sentinels.clone())) as ArrayRef,
+        ),
+        (
+            "timestamptz",
+            Arc::new(TimestampMicrosecondArray::from(sentinels.clone()).with_timezone("UTC"))
+                as ArrayRef,
+        ),
+    ] {
+        let mut s = serve_one_column(&dir, declared, array, "")
+            .unwrap_or_else(|e| panic!("{declared}: refused: {e}"));
+        let got = s.ask(&infinities("(SELECT v AS ts FROM t)"));
+        assert!(got.contains(KEPT), "connector {declared}: {got}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
