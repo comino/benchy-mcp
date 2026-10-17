@@ -221,6 +221,42 @@ and a matching name already paid about 0.9 M on `main` for parses that found not
 its CTEs costs about 0.35–0.4 M more, a tenth of a millisecond here, and an INSERT whose query
 runs to the end nothing. A statement without a WITH or a matching name is not parsed at all.
 
+## The profile's claims, made true: what it costs
+
+Four `describe` claims were stated as facts and were not: an integer reading taken for the
+series key, "none missing or repeated" on checksums that three gaps and three repeats leave as
+they were, anomaly counts cut at 200,001 rows, and past 200,000 series an extent and an "every
+series" of the series examined (REQ-14). Measured against the previous commit, on a 4-core
+aarch64 box under load 4–8 from other work. Whole sessions (load, profile, one `describe`),
+`perf stat -e instructions:u`, three runs each; the profile's own stages from
+`BENCHY_TRACE_TIMINGS`, CPU of every thread, the least of three:
+
+| table | instructions, before → after | profile CPU, before → after |
+|---|---:|---:|
+| the eval's meter data (840,960 rows, 24 series), in time order | 5.21–5.63 → 5.20–5.85 G | 40 → 39 ms |
+| the same, newest first | 5.23–5.30 → 5.22–5.83 G | 38 → 40 ms |
+| the same, shuffled row by row | — | 257 → 578 ms (`profile.settle` 334 ms) |
+| 500 integer device ids × 2,000 times, with an integer CO₂ and RSSI | 36.5–36.8 → 5.90–6.35 G | 5,988 → 252 ms (`profile.key` 95 ms) |
+
+- **The tally's order check.** A series' times that came in order, oldest or newest first, have
+  no repeat, which the checksums cannot prove; the tally keeps that with a compare each way a
+  row, beside the extent it already keeps. `bench/ingest.py`, five runs: the watch thread
+  33.4 → 35.8 ms CPU at exec_series-1m and 36.8 → 38.8 ms at exec_intkey-1m, about 2 ms per
+  million rows; whole-session instructions +0.5% / +0.7% / +2.3% at exec_series-1m, csv-1m and
+  exec_intkey-1m, inside their 6–15% spread. Tracked only rising, the meter data written newest
+  first cost 1.5–1.9 G more, in the exact count below.
+- **`profile.settle`.** A series that fits its checksums but whose times came in no order is
+  settled by an exact `count(DISTINCT t)` per series. Free for a table in time order either way;
+  334 ms for the meter data shuffled row by row, more than the rest of its profile. `SELECT
+  DISTINCT k, t` counted per key was slower, 382 ms.
+- **`profile.key`.** Where two columns of a kind could be the series key, each is asked how many
+  of the first slice of time's rows (the step's sample, about 50,000) follow the row before in
+  their series by the most common distance. About 32 ms each at 1M rows; nothing when only one
+  column could be the key, as in every `bench/ingest.py` scenario. The wrong key had cost
+  5.8 s in `profile.gaps` alone.
+- **`profile.gaps`** counts per series in DuckDB rather than listing the anomalies in order:
+  the same window, one aggregate over its anomalous rows.
+
 ## R6-W. Wide rows on one thread
 
 A CSV or JSON file's stage is held to 256 MiB and spills past it (R4, "Memory and disk"). A stage

@@ -6,6 +6,18 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- `describe` no longer takes an integer reading, such as CO₂ in ppm or an RSSI, for the series
+  key when an integer device id is beside it: where two columns of a kind could be the key, the
+  one whose values cut the first slice of time into series that keep a step wins.
+- A series is called regular ("none missing or repeated") only when that is proven: its count,
+  extent and checksums matched a series with three gaps hidden by three repeats. Times that
+  came in order, rising or falling, prove it; otherwise an exact count of its distinct times does.
+- Gaps, repeats and rows off the step are counted per series exactly. They were counted from a
+  list cut at 200,001 rows, which understated them as if exact and left the series after the
+  cut without notes.
+- Past 200,000 series the time column's range is the table's, the key gets no range, and the
+  line on regular series says which series were examined, never "every series".
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,
