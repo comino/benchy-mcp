@@ -429,6 +429,16 @@ mod tests {
         // Partial at an ABI with TCP rules is some other right dropped: still not full.
         assert_eq!(Posture::Partial.report(4)["network"], false);
         assert!(require_full(&Posture::Partial, 5).is_err());
+        // And it does not blame TCP rules the kernel has.
+        for abi in [4, 5] {
+            let r = Posture::Partial.report(abi);
+            assert!(
+                r["reason"].as_str().is_some_and(
+                    |r| r.contains("some of the ruleset's rights") && !r.contains("TCP")
+                ),
+                "{r}"
+            );
+        }
         // Full is full only with TCP rules to enforce.
         let full = Posture::Full.report(4);
         assert_eq!(full["posture"], "full", "{full}");
