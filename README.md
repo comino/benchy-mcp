@@ -327,7 +327,8 @@ promises: loaded data cannot be changed, file, network and extension escapes are
 runaway query loses the query, not the bench. `doctor --probe` checks what the sandbox allows;
 with `--json` it says so as one JSON object, a verdict and each mechanism, for a host to check
 when its container starts. Without Landlock, or below its minimum ABI, the verdict is "not
-enforced", so is each mechanism's own `enforced`, and the exit status is non-zero.
+enforced", so is each mechanism's own `enforced`, and the exit status is non-zero. Below ABI 4 it
+is "partial", and the exit status is zero.
 
 ```sh
 python3 examples/verify.py ./target/release/benchy-mcp ./examples/data
@@ -343,8 +344,8 @@ The JSON has these keys, and a release may add more, never rename or drop these:
 | `engine` | `"DuckDB v1.5.5"`, the library loaded |
 | `library` | the file it was loaded from, or `null` |
 | `landlock_abi` | the kernel's Landlock ABI, 0 where it has none |
-| `verdict` | `"enforced"` or `"not_enforced"`, as the exit status says |
-| `reason` | why it is not enforced, or `null` |
+| `verdict` | `"enforced"`, `"partial"` (files confined, TCP not: below Landlock ABI 4) or `"not_enforced"`; the exit status is 0 for the first two and 1 for the last |
+| `reason` | why it is partial or not enforced, or `null` |
 | `mechanisms` | one entry each for `engine`, `file_loader` and `network_loader` |
 | `mechanisms[].name` | which |
 | `mechanisms[].enforced` | whether every check that counts held, and at least one counted |
@@ -352,9 +353,11 @@ The JSON has these keys, and a release may add more, never rename or drop these:
 | `mechanisms[].checks` | each `{"check", "allowed", "must_be"}`: what was tried, whether the child could, and what it must; `must_be` is `null` where the right is not Landlock's to withhold on this kernel, and does not count |
 | `mechanisms[].error` | why the probe could not run, or `null` |
 
-The verdict counts what this kernel can refuse. Below Landlock ABI 4 (Linux 6.7) the TCP checks
-do not count, and `"verdict": "enforced"` comes with the network unconfined; a host that relies on
-it checks `landlock_abi`, or starts benchy with `--require-full-sandbox`.
+Below Landlock ABI 4 (Linux 6.7) the kernel has no TCP rules: the TCP checks do not count, and
+where every other one held the verdict is `"partial"` (PARTIAL in prose), with the same `reason`
+as `hello`'s `sandbox_posture`. Its exit status is 0, because benchy serves there without a flag:
+the filesystem boundary it relies on holds. A host that relies on the network boundary too treats
+`"partial"` as a failure, or starts benchy with `--require-full-sandbox`, which refuses it.
 
 ### Bundles
 

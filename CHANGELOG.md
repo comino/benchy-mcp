@@ -101,6 +101,11 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 - **`doctor --probe --json`'s keys are documented**, in the README, and pinned
   (`the_doctor_json_has_the_documented_keys`). The README says that its verdict counts what the
   kernel can refuse, so below ABI 4 `enforced` comes with the network unconfined.
+- **`doctor --probe` says "partial" below Landlock ABI 4** (`doctor_without_tcp_rules_says_partial`).
+  Where every check that counts held but the kernel has no TCP rules, the verdict is `partial`
+  (PARTIAL in prose), with the same `reason` as `hello`'s `sandbox_posture`, rather than
+  `enforced` and VERIFIED. The exit status stays 0, since benchy serves there without a flag;
+  only `not_enforced` is non-zero.
 
 ## [0.1.0] — 2026-10-16
 

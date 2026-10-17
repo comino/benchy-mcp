@@ -1264,8 +1264,9 @@ fn probe_restriction(json: bool) -> bool {
 }
 
 /// The verdict on what the probes found, on a kernel with Landlock ABI `abi`: `Err` with the
-/// reason when REQ-3 is not enforced.
-fn verdict(abi: u32, mechanisms: &[Mechanism]) -> Result<(), String> {
+/// reason when REQ-3 is not enforced, and `Ok(Some(why))` when it is, partially
+/// (`doctor_without_tcp_rules_says_partial`).
+fn verdict(abi: u32, mechanisms: &[Mechanism]) -> Result<Option<String>, String> {
     // First, and whatever the checks say: below the minimum every check is above the kernel's
     // ABI and skipped (`expected`), and nothing checked is not "enforced".
     let minimum = benchy_mcp::sandbox::MINIMUM_ABI_NUMBER;
@@ -1279,7 +1280,10 @@ fn verdict(abi: u32, mechanisms: &[Mechanism]) -> Result<(), String> {
     if let Some(m) = mechanisms.iter().find(|m| !m.enforced()) {
         return Err(format!("the {} is not confined as it must be", m.name));
     }
-    Ok(())
+    // Every check that counted held: as full as this kernel allows. Below ABI 4 that leaves TCP
+    // unconfined, and the engine's `restrict_self` says `PartiallyEnforced` of the same kernel,
+    // so this says what `hello`'s `sandbox_posture` does, in its words.
+    Ok(benchy_mcp::sandbox::Posture::Full.shortfall(abi))
 }
 
 /// What `doctor --probe` says about what the probes found, as prose or as JSON, and whether the
@@ -1288,7 +1292,14 @@ fn verdict(abi: u32, mechanisms: &[Mechanism]) -> Result<(), String> {
 fn report(abi: u32, mechanisms: &[Mechanism], json: bool) -> (bool, String) {
     use std::fmt::Write;
     let verdict = verdict(abi, mechanisms);
+    // Partial is a success: the server serves under it without a flag, since the filesystem
+    // boundary holds, and `--require-full-sandbox` is how an operator refuses it.
     let all = verdict.is_ok();
+    let (word, reason) = match &verdict {
+        Ok(None) => ("enforced", None),
+        Ok(Some(why)) => ("partial", Some(why.clone())),
+        Err(why) => ("not_enforced", Some(why.clone())),
+    };
     let mut out = String::new();
     if json {
         let (engine, file) = duckdb_library();
@@ -1297,8 +1308,8 @@ fn report(abi: u32, mechanisms: &[Mechanism], json: bool) -> (bool, String) {
             "engine": format!("DuckDB {engine}"),
             "library": file.map(|f| f.display().to_string()),
             "landlock_abi": abi,
-            "verdict": if all { "enforced" } else { "not_enforced" },
-            "reason": verdict.err(),
+            "verdict": word,
+            "reason": reason,
             "mechanisms": mechanisms.iter().map(Mechanism::json).collect::<Vec<_>>(),
         });
         let _ = writeln!(out, "{report:#}");
@@ -1308,10 +1319,21 @@ fn report(abi: u32, mechanisms: &[Mechanism], json: bool) -> (bool, String) {
         m.print(abi, &mut out);
     }
     match verdict {
-        Ok(()) => {
+        Ok(None) => {
             let _ = writeln!(
                 out,
                 "               VERIFIED — this machine enforces REQ-3."
+            );
+        }
+        Ok(Some(why)) => {
+            let _ = writeln!(out, "               PARTIAL — {why}.");
+            let _ = writeln!(
+                out,
+                "               The engine and every confined loader may open any TCP connection;"
+            );
+            let _ = writeln!(
+                out,
+                "               --require-full-sandbox refuses to start here."
             );
         }
         Err(why) => {
@@ -1626,6 +1648,20 @@ mod tests {
         .collect()
     }
 
+    /// The three mechanisms as the probe finds them where Landlock confines all it can at `abi`:
+    /// each check that counts held, and each that does not allowed.
+    fn confined(abi: u32) -> Vec<Mechanism> {
+        unconfined(abi)
+            .into_iter()
+            .map(|mut m| {
+                for c in &mut m.checks {
+                    c.1 = c.2.or(Some(true));
+                }
+                m
+            })
+            .collect()
+    }
+
     #[test]
     fn doctor_without_landlock_says_not_enforced() {
         // Measured before the fix on a machine without Landlock (ABI 0): every right is above the
@@ -1653,25 +1689,16 @@ mod tests {
             benchy_mcp::sandbox::MINIMUM_ABI
         );
         // and a kernel that has it, confining as it must, is still enforced
-        let confined: Vec<Mechanism> = unconfined(1)
-            .into_iter()
-            .map(|mut m| {
-                for c in &mut m.checks {
-                    c.1 = c.2.or(Some(true));
-                }
-                m
-            })
-            .collect();
-        let (ok, text) = report(1, &confined, false);
+        let (ok, text) = report(4, &confined(4), false);
         assert!(ok, "{text}");
         assert!(text.contains("VERIFIED"), "{text}");
-        let (_, json) = report(1, &confined, true);
+        let (_, json) = report(1, &confined(1), true);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         for m in v["mechanisms"].as_array().expect("mechanisms") {
             assert_eq!(m["enforced"], true, "{m}");
         }
         // And a mechanism whose check fails is not enforced, while the others are.
-        let mut one_wrong = confined;
+        let mut one_wrong = confined(1);
         let wrong = one_wrong[1]
             .checks
             .iter_mut()
@@ -1688,6 +1715,52 @@ mod tests {
             .map(|m| m["enforced"].clone())
             .collect();
         assert_eq!(flags, [true, false, true], "{json}");
+    }
+
+    #[test]
+    fn doctor_without_tcp_rules_says_partial() {
+        // Below ABI 4 (Linux 6.7) the TCP checks do not count, every other one held, and the
+        // verdict was `enforced` and "VERIFIED", where `hello`'s `sandbox_posture` says `partial`
+        // of the same kernel: files confined, the network not. No kernel before 6.7 is to be had
+        // here, so the ABI is given.
+        for abi in [1, 3] {
+            let (ok, text) = report(abi, &confined(abi), false);
+            // The server serves under it without a flag, so the exit status is success.
+            assert!(ok, "{text}");
+            assert!(text.contains("PARTIAL"), "{text}");
+            assert!(!text.contains("VERIFIED"), "{text}");
+            assert!(text.contains("TCP") && text.contains("6.7"), "{text}");
+            let (ok, json) = report(abi, &confined(abi), true);
+            assert!(ok, "{json}");
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(v["verdict"], "partial", "{json}");
+            assert_eq!(
+                v["reason"],
+                benchy_mcp::sandbox::Posture::Partial.report(abi)["reason"],
+                "the reason `hello` gives: {json}"
+            );
+            for m in v["mechanisms"].as_array().expect("mechanisms") {
+                assert_eq!(m["enforced"], true, "{m}");
+            }
+        }
+        // With TCP rules it is enforced, with no reason.
+        let (ok, json) = report(4, &confined(4), true);
+        assert!(ok, "{json}");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["verdict"], "enforced", "{json}");
+        assert!(v["reason"].is_null(), "{json}");
+        // And a check that fails is not enforced, partial kernel or not.
+        let mut wrong = confined(3);
+        let c = wrong[0]
+            .checks
+            .iter_mut()
+            .find(|c| c.2 == Some(false))
+            .expect("a right the engine must not have");
+        c.1 = Some(true);
+        let (ok, json) = report(3, &wrong, true);
+        assert!(!ok, "{json}");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["verdict"], "not_enforced", "{json}");
     }
 
     #[test]
@@ -1736,6 +1809,17 @@ mod tests {
             table.contains(r#"`{"check", "allowed", "must_be"}`"#),
             "the README names a check's keys"
         );
+        // And every verdict the report gives (`doctor_without_tcp_rules_says_partial`).
+        let row = table
+            .lines()
+            .find(|l| l.starts_with("| `verdict`"))
+            .expect("the verdict's row");
+        for (abi, m) in [(4, confined(4)), (3, confined(3)), (0, unconfined(0))] {
+            let (_, json) = report(abi, &m, true);
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let said = format!("`{}`", v["verdict"]);
+            assert!(row.contains(&said), "{said} is not in the README: {row}");
+        }
     }
 
     #[test]

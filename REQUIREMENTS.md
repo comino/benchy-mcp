@@ -181,7 +181,7 @@ own network access is off (REQ-2), and says so: `hello` reports the posture as `
   other name, its write-ahead log merged, never a link to one elsewhere.
 - `doctor_says_in_json_what_each_mechanism_enforces` — `benchy-mcp doctor --probe --json` prints
   one JSON object and nothing else, for a host to check at container start: an overall `verdict`
-  (`enforced` or `not_enforced`), the exit status agreeing with it, the Landlock ABI, and each
+  (`enforced`, `partial` or `not_enforced`), the exit status agreeing with it, the Landlock ABI, and each
   mechanism — the engine, a file loader, a network loader — with its posture, whether it is
   enforced, and every check it made: what the child could do, and what it must (`null` where the
   right is not Landlock's to withhold on this kernel). Where the restriction cannot be applied it
@@ -241,6 +241,12 @@ own network access is off (REQ-2), and says so: `hello` reports the posture as `
   reported with the filesystem confined, the network not, and why; only `full` at ABI 4 or later
   reports `network` true, and only it passes `--require-full-sandbox`. Tested on the posture with
   the ABI given: no kernel before 6.7 is to be had here.
+- `doctor_without_tcp_rules_says_partial` — and `doctor --probe` says the same of that kernel:
+  where every check that counts held and the TCP checks could not, its verdict is `partial` and
+  PARTIAL in prose, with `sandbox_posture`'s reason, where it said `enforced` and VERIFIED with
+  the network unconfined. Its exit status is 0, as for `enforced`: benchy serves under it without
+  a flag, since the filesystem boundary holds, and only `not_enforced`, where it refuses to, is
+  non-zero. Tested on the verdict with the ABI given.
 - `hello_says_how_the_engine_is_confined` — `hello`'s `sandbox_posture` says how Landlock
   confines the engine in fixed words and booleans (`posture`, `landlock_abi`, `filesystem`,
   `network`, `reason`), beside the prose of `sandbox`, which a host once matched word for word:

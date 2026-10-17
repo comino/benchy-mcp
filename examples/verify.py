@@ -216,7 +216,9 @@ def main(binary, data):
     if "unavailable" in landlock:
         print("  ..   sandbox not available on this host (reported, not hidden)")
     else:
-        check("the process really cannot read outside its workspace", "VERIFIED" in out,
+        # PARTIAL: below Landlock ABI 4 files are confined and TCP is not.
+        check("the process really cannot read outside its workspace",
+              "VERIFIED" in out or "PARTIAL" in out,
               out.strip().replace("\n", " | ")[:160])
     print()
     if failures:
