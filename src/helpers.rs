@@ -42,7 +42,8 @@ pub struct Def {
     pub kind: Kind,
     /// The statement, without its `;`.
     pub sql: String,
-    /// The `--` comment directly above it, on one line.
+    /// The `--` lines directly above it, with no blank line between, joined into one line and cut
+    /// at [`COMMENT_BYTES`].
     pub comment: Option<String>,
 }
 

@@ -748,7 +748,7 @@ impl Width {
 /// 1.5.5, `SET memory_limit = '12.7 GiB'` reads back as `12.6 GiB` (the text parses to a hair
 /// under 12.7 GiB, which is shown cut, not rounded). Put back from its text, a limit shrank by
 /// 0.1 GiB with each staged table, on a machine whose default was `12.7 GiB` (a host's
-/// re-review, #60); here, under a 4000 MB cgroup, `3.1 GiB` read back `3.0 GiB`. So where the
+/// re-review); here, under a 4000 MB cgroup, `3.1 GiB` read back `3.0 GiB`. So where the
 /// text does not read back as itself, the middle of what it stands for is set (`12.75 GiB`),
 /// which does, and stays within half its last digit of the limit it was read from. `RESET
 /// memory_limit` is no way back: on 1.5.5 it reports DuckDB's default and leaves the buffer pool

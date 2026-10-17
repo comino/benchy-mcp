@@ -427,7 +427,8 @@ and never a type that could change a value (REQ-15).
 ## REQ-7 — Ceilings
 
 Every query batch runs under a wall deadline, DuckDB's memory budget and a ceiling on the
-engine's resident memory (REQ-8), and what comes back is capped. Capacity is measured, not claimed: `examples/capacity.py` produces `docs/CAPACITY.md`.
+engine's resident memory (REQ-8), and what comes back is capped. Capacity is measured, not claimed: `examples/capacity.py` produces `docs/CAPACITY.md` up to its
+ClickHouse section, whose table `examples/capacity_clickhouse.py` prints.
 
 - `a_deadline_of_zero_is_refused_at_startup` — at zero every query would fail at once, and the
   caps a host reads from `hello` could not be handed back.

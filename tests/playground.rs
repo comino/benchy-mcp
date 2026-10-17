@@ -238,7 +238,7 @@ fn an_object_that_keeps_an_enum_in_its_sql_is_refused() {
         // is `ENUM('a')`, measured. So the rule reads the SQL whole, string literals included,
         // and a literal that only mentions `ENUM(` (`SELECT 'use ENUM(' AS note`) is refused
         // too: telling the two apart would take knowing which functions read a type from a
-        // string, a list that could miss one (a host's report, #70).
+        // string, a list that could miss one (a host's report).
         "CREATE TABLE e (c VARCHAR DEFAULT (json_transform('\"a\"', '\"ENUM(''a'')\"')::VARCHAR))"
             .to_string(),
         "CREATE VIEW e AS SELECT from_json('\"a\"', '\"ENUM(''a'')\"')::VARCHAR AS x".to_string(),

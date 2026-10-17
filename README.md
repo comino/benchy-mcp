@@ -125,9 +125,9 @@ its file: no config, no schema. Other clients are under [Use it with…](#use-it
 **Does it save an agent work?** [`eval/`](eval/) asks the same model thirteen questions about
 the meter data above, three times each, once with benchy and once with a jailed shell and the
 DuckDB CLI over the same data, each surface with a paragraph of guidance of the same kind.
-Measured on 2026-10-11, on `d598c96` (#11), at temperature 0; what the agent sees on this data —
-the instructions, the tools, `describe` and every task's ground truth — is byte for byte the same
-as of #13:
+Measured on 2026-10-11, on a build from before the public history began (DuckDB 1.5.5), at
+temperature 0; what the agent sees on this data — the instructions, the tools, `describe` and
+every task's ground truth — was byte for byte as an earlier pre-public revision left it:
 
 | model | steps with benchy | steps with a shell | fewer | input tokens, benchy / shell | answers matching the ground truth, benchy / shell |
 |---|---:|---:|---:|---|---|
@@ -589,8 +589,11 @@ and `scripts/ci.sh` fails if one names a test that does not exist.
   `--memory-ceiling`, while a query runs or as it answers (on Linux, which has the `/proc` it is read from; elsewhere `hello` reports
   the ceiling as `null` and `doctor` says it is not enforced), and starts a new one over the loaded data, without reading any source
   again. You lose that query and the tables you made, and you are told so. DuckDB's `--memory`
-  bounds what DuckDB counts, and not planning, a very long string or a large ENUM type; the
-  ceiling bounds the engine process. It does not cap the parent server's input buffers or
+  bounds what DuckDB counts, and not planning, a very long string or a large ENUM type. A long
+  string's overshoot grows with the rows of a vector that hold one: under `--memory 256MB`, with
+  the ceiling raised out of the way, `SELECT sum(length(repeat('x', 100000000 + i))) FROM
+  range(n) t(i)` peaked the engine at 141, 237, 427 and 809 MiB for 1, 2, 4 and 8 rows (DuckDB
+  1.5.5, Linux aarch64). The ceiling bounds the engine process. It does not cap the parent server's input buffers or
   queued requests. Use an external limit for the whole session, such as Docker's `--memory`;
   a prototype session can otherwise exhaust its host's memory.
 - **A load that grows past `--loader-memory-ceiling` fails** (default 1GB, on Linux). Each loader

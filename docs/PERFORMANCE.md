@@ -4,6 +4,11 @@ benchy does one job: get time-series data into a sealed DuckDB workspace before 
 call. This file is how that job is measured, what it costs on `main` today, and the ranked list of
 what to make cheaper. Every optimisation is judged by the harness below, before and after.
 
+The short commit hashes below (`b660bcd`, `22ff87e`, …) name builds from before the public
+history began, which was squashed into its first commit; they do not resolve in this repository.
+They are kept as labels that tell apart the builds one measurement compared, all of them on
+DuckDB 1.5.5.
+
 ## The harness
 
 ```sh
@@ -326,7 +331,7 @@ as it was: a stage of 30 to 100 columns that spills a lot is sooner on one threa
 
 ## R6-L1. A memory bound for loaders
 
-The engine has a resident-memory ceiling (#53); a loader had none. What loaders peak at, and what
+The engine has a resident-memory ceiling; a loader had none. What loaders peak at, and what
 grows one without bound, measured on DuckDB 1.5.5 with four threads, `ru_maxrss` of each process
 and `/proc` of the whole tree every 25 ms:
 
@@ -371,17 +376,16 @@ is done. Loader peak RSS did not move (csv-10m 420 → 388 MB, the spread of its
 
 ## Baseline: round 6, `b660bcd`
 
-`main` at `b660bcd`, after the 18 PRs since round 5's baseline (#53–#59, #61–#69, #71, #72:
-the engine's memory ceiling and its watch, the no-shadowing and ENUM checks and the catalog read
+`main` at `b660bcd`, after the 18 PRs since round 5's baseline (the engine's memory ceiling and its watch, the no-shadowing and ENUM checks and the catalog read
 through `system.main`, the agent's connection kept in UTC, the memory limit put back as it was
 read, the profile's distinct counts held to the values and its keys in their type's order, the
-operator's helpers, host protocols 3 to 5), against round 5's baseline binary, `69a43a3` (#52,
-`2a8e24d`'s code), 2026-10-14. Both built from their own commits and run interleaved run by run
+operator's helpers, host protocols 3 to 5), against round 5's baseline binary, `69a43a3`
+(`2a8e24d`'s code), 2026-10-14. Both built from their own commits and run interleaved run by run
 (`69a43a3`, `b660bcd`, then the reverse order, …) in the same session on the same data,
 ClickHouse on its own port pair (8167 and 9067); load average 1.2 to 2.9. Minima of 5 runs per
 scenario; the first `describe` also as the median. `hoststream` needs host protocol 3, which
-`69a43a3` does not speak: its baseline is `2b6a95d` (#54, the PR that added it). `hostchannel`
-(protocol 5, #65) has no baseline. A host session's server writes no usage line, so its peak RSS
+`69a43a3` does not speak: its baseline is `2b6a95d` (the PR that added it). `hostchannel`
+(protocol 5) has no baseline. A host session's server writes no usage line, so its peak RSS
 is not in the table.
 
 | scenario | instructions | CPU, all processes | loader peak RSS | first `describe`, min / median |
@@ -482,8 +486,8 @@ fixed part above, paid by `examples/data`'s two tables.
 
 ## Baseline: round 5, `2a8e24d`
 
-`main` at `2a8e24d` (round 4 merged: #49 R4-2, #50 R4-1 measured and not done, #51 R4-3), against
-round 4's baseline binary, `57e8901` (`5993d6b` plus the docs of #48), and round 1's start,
+`main` at `2a8e24d` (round 4 merged: R4-2, R4-1 measured and not done, R4-3), against
+round 4's baseline binary, `57e8901` (`5993d6b` plus a docs-only change), and round 1's start,
 `22ff87e`, 2026-10-12. All three built from their own commits and run interleaved run by run
 (`57e8901`, `2a8e24d`, `22ff87e`, then the reverse order, …) in the same session on the same
 data, ClickHouse on its own port pair; load average 2.6 to 6.9 (14.7 at the first run). Minima of
@@ -516,7 +520,7 @@ them, load average 8.8 to 19.4: `tests/origin.rs` (9 tests) 20 of 20, the `layou
 
 What the table says:
 
-- **Round 4 moved exactly the two paths it changed**, by what #49 and #51 measured on their own:
+- **Round 4 moved exactly the two paths it changed**, by what R4-2 and R4-3 measured on their own:
   a 10M-row NDJSON file 34% sooner for a fifth more instructions and the loader at the stage's
   cap (R4-2), JSON pages 34% sooner for 11% more instructions (R4-3). Instructions are within
   ±1% everywhere else: nothing regressed.
@@ -737,8 +741,8 @@ the same bytes, and the first `describe` no later. The table is the file form's,
 
 ## Baseline: round 4, `5993d6b`
 
-`main` at `5993d6b` (#37–#46 merged: R3-1 to R3-5, R3-10, R3-11, the 256 MiB stage, storage v1.3.0),
-against round 3's baseline binary, `35ad7db` (`99b5155` plus the docs of #36), 2026-10-12. Both
+`main` at `5993d6b` (merged: R3-1 to R3-5, R3-10, R3-11, the 256 MiB stage, storage v1.3.0),
+against round 3's baseline binary, `35ad7db` (`99b5155` plus a docs-only change), 2026-10-12. Both
 built from their own commits and run interleaved run by run (the old, then the new, then the new,
 then the old, …) in the same sessions on the same data, ClickHouse on its own port pair; load
 average 1.0 to 7.8. Minima of 10 runs per 1M scenario, 6 per 10M, 15 per 1k; the first `describe`
@@ -751,7 +755,7 @@ machine enforces REQ-3. The layout tests
 `an_http_table_has_the_physical_layout_of_a_file_table`) passed 150 and 50 runs in a row at load
 average 5 to 12, two loops at once: the Dictionary/FSST flake is gone with v1.3.0.
 `a_trivial_query_does_not_pay_for_the_watchdog`, which failed once in round 3 at 10.08 ms
-against its fixed 10 ms, failed 11 runs of 20 with 16 busy loops beside it; #47 judges it
+against its fixed 10 ms, failed 11 runs of 20 with 16 busy loops beside it; the test now judges it
 against a refused statement's round trip in the same run instead, and it then passed 20 of 20
 there and still fails on the old 20 ms tick.
 
@@ -830,7 +834,7 @@ What the tables say beyond the wins:
   512 MB, and wrote 139 MB of spill to its staging directory, removed with the stage. The first
   `describe` came sooner anyway (−23% minimum), the stage's spill outweighed by R3-2's watch
   beside the write and v1.3.0's cheaper write (`write_table` 2.91 → 2.38 s).
-- **A stream's loader peaks 1–5 MB higher** with v1.3.0 (#45 says 2 MB); exec_intkey-10m 7 MB
+- **A stream's loader peaks 1–5 MB higher** with v1.3.0 (its change measured 2 MB); exec_intkey-10m 7 MB
   lower.
 - **Several 1k sessions cost 2–10% more CPU for fewer instructions**, inside the 1k spread except
   http-ndjson-1k: the loader's CPU 107 → 123 ms (minimum), the reader threads a spooled body
@@ -1065,7 +1069,7 @@ watch runs after the write (`watched`). Measured with the harness's rows as a 10
 133 MB. The same rows as a CSV, staged: 4.39 s.
 
 The 64 MiB bound was set to bound the stage's memory (the stage held the whole table). Since
-#40 a stage is held to `STAGE_MEMORY` and spills past it, so the bound no longer buys memory
+the stage cap (round 4) a stage is held to `STAGE_MEMORY` and spills past it, so the bound no longer buys memory
 that grows with the file.
 
 - **Idea:** stage every JSON file as a CSV is (raise `STAGE_JSON_UP_TO` to no limit, or drop it),
@@ -1259,8 +1263,8 @@ and a way to list one catalog's functions.
 
 ## Baseline: round 3, `99b5155`
 
-`main` at `99b5155` (#30–#35 merged: R2-1 to R2-8), against round 2's baseline binary, `d4afdaa`
-(`ef3a0cf` plus the docs of #29), 2026-10-11. Both built from their own commits and run
+`main` at `99b5155` (R2-1 to R2-8 merged), against round 2's baseline binary, `d4afdaa`
+(`ef3a0cf` plus a docs-only change), 2026-10-11. Both built from their own commits and run
 interleaved run by run (the old, then the new, then the new, then the old, …) in the same
 sessions on the same data, load average 1.7 to 7.7. Minima of 10 runs per 1M scenario, 6 per
 10M, 15 per 1k; the first `describe` also as the median. `main` as merged passed
@@ -1523,7 +1527,7 @@ the scan and pass it replaced took 184 ms on every thread (the baseline above: +
     - the 5M-row CSV, in two sessions: 4,124 / 4,840 → 4,251 / 4,873 ms (+3% / +1%), and
       4,671 / 5,273 → 4,336 / 5,084 ms (−7% / −4%). At this load that is inside the noise;
       `write_table` was no slower, and the watch took 467 ms beside it.
-  - **Before #37 and #40**, against `35ad7db`, load average 4.3 to 5.5:
+  - **Before R3-3 and the stage cap**, against `35ad7db`, load average 4.3 to 5.5:
     - the 5M-row CSV: 4,374 / 4,982 → 3,801 / 4,521 ms (−13% / −9%), and 4,354 / 4,492 →
       3,780 / 4,086 ms in a second session;
     - ndjson-1m −10% / −7%, csv-1m −2% / −7%;
@@ -1972,7 +1976,7 @@ one batch.
 
 ## Baseline: round 2, `ef3a0cf`
 
-`main` at `ef3a0cf` (#18–#28 merged), against round 1's baseline binary, `22ff87e` (`7ec65e2`,
+`main` at `ef3a0cf` (round 1 merged), against round 1's baseline binary, `22ff87e` (`7ec65e2`,
 streaming ingest, plus the tracing), 2026-10-11. Both were built from their own commits and
 measured in the same sessions on the same data, the old and the new interleaved, so the machine's
 load fell on both alike (load average 1.3 to 7). Minima: of 10 runs per 1M scenario, 6 per 10M
@@ -2005,7 +2009,7 @@ ClickHouse's own CPU to serve the load fell with the loopback default (`none` fo
 What the table says beyond the wins:
 
 - **The NDJSON file's first `describe` came later** (R2-1 below): reading it straight into its
-  table (#28) parses it on one thread. Confirmed against `b0e46ae`, the commit before #28,
+  table parses it on one thread. Confirmed against `b0e46ae`, the commit before that change,
   interleaved, twelve runs each: 833 → 1,099 ms (minimum), 914 → 1,143 ms (median).
 - **A 10M-row connector load got no sooner** though its CPU fell 16%: the profile kept as rows
   go in (`stream.watch`) runs on the insert's thread, where the scan it replaced ran on four.
@@ -2055,14 +2059,14 @@ regression first. "R2-n" names an item of this list; "item n" elsewhere in the r
 round 1's, below. Every estimate is read off the profile or measured on its own, as said; judge
 each change with `bench/compare.py`, before and after.
 
-### R2-1. An NDJSON file's first `describe`: +17% to +32% since #28 (done: staged up to 64 MiB)
+### R2-1. An NDJSON file's first `describe`: +17% to +32% since it was read straight in (done: staged up to 64 MiB)
 
-`src/source.rs`, `reads_twice` and `read_into`. #28 reads an NDJSON or JSON file straight into
+`src/source.rs`, `reads_twice` and `read_into`. Round 1 reads an NDJSON or JSON file straight into
 its table with one `CREATE TABLE … AS SELECT` on one thread, which keeps the physical layout
 the same for every origin but also makes DuckDB's JSON reader parse on that one thread; staged,
 it parsed on four. Against `b0e46ae`, interleaved, twelve runs each: first `describe` 833 →
 1,099 ms (minimum), 914 → 1,143 ms (median), for 2.6% fewer instructions, 5% less CPU and a loader
-of 99 MB instead of 143 MB. (#28 reported "as soon, −1%", which these runs do not reproduce.)
+of 99 MB instead of 143 MB. (That change reported "as soon, −1%", which these runs do not reproduce.)
 Parquet is unaffected: its reader is cheap, and it got 25% sooner.
 
 **Done (2026-10-11): a JSON or NDJSON file of up to 64 MiB is staged; a larger one is read
@@ -2235,7 +2239,7 @@ the `Watch` needs are scanned once, streamed as Arrow a DuckDB vector at a time,
 `Held::of` as a stream's batches are; the `Seen` goes to `compute` with the table. The same for
 an HTTP body DuckDB reads itself (`load_read`). `describe` is the same, byte for byte
 (`a_files_profile_is_kept_from_one_scan_and_is_the_profile_of_the_table`). Against `cd26314`
-(#34, the watch reading arrays in place), interleaved, ten runs each, minima:
+(the watch reading arrays in place), interleaved, ten runs each, minima:
 
 | scenario | instructions | loader CPU | loader peak RSS | first `describe`, min / median |
 |---|---:|---:|---:|---:|
@@ -2246,8 +2250,8 @@ an HTTP body DuckDB reads itself (`load_read`). `describe` is the same, byte for
 | csv-1k | 0.98 → 0.99 G | 238 → 250 ms | 53 → 54 MB | 321 / 348 → 328 / 340 ms |
 
 The first `describe` is no sooner: the scan it replaced ran on every thread, the watch on the
-load's one after the write. Against `e09f20a`, before #34, the same change took 5% off
-parquet-1m and 2–3% off csv-1m and ndjson-1m: most of the win is #34's faster `Watch::add`.
+load's one after the write. Against `e09f20a`, before that, the same change took 5% off
+parquet-1m and 2–3% off csv-1m and ndjson-1m: most of the win is `cd26314`'s faster `Watch::add`.
 
 ### R2-5. A host's attach — 280 M instructions and about 120 ms per table; done: 162 M and 52 ms
 
@@ -2428,7 +2432,7 @@ measured, kept as the record that code comments and other documents cite ("item 
 
 ### Round 1's baseline
 
-`main` at `7ec65e2` (#18, streaming ingest) plus this tracing, 2026-10-11. Five runs per 1M
+`main` at `7ec65e2` (streaming ingest) plus this tracing, 2026-10-11. Five runs per 1M
 scenario, three per 10M; minima.
 
 | scenario | instructions | CPU, all processes | loader CPU | loader peak RSS | cold start (min / median) |
@@ -2544,7 +2548,7 @@ to +0.1%, are their spread. The tables written are the same, byte for byte in si
 
 ### 2. The profile — 7.7–7.9 G per 10M rows, 0.8–0.9 G per 1M (done for streams)
 
-`src/profile.rs` (#15): 23–29% of every load, run after the table is written, as one pass that
+`src/profile.rs`: 23–29% of every load, run after the table is written, as one pass that
 scans it back. Its top symbols are `GreaterThan<double>` 13%, `Equals<double>` 8%, `memcpy`
 10%, `DatePart` 6%, `IsNan` 6.6%, min/max and `SUM` aggregates; the scan decompresses what
 the write just compressed (ALP, bitpacking).

@@ -88,6 +88,17 @@ is answered 4 and the host knows what it may send. A second `hello` is refused a
 and the session goes on. The caps are the command line's (`--max-rows`, `--max-bytes`,
 `--max-cell-bytes`, `--deadline`).
 
+`sandbox` is how much of its Landlock confinement the engine's kernel enforces, as a sentence:
+
+| `sandbox` | means |
+|---|---|
+| `"fully enforced"` | every right benchy asks for is confined |
+| `"enforced, some newer rights unsupported by this kernel"` | confined with the rights this kernel has; one that newer kernels add is not, such as TCP before Linux 6.7 |
+| `"not enforced"` | the kernel enforced nothing; served only with `--allow-unsandboxed` |
+| `"unavailable: "` and the reason | Landlock could not be applied, as off Linux (`"unavailable: Landlock is Linux-only, and nothing equivalent is wired up here"`); served only with `--allow-unsandboxed` |
+
+The first three are the whole string; the last begins with `unavailable: `.
+
 | version | adds | refused before it |
 |---|---|---|
 | 1 | `hello`, `ping`, `attach` of one file (`name`, `path`), `detach`, `query`, `page`, `describe` | |
@@ -449,8 +460,11 @@ benchy.stdio[3].write(arrowStream);           // as it is fetched
   (`a_refused_request_that_names_the_channel_closes_it`)
 - **On Node.js, give the channel an `'error'` handler.** A write after benchy has closed the
   channel fails with `ECONNRESET` there (Node 24, `stdio[3]`), not `EPIPE`, and a stream with no
-  `'error'` handler takes the whole host down with it. [`examples/host-node.mjs`](../examples/host-node.mjs)
-  shows the handler.
+  `'error'` handler takes the whole host down with it. Nor is the event the only sign: Node may
+  destroy the stream as soon as benchy closes its end, before the host writes again, and may hand
+  a write's error to its callback before any `'error'` event is seen (`EPIPE` on macOS). Keep the
+  first error from either, and treat a destroyed channel as closed.
+  [`examples/host-node.mjs`](../examples/host-node.mjs) shows both.
 - **`ping` is not held up**, and no byte of a stream passes through the supervisor: each loader
   is handed a copy of the channel as its descriptor 3, and the supervisor never reads it.
 - **Beside the descriptor form.** Both may be used in one session, in one request.

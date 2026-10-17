@@ -27,7 +27,7 @@ fn drain(mut r: impl Read) -> u64 {
 
 #[cfg(feature = "ruzstd")]
 mod ruz {
-    //! A copy of benchy's ruzstd reader as it was on main at 22ff87e (frame after frame, window
+    //! A copy of benchy's ruzstd reader as it was at round 1's start, before the public history began (frame after frame, window
     //! held to 32 MiB), so the probe measures what the loader ran.
     use std::io::{BufRead, Read};
     pub struct Zstd<R: BufRead> {

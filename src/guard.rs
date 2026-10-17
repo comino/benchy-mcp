@@ -12,8 +12,11 @@
 //! This layer does **not** stop file reads, and cannot. `read_text`, `read_blob` and `sniff_csv`
 //! are typed `SELECT`; five cases in the escape corpus reach a canary outside the workspace
 //! through this layer alone. Stopping them is [`crate::lockdown`]'s job. What this
-//! layer stops is that lock being *removed* — `SET`, `RESET`, `INSTALL`, `LOAD` — plus `ATTACH`,
-//! `COPY` and `EXPORT`.
+//! layer stops is that lock being *removed* — `SET`, `RESET`, `INSTALL`, `LOAD` — plus `ATTACH`.
+//! `COPY` and `EXPORT` it would refuse too, but under the lock they never reach it: the locked
+//! engine cannot prepare them (`locked = "unprepared"` in `corpus/escape.toml`), so they are
+//! refused when their turn comes, not up front, and the statements before them in the batch keep
+//! their effects.
 
 // A bindgen enum constant is prefixed with its type name. An unprefixed name is not a constant
 // at all: it is a binding pattern that matches everything, silently allowing the whole allowlist

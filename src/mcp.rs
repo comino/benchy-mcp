@@ -135,9 +135,9 @@ impl ServerHandler for Bench {
              statement's result comes back. If one fails, nothing after it runs; the ones before \
              it keep their effects, and their results come back after the error. You may CREATE \
              your own tables, views and macros and they persist between calls, under any name \
-             not already taken: a loaded table's, a helper's, a table's a helper reads, a \
-             system view's like `sqlite_master` or a built-in function's like `lower`. The loaded \
-             tables are read-only. Returns bounded rows and a result_id.",
+             not already taken: a loaded table's, a helper's, a table's a helper reads or a \
+             system view's like `sqlite_master`, and for a macro a built-in function's like \
+             `lower`. The loaded tables are read-only. Returns bounded rows and a result_id.",
             schema(
                 serde_json::json!({ "sql": { "type": "string",
                     "description": "DuckDB SQL. One or more statements." } }),

@@ -1,4 +1,4 @@
-//! `benchy-mcp host`: the host protocol, `benchy-host/1` to `benchy-host/5`, on stdin and
+//! `benchy-mcp host`: the host protocol, `benchy-host/1` to `benchy-host/6`, on stdin and
 //! stdout (docs/HOST-PROTOCOL.md).
 //!
 //! A host runs one of these per session, puts data on the bench with `attach`, and relays the
