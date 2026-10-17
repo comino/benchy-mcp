@@ -195,6 +195,77 @@ fn empty_results_say_what_exists() {
 }
 
 #[test]
+fn the_empty_result_note_stays_inside_the_deadline() {
+    // The note ran a full `SELECT DISTINCT … ORDER BY` per text column the query named, after
+    // the watchdog had stopped, on a connection it does not interrupt. Columns of unique values
+    // can never give a note and were scanned whole anyway: on ten million rows and twelve such
+    // columns that took 12 s, so a batch that had done honest work for most of its deadline went
+    // past the server's hard one, and the engine was killed with the agent's tables. Here, four
+    // million rows: six columns of unique values, which the head of each column rules out, and
+    // one, `late`, whose head is one value and whose whole is not, which only the note's budget,
+    // what is left of the deadline, stops.
+    let mut bench = common::bench();
+    let unique: Vec<String> = (1..=6).map(|n| format!("'{n}-' || i AS c{n}")).collect();
+    bench
+        .connection()
+        .execute_batch(&format!(
+            "CREATE TABLE w AS SELECT i AS id, {}, 'k' || (i % 3) AS kind, \
+             CASE WHEN i % 122880 < 30000 THEN 'a' ELSE 'late-' || i END AS late \
+             FROM range(4000000) r(i)",
+            unique.join(", "),
+        ))
+        .unwrap();
+    let mut columns = vec![("id".to_string(), "BIGINT".to_string())];
+    columns.extend((1..=6).map(|n| (format!("c{n}"), "VARCHAR".to_string())));
+    columns.push(("kind".into(), "VARCHAR".into()));
+    columns.push(("late".into(), "VARCHAR".into()));
+    bench
+        .record(benchy_mcp::LoadedTable {
+            name: "w".into(),
+            rows: 4_000_000,
+            columns,
+            source: "test".into(),
+            profile: None,
+            seen: None,
+        })
+        .unwrap();
+    let mut ws = bench.seal("1GB").unwrap();
+    let mut timed = |sql: &str, deadline: std::time::Duration| {
+        let caps = Caps {
+            deadline,
+            ..Caps::default()
+        };
+        let t = std::time::Instant::now();
+        let out = ws.work(sql, &caps).expect(sql);
+        let took = t.elapsed();
+        assert!(out[0].rows.is_empty(), "{sql}");
+        assert!(
+            took < deadline + std::time::Duration::from_millis(150),
+            "{sql}: the batch and its note took {took:?} against a deadline of {deadline:?}"
+        );
+        out[0].note.clone().unwrap_or_default()
+    };
+    // Read whole, the six took 8.7 s here.
+    let named = (1..=6)
+        .map(|n| format!("c{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let note = timed(
+        &format!("SELECT {named}, kind FROM w WHERE id = -1 AND kind = 'K0'"),
+        std::time::Duration::from_secs(1),
+    );
+    // and the column that can explain the empty result still does, after six that cannot
+    assert!(note.contains("w.kind holds: k0, k1, k2"), "{note}");
+    // `late` read whole takes about a second. A deadline shorter than the note's own budget
+    // is what bounds it.
+    let note = timed(
+        "SELECT late FROM w WHERE id = -1 AND late = 'b'",
+        std::time::Duration::from_millis(300),
+    );
+    assert_eq!(note, "", "the note ran out of time");
+}
+
+#[test]
 fn a_non_empty_result_never_carries_a_note() {
     // The mutation test for the feature: make the note unconditional and this goes red.
     let mut ws = bench_with_tables();

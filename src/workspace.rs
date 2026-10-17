@@ -641,6 +641,19 @@ pub fn fresh_name(prefix: &str) -> String {
 /// How many results are kept for paging.
 pub const RETAINED_RESULTS: usize = 32;
 
+/// The most an empty result's note may take (REQ-11), and never more than the batch has left of
+/// its deadline (`Workspace::why_empty`). Past it the note's query is interrupted and the result
+/// goes back without a note: a note is a convenience, and the batch's deadline is not.
+const NOTE_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The most text values an empty result's note lists for one column (REQ-11).
+const NOTE_VALUES: usize = 20;
+
+/// Rows read from the head of a column before its full distinct values are: more than
+/// [`NOTE_VALUES`] distinct among them proves the column cannot give a note, after one vector
+/// instead of the whole table (`Workspace::distinct`).
+const NOTE_HEAD_ROWS: usize = 2048;
+
 /// REQ-14: the profile a loader left in table `name`'s comment in catalog `db`, if it left one
 /// this version can read. Read once, at attach: `describe` only renders it.
 /// What the catalogs of a batch hold, from one listing of each kind (`catalog_listings`).
@@ -1712,11 +1725,15 @@ impl Workspace {
         }
 
         // REQ-11, and deliberately after the deadline is settled: this costs extra queries, so
-        // it must never be what pushes a batch past its budget.
+        // it must never be what pushes a batch past its budget. It gets what is left of the
+        // deadline and no more than `NOTE_BUDGET` of it: the server's hard deadline counts from
+        // the request, so time spent here past the batch's own deadline is time the engine is
+        // killed in (`the_empty_result_note_stays_inside_the_deadline`).
         let unexplained =
             |r: &QueryResult, query: bool| query && r.rows.is_empty() && !r.columns.is_empty();
         if out.iter().zip(&queries).any(|(r, q)| unexplained(r, *q)) {
-            if let Some(note) = self.why_empty(sql) {
+            let left = cap.deadline.saturating_sub(started.elapsed());
+            if let Some(note) = self.why_empty(sql, left.min(NOTE_BUDGET)) {
                 for (r, q) in out.iter_mut().zip(&queries) {
                     if unexplained(r, *q) {
                         r.note = Some(note.clone());
@@ -2395,14 +2412,19 @@ impl Workspace {
     /// - only when the column is small enough to enumerate honestly;
     /// - and only when one of those literals is **not** among the values. A correct filter over
     ///   genuinely absent data stays quiet.
-    fn why_empty(&self, sql: &str) -> Option<String> {
+    ///
+    /// And only within `budget`: past it the query reading a column is interrupted and no other
+    /// column is read (`the_empty_result_note_stays_inside_the_deadline`).
+    fn why_empty(&self, sql: &str, budget: std::time::Duration) -> Option<String> {
         let wanted = crate::hint::literals(sql);
-        if wanted.is_empty() {
+        if wanted.is_empty() || budget.is_zero() {
             return None;
         }
-        const MAX_VALUES: usize = 20;
+        let until = std::time::Instant::now() + budget;
+        // Set at the first column read, so a note that reads nothing starts no thread.
+        let mut alarm = None;
         let mut notes = Vec::new();
-        for t in &self.loaded {
+        'tables: for t in &self.loaded {
             if !crate::hint::mentions(sql, &t.name) {
                 continue;
             }
@@ -2413,10 +2435,14 @@ impl Workspace {
                 if !ty.contains("VARCHAR") || !crate::hint::mentions(sql, col) {
                     continue;
                 }
-                let Some(values) = self.distinct(&t.name, col, MAX_VALUES + 1) else {
+                if std::time::Instant::now() >= until {
+                    break 'tables;
+                }
+                alarm.get_or_insert_with(|| Alarm::set(self.ingest.interrupt_handle(), until));
+                let Some(values) = self.distinct(&t.name, col, NOTE_VALUES + 1) else {
                     continue;
                 };
-                if values.len() > MAX_VALUES {
+                if values.len() > NOTE_VALUES {
                     continue; // too many to enumerate without becoming the noise we avoid
                 }
                 // Fire only when *nothing* the query quoted is in this column. Comparison is
@@ -2433,6 +2459,7 @@ impl Workspace {
                 }
             }
         }
+        drop(alarm);
         if notes.is_empty() {
             return None;
         }
@@ -2443,26 +2470,90 @@ impl Workspace {
         ))
     }
 
-    /// Distinct values of a loaded column, capped. `None` if it cannot be read at all.
+    /// Distinct values of a loaded column, capped at `limit`. `None` if it cannot be read at
+    /// all, or was interrupted.
+    ///
+    /// The head of the column first: a column with `limit` distinct values among its first
+    /// [`NOTE_HEAD_ROWS`] has too many for a note, and reading the rest only to sort them cost a
+    /// hash aggregate of every value in the table. A column that can give a note is still read
+    /// whole, within the note's budget.
     fn distinct(&self, table: &str, column: &str, limit: usize) -> Option<Vec<String>> {
-        let q = format!(
-            "SELECT DISTINCT \"{}\" FROM {}.main.\"{}\" WHERE \"{}\" IS NOT NULL \
-             ORDER BY 1 LIMIT {limit}",
-            column.replace('"', "\"\""),
+        let column = format!("\"{}\"", column.replace('"', "\"\""));
+        let from = format!(
+            "{}.main.\"{}\"",
             self.catalog_of(table),
-            table.replace('"', "\"\""),
-            column.replace('"', "\"\""),
+            table.replace('"', "\"\"")
         );
-        let mut st = self.ingest.prepare(&q).ok()?;
-        let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
+        let read = |q: &str| -> Option<Vec<String>> {
+            let mut st = self.ingest.prepare(q).ok()?;
+            let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
+            rows.collect::<Result<Vec<_>, _>>().ok()
+        };
+        let head = read(&format!(
+            "SELECT DISTINCT {column} FROM (SELECT {column} FROM {from} \
+             WHERE {column} IS NOT NULL LIMIT {NOTE_HEAD_ROWS}) LIMIT {limit}"
+        ))?;
+        if head.len() >= limit {
+            return Some(head);
+        }
+        let values = read(&format!(
+            "SELECT DISTINCT {column} FROM {from} WHERE {column} IS NOT NULL \
+             ORDER BY 1 LIMIT {limit}"
+        ))?;
         // Quoted back to the agent in the note, so each is cut: a value can be any length.
-        let values = rows.collect::<Result<Vec<_>, _>>().ok()?;
         Some(
             values
                 .into_iter()
                 .map(|v| crate::result::cut(v, 64))
                 .collect(),
         )
+    }
+}
+
+/// Interrupts what runs on a connection once `until` has passed, and again every few
+/// milliseconds after, until it is dropped: DuckDB clears a pending interrupt when the next
+/// statement starts, as the batch's watchdog found. It fires under the lock the drop takes, so
+/// it never fires once the drop has returned.
+struct Alarm {
+    done: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Alarm {
+    fn set(handle: std::sync::Arc<duckdb::InterruptHandle>, until: std::time::Instant) -> Self {
+        const REFIRE: std::time::Duration = std::time::Duration::from_millis(5);
+        let done = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let flag = done.clone();
+        let thread = std::thread::spawn(move || {
+            let (lock, cv) = &*flag;
+            let mut finished = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*finished {
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    handle.interrupt();
+                }
+                let wait = if left.is_zero() { REFIRE } else { left };
+                finished = cv
+                    .wait_timeout(finished, wait)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
+            }
+        });
+        Self {
+            done,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for Alarm {
+    fn drop(&mut self) {
+        let (lock, cv) = &*self.done;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 

@@ -6,6 +6,12 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- An empty result's note no longer reads whole every text column the query names. A column
+  whose first values already hold too many for a note is not read further, and the note gets
+  what is left of the batch's deadline, at most 0.5 s. On a large table of unique text it had
+  carried a batch past the hard deadline: the engine was killed, the agent's own tables were
+  lost, and the error blamed planning.
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,
