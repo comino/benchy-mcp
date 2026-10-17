@@ -634,16 +634,25 @@ yet, and fixed for the session:
   table or scalar, inside the caller's query, so a table its body names binds to a CTE of the
   caller's of that name: `WITH readings AS (…) SELECT * FROM meter_rows('m1')` made the helper
   read the CTE, with `ok: true`, and so did `MERGE … USING (WITH readings AS …)`. So a batch
-  with a CTE named like a table or helper view that a helper macro reads, ASCII case folded, is
-  refused before anything runs (`E_SQL`), and says to pick another CTE name. That holds at any
+  that calls a helper macro, with a CTE named like a table or helper view that a helper macro
+  reads, ASCII case folded, is refused before anything runs (`E_SQL`), and says which call it is
+  and to pick another CTE name. A batch calls one when it names, as a word, a helper macro, a
+  macro of the agent's that calls one at any depth, or `view`, `macro` or `function`: a view or
+  macro whose body holds the CTE reads it through any macro the body calls, once that macro is
+  replaced by one that calls a helper
+  (`a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`). That holds at any
   depth (nested, in a subquery, `WITH RECURSIVE`) and in every statement the agent may run: a
   SELECT, PIVOT or UNPIVOT; a CREATE TABLE AS, CREATE VIEW or CREATE MACRO; an INSERT's query or
   VALUES; an UPDATE's SET, FROM or WHERE; a DELETE's USING or WHERE; a MERGE's USING, ON,
   conditions and actions; and a WITH ahead of an INSERT, UPDATE, DELETE, MERGE or PIVOT
   (`a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads`,
-  `a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`). Every other CTE
-  name is the agent's (`WITH data AS`, `WITH hourly AS`), and what only views read is not taken
-  from a CTE: a view is bound in its own context and reads the table. The names come from
+  `a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`). Every other CTE,
+  and every CTE of a batch that calls no helper macro, is the agent's (`WITH data AS`, `WITH
+  hourly AS`), and what only views read is not taken from a CTE: a view is bound in its own
+  context and reads the table. With helper macros, a batch that may call `query` or
+  `json_execute_serialized_sql` is refused (`E_SQL`): the SQL in their string is parsed only when
+  it runs, and can be built then, so it is read by nothing beforehand
+  (`sql_run_from_a_string_is_refused_beside_helper_macros`); `query_table` stays. The names come from
   DuckDB's parser (`json_serialize_sql`), which serializes SELECTs alone: in a batch that also
   holds another statement, benchy gives DuckDB the text from each WITH and cuts it where
   DuckDB's syntax error says the query ends, or at a `;` or the statement keyword after the

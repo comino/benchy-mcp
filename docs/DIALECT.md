@@ -30,7 +30,7 @@ These are benchy's rules, not DuckDB's, and no amount of dialect knowledge gets 
 | No file output | `COPY … TO` and `EXPORT DATABASE` are refused. Results come back through `query`; `get_result` pages a long one. |
 | No ENUM is kept | `CREATE TYPE`, a table or view with an `ENUM` column, nested or not, and a DEFAULT, generated column, CHECK, index, view or macro that casts to an `ENUM`, are refused and undone, `ENUM(` inside a string literal of what is kept included. Use `VARCHAR`. An `ENUM` inside a query that keeps nothing, and `PIVOT`, work as usual. |
 | Your own tables are free | `CREATE TABLE`/`VIEW`/`MACRO` land in `memory.main` and persist between calls, until a hard kill takes the engine. A name already taken is refused: for a table or view, a loaded table's, a helper's, a table's a helper reads or a system view's like `sqlite_master`; for a macro, a helper's or a built-in function's like `lower` or `range`. Pick another, such as `my_readings`. A table or view may be named like a function: `CREATE TABLE range …` works, and `FROM range` then reads it. |
-| Helpers are the operator's | Views and macros the operator provides are listed in `describe` under "Helpers". Call them like built-ins. They cannot be dropped, changed or replaced, and their names are taken. A CTE may not be named like a table a helper macro reads (`WITH meters AS (…)` when one reads `meters`), in any statement, a SELECT, an UPDATE, a DELETE, a MERGE or an INSERT alike: DuckDB expands the macro inside your query, where your CTE would stand in for the table. Pick another CTE name, such as `my_meters`. |
+| Helpers are the operator's | Views and macros the operator provides are listed in `describe` under "Helpers". Call them like built-ins. They cannot be dropped, changed or replaced, and their names are taken. In a batch that calls a helper macro (or a macro of yours that calls one), or that makes a view or macro, a CTE may not be named like a table a helper macro reads (`WITH meters AS (…)` when one reads `meters`), in any statement: DuckDB expands the macro inside your query, where your CTE would stand in for the table. Pick another CTE name, such as `my_meters`. With helper macros, `query('…')` and `json_execute_serialized_sql` are refused, since the SQL in their string cannot be read before it runs; write the query out. `query_table('name')` works. |
 | Results are capped | Default 200 rows / 8 KB. Truncation is always stated. Aggregate rather than paging. |
 | One batch, one deadline | Several statements per `query` call; the deadline covers the batch, not each statement. If one fails, nothing after it runs; the ones before it keep their effects, and their results come back with the error. |
 
@@ -133,8 +133,10 @@ CTE of the caller's of that name: `WITH meters AS (…) SELECT * FROM above('lab
 CTE's rows. A view is bound on its own and reads the table. A CTE named like a table one of the
 operator's macros reads is refused for this reason, in a SELECT or in a subquery of an UPDATE,
 DELETE, MERGE or INSERT (`a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads`,
-`a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`); in a macro of your own, name its
-tables so no CTE of the query that calls it takes them.
+`a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`), in a batch that
+calls such a macro, a macro of yours that calls one, or makes a view or macro
+(`a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`); in a macro of your
+own, name its tables so no CTE of the query that calls it takes them.
 
 <!-- maintainers -->
 ## Regenerating this

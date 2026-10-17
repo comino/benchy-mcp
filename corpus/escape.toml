@@ -413,3 +413,35 @@ category = "spoofed pivot type"
 kind = "CREATE+UNBOUND"
 allowlist = "pass"
 engine = "error"
+
+# SQL run from a string: DuckDB parses it only when it runs, and the string can be built then,
+# so no look at the batch reads it. It runs on the locked engine all the same. With helper
+# macros these are refused outright (`sql_run_from_a_string_is_refused_beside_helper_macros`);
+# without them they reach nothing more than the SQL written out.
+[[case]]
+sql = "SELECT * FROM query('SELECT * FROM read_text(''{canary}'')')"
+category = "string to SQL"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM query('SELECT * FROM read_' || 'text(''{canary}'')')"
+category = "string to SQL"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM json_execute_serialized_sql(json_serialize_sql('SELECT * FROM read_text(''{canary}'')'))"
+category = "string to SQL"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"
+
+[[case]]
+sql = "SELECT * FROM query_table('{canary}')"
+category = "string to SQL"
+kind = "UNBOUND"
+allowlist = "pass"
+engine = "error"

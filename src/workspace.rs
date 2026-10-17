@@ -118,7 +118,66 @@ struct Taken {
     /// agent's may be named (`Workspace::cte_stands_in`). Empty without helper macros, and then
     /// no query pays anything for it.
     ctes: std::collections::HashSet<String>,
+    /// The agent's macros that call a helper macro, at any depth, by folded name, as last read
+    /// from the catalog (`Workspace::calls_a_helper`); `None` once a batch may have made or
+    /// dropped one, so the next look reads them again.
+    reaching: Option<std::collections::HashSet<String>>,
+    /// Whether a batch has come past the statement check on this engine: before one has, the
+    /// agent's catalog is the fresh one an engine starts with, and holds no macro.
+    worked: bool,
 }
+
+/// Whether the word `w` starts at byte `at` of `text`: not inside a name like `withdrawn` or
+/// `my_with`. In bytes, since `at` need not start a character. Only ASCII letters, digits and `_`
+/// continue a word here; DuckDB's lexer also continues one with `$` and non-ASCII bytes, so this
+/// finds a word wherever DuckDB would, and in a few places it would not.
+fn word_at(text: &str, at: usize, w: &str) -> bool {
+    let b = text.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    b[at..].starts_with(w.as_bytes())
+        && (at == 0 || !ident(b[at - 1]))
+        && b.get(at + w.len()).is_none_or(|c| !ident(*c))
+}
+
+/// Whether the folded text `text` names `w` as a word anywhere.
+fn names_word(text: &str, w: &str) -> bool {
+    text.match_indices(w).any(|(at, _)| word_at(text, at, w))
+}
+
+/// Whether the folded text `text` may call the function `f`: `f` as a word, then, past a closing
+/// `"` and ASCII white space, a `(`. Whatever might hide the `(` from this look, a comment or a
+/// byte DuckDB reads differently, counts as a call; a call needs its name in the text, since
+/// DuckDB has no other spelling of an identifier (`U&"…"` is not implemented on 1.5.5).
+fn may_call(text: &str, f: &str) -> bool {
+    text.match_indices(f).any(|(at, _)| {
+        if !word_at(text, at, f) {
+            return false;
+        }
+        let rest = &text.as_bytes()[at + f.len()..];
+        let rest = rest.strip_prefix(b"\"").unwrap_or(rest);
+        match rest.iter().find(|c| !c.is_ascii_whitespace()) {
+            Some(c) => matches!(c, b'(' | b'/' | b'-') || !c.is_ascii(),
+            None => false,
+        }
+    })
+}
+
+/// DuckDB 1.5.5's table functions that run SQL given as a string, measured: `query('…')`, and
+/// `json_execute_serialized_sql(…)`, which runs what `json_serialize_sql` made and reaches a
+/// helper by its catalog's name. The string can be built while the batch runs, so no look at
+/// the batch beforehand reads it (`sql_run_from_a_string_is_refused_beside_helper_macros`).
+/// `query_table` is not among them: it reads a table the string names, never a query.
+const RUNS_A_STRING: &[&str] = &["query", "json_execute_serialized_sql"];
+
+/// The words that make a view or a macro, whose body keeps a CTE written in it: `CREATE [OR
+/// REPLACE] [TEMP] VIEW`, `CREATE MACRO` and its spelling `CREATE FUNCTION`. Nothing else the
+/// agent may write keeps a query: DuckDB 1.5.5 refuses a subquery, and with it a macro's, in a
+/// DEFAULT, a CHECK, a generated column and an index expression, measured.
+const KEEPS_A_BODY: &[&str] = &["view", "macro", "function"];
+
+/// The agent's macros, in any schema, and each body as DuckDB keeps it.
+const AGENT_MACRO_BODIES: &CStr = c"SELECT 0, function_name, coalesce(macro_definition, '') \
+      FROM system.main.duckdb_functions() WHERE database_name IN ('temp', 'memory')";
 
 /// The names of the CTEs in a statement DuckDB parsed (`json_serialize_sql`), at any depth: each
 /// `cte_map`'s keys, in a CTE, a subquery, an expression.
@@ -1947,6 +2006,13 @@ impl Workspace {
         self.taken
             .ctes
             .extend(macro_reads.iter().map(|r| r.to_ascii_lowercase()));
+        // Which of the agent's macros call a helper: none before its first batch, which is when
+        // the server puts the helpers on an engine, so the first look needs no costly listing.
+        self.taken.reaching = if self.taken.worked {
+            None
+        } else {
+            Some(Default::default())
+        };
         self.helpers = shown;
         Ok(())
     }
@@ -1980,15 +2046,38 @@ impl Workspace {
     /// string, `WITH ORDINALITY`) parses nowhere and names nothing, though a whole query with such
     /// a CTE written inside a string of a statement other than SELECT is refused too. A batch that
     /// would take more than [`CTE_PARSES`] parses is refused rather than let through unread.
-    fn cte_stands_in(&self, sql: &str) -> Option<String> {
+    ///
+    /// Only a batch that may expand a helper macro is parsed (REQ-18
+    /// `a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`), as
+    /// [`Workspace::calls_a_helper`] says; every other CTE is the agent's, whatever its name. And
+    /// with helper macros on the bench, a batch that may run SQL from a string is refused
+    /// whatever it holds (`sql_run_from_a_string_is_refused_beside_helper_macros`): DuckDB parses
+    /// that SQL only when it runs, from a string that may be built then, so no look beforehand
+    /// can read it for a CTE or a call of a helper.
+    fn cte_stands_in(&mut self, sql: &str) -> Option<String> {
+        self.taken.worked = true;
         if self.taken.ctes.is_empty() {
             return None;
         }
         let folded = sql.to_ascii_lowercase();
+        // A batch that may make or drop a macro says so; what was read of the agent's macros
+        // before it may be wrong after it.
+        if names_word(&folded, "macro") || names_word(&folded, "function") {
+            self.taken.reaching = None;
+        }
+        if let Some(f) = RUNS_A_STRING.iter().find(|f| may_call(&folded, f)) {
+            return Some(format!(
+                "`{f}(…)` runs SQL from a string, which benchy cannot read before it runs: with \
+                 the operator's helper macros on this bench, a CTE in that SQL could stand in for \
+                 a table one of them reads. Nothing ran. Write the query out instead; \
+                 `query_table('name')` still reads a table named in a string."
+            ));
+        }
         if !folded.contains("with") || !self.taken.ctes.iter().any(|t| folded.contains(t.as_str()))
         {
             return None;
         }
+        let why = self.calls_a_helper(&folded)?;
         // On the agent's own connection, as every catalog read of the agent's is; the text is a
         // bound value, parsed and never run, and the function is named in the system catalog,
         // where no object of the agent's can stand in for it.
@@ -2017,15 +2106,7 @@ impl Workspace {
                 _ => Parsed::Fails,
             })
         };
-        // Where a word starts and ends in `text`: not inside a name like `withdrawn` or `my_with`.
-        // In bytes, since `at` need not start a character.
-        let word = |text: &str, at: usize, w: &str| {
-            let b = text.as_bytes();
-            let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-            b[at..].starts_with(w.as_bytes())
-                && (at == 0 || !ident(b[at - 1]))
-                && b.get(at + w.len()).is_none_or(|c| !ident(*c))
-        };
+        let word = word_at;
         let mut names = Vec::new();
         let exhausted = (|| -> Result<(), ()> {
             if let Parsed::Select(v) = parse(sql)? {
@@ -2079,10 +2160,98 @@ impl Workspace {
             .into_iter()
             .find(|n| self.taken.ctes.contains(&n.to_ascii_lowercase()))?;
         Some(format!(
-            "`{cte}` cannot name a CTE here: a helper macro the operator provides reads a table \
-             of that name, and DuckDB expands a macro inside your query, where your CTE would \
-             stand in for the table. Nothing ran. Give the CTE another name, such as `my_{cte}`."
+            "`{cte}` cannot name a CTE in this batch: it {why}, and a helper macro the operator \
+             provides reads a table named `{cte}`. DuckDB expands a macro inside your query, \
+             where your CTE would stand in for that table. Nothing ran. Give the CTE another \
+             name, such as `my_{cte}`; a CTE named `{cte}` is fine in a batch that calls no \
+             helper macro and makes no view or macro."
         ))
+    }
+
+    /// Why the folded batch `folded` may expand a helper macro inside its own queries, where a
+    /// CTE of its could stand in for what the macro reads; `None` when it cannot. A macro is
+    /// expanded only where it is called, by its name, which is then in the text. So the batch
+    /// may if it names a helper macro, made or waiting; or one of the agent's macros that calls
+    /// one, at any depth, read from the catalog (DuckDB 1.5.5 expands the agent's macro, and the
+    /// helper's inside it, in the caller's query, measured); or a word that makes a view or a
+    /// macro ([`KEEPS_A_BODY`]), whose body would keep the CTE for whatever macro the body
+    /// calls, replaced later by one that calls a helper (measured: a view over the agent's macro
+    /// read its own CTE once that macro was replaced). A view called by the batch is not
+    /// counted: DuckDB binds it on its own, and a macro in it reads the table, measured.
+    ///
+    /// The agent's macros are read only for a batch that has passed every other test here, only
+    /// once it may have made one (`Taken::worked`), and kept until a batch names `macro` or
+    /// `function`: `duckdb_functions()` builds a row for each of DuckDB's built-ins first, about
+    /// 0.19 G instructions ([`Workspace::attach_all`]).
+    fn calls_a_helper(&mut self, folded: &str) -> Option<String> {
+        if let Some(h) = self
+            .helpers
+            .iter()
+            .filter(|h| h.what != "view")
+            .find(|h| names_word(folded, &h.name.to_ascii_lowercase()))
+        {
+            return Some(format!(
+                "calls `{}`, one of the operator's helper macros",
+                h.name
+            ));
+        }
+        if let Some(k) = KEEPS_A_BODY.iter().find(|k| names_word(folded, k)) {
+            return Some(format!(
+                "may make a view or macro (it says `{k}`), whose body would keep the CTE for \
+                 the macros it calls"
+            ));
+        }
+        if self.taken.reaching.is_none() {
+            match self.macros_reaching_a_helper() {
+                Ok(r) => self.taken.reaching = Some(r),
+                Err(_) => {
+                    return Some(
+                        "may call a macro of yours, and benchy could not read which of them \
+                         call a helper macro"
+                            .into(),
+                    )
+                }
+            }
+        }
+        let reaching = self.taken.reaching.as_ref()?;
+        let mut mine: Vec<&String> = reaching.iter().filter(|m| names_word(folded, m)).collect();
+        mine.sort();
+        mine.first().map(|m| {
+            format!("calls `{m}`, a macro of yours that calls one of the operator's helper macros")
+        })
+    }
+
+    /// The agent's macros that call a helper macro, at any depth, by folded name: a helper
+    /// macro's name, or the name of another of these, is a word of its body as DuckDB keeps it
+    /// (`macro_definition`).
+    fn macros_reaching_a_helper(&self) -> Result<std::collections::HashSet<String>, String> {
+        let mut reaching: std::collections::HashSet<String> = self
+            .helpers
+            .iter()
+            .filter(|h| h.what != "view")
+            .map(|h| h.name.to_ascii_lowercase())
+            .collect();
+        let rows = self.agent_rows(AGENT_MACRO_BODIES)?;
+        let bodies: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|(_, name, body)| (name.to_ascii_lowercase(), body.to_ascii_lowercase()))
+            .collect();
+        loop {
+            let before = reaching.len();
+            for (name, body) in &bodies {
+                if !reaching.contains(name) && reaching.iter().any(|r| names_word(body, r)) {
+                    reaching.insert(name.clone());
+                }
+            }
+            if reaching.len() == before {
+                break;
+            }
+        }
+        Ok(bodies
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| reaching.contains(n))
+            .collect())
     }
 
     /// The helpers' catalog holds the views and macros `shown` says were made, each under its

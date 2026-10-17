@@ -1548,13 +1548,13 @@ until a table of that name is attached again.
   macro is bound only where it is called and a call with NULL arguments folds a subquery away.
 - `a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads` — from a host's report: DuckDB 1.5.5
   expands a macro, table or scalar, inside the caller's query, so `WITH meters AS (…)` made a
-  helper macro over `meters` read the CTE, with no error; a view reads the table. A CTE named,
-  by any spelling, like a table or helper view a helper macro reads is refused before anything
-  runs, saying to pick another name: at the top, nested in a CTE, in a subquery or an
-  expression, `WITH RECURSIVE`, in a batch beside a SELECT, and in a CREATE TABLE AS, CREATE VIEW,
-  CREATE MACRO or INSERT, where `json_serialize_sql` cannot read the whole statement. Other CTE
-  names, a table only a view reads, the name in a string literal, and a session without helpers
-  are not refused.
+  helper macro over `meters` read the CTE, with no error; a view reads the table. In a batch
+  that calls a helper macro (below), a CTE named, by any spelling, like a table or helper view a
+  helper macro reads is refused before anything runs, saying to pick another name: at the top,
+  nested in a CTE, in a subquery or an expression, `WITH RECURSIVE`, in a batch beside a SELECT,
+  and in a CREATE TABLE AS, CREATE VIEW, CREATE MACRO or INSERT, where `json_serialize_sql`
+  cannot read the whole statement. Other CTE names, a table only a view reads, the name in a
+  string literal, and a session without helpers are not refused.
 - `a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads` — from the same
   host: `MERGE … USING (WITH meters AS …)` made a helper macro count the CTE's 999 rows and
   wrote them into the agent's table. Measured on DuckDB 1.5.5, the macro binds to the caller's
@@ -1571,6 +1571,26 @@ until a table of that name is attached again.
   would need more than 64 parses is refused rather than let through unread. A whole WITH query
   inside a string of a statement other than SELECT, with a CTE under one of those names, is
   refused too (not tested: a false refusal, not a wrong number).
+- `a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call` — from a host whose
+  helpers read `hourly`: every `WITH hourly AS (…)` was refused, though only a macro expanded in
+  the same query reads the CTE. Measured on DuckDB 1.5.5: a macro of the agent's that calls a
+  helper macro reads the caller's CTE too; a view does not, being bound on its own; and a view
+  or macro whose body holds the CTE reads it through any macro that body calls, once that macro
+  is replaced by one that calls a helper. So the CTE rule above applies only to a batch that
+  names, as a word, a helper macro, a macro of the agent's that calls one at any depth (read from
+  the catalog's macro bodies), or `view`, `macro` or `function`; every other CTE is the agent's,
+  whatever its name. The refusal says which call or word it is, and that the name is fine in a
+  batch that calls no helper macro. DuckDB refuses a subquery, a macro's included, in a DEFAULT,
+  CHECK, generated column and index expression, so nothing else keeps a body.
+- `sql_run_from_a_string_is_refused_beside_helper_macros` — from a host's report: `SELECT * FROM
+  query('WITH meters AS (…) SELECT * FROM total_kw(''m0'')')` returned the CTE's value, and a
+  view over it kept doing so. DuckDB parses a string's SQL only when it runs, from a string that
+  can be built then (`||`, `replace()`), so no look beforehand reads it. With a helper macro that
+  reads a table on the bench, a batch that may call `query` or `json_execute_serialized_sql`
+  (which reached a helper by its catalog's name, measured) is refused before anything runs, by
+  any spelling: quoted, qualified, with a comment before its `(`. `query_table`, which reads only
+  a table named in its string, and a column named `query` stay allowed, and so does `query()`
+  without helper macros.
 - `a_helper_that_names_a_table_in_a_string_is_refused_at_startup` — a table named in a string,
   `query_table('meters')`, `query('SELECT … FROM meters')`, `pragma_table_info('meters')`,
   `duckdb_table_sample('meters')`, is in no parse as a table, so it could not be taken from the

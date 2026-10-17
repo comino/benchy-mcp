@@ -251,6 +251,28 @@ and a matching name already paid about 0.9 M on `main` for parses that found not
 its CTEs costs about 0.35–0.4 M more, a tenth of a millisecond here, and an INSERT whose query
 runs to the end nothing. A statement without a WITH or a matching name is not parsed at all.
 
+**Only beside a helper call, and no SQL from a string** (REQ-18
+`a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`,
+`sql_run_from_a_string_is_refused_beside_helper_macros`). With helper macros, every batch's
+folded text is now also searched for a call of `query` or `json_execute_serialized_sql`, and a
+batch with a WITH and a matching name is parsed only when it names a helper macro, one of the
+agent's macros that calls one, or `view`, `macro` or `function`. Measured the same way, 1,000
+calls of each, three runs, medians, a session with no call subtracted, `main` at `2e5400a`
+against the change, the three example helpers:
+
+| Each call | No helpers, `main` | No helpers, change | Helpers, `main` | Helpers, change |
+|---|---|---|---|---|
+| `SELECT count(*) FROM meters WHERE …` | 1.41 M | 1.41 M | 1.37 M | 1.41 M |
+| `WITH d AS (SELECT * FROM meters) SELECT …` | 1.47 M | 1.70 M | 2.23 M | 1.52 M |
+| `WITH d AS (… FROM meters) SELECT … FROM d, hours_above(…)` | | | 7.77 M | 7.92 M |
+
+Sessions vary by ±0.15 G here, so ±0.15 M a call; without helpers the code is one store, and
+the 0.23 M is that noise. With them, a WITH that names a taken table and calls no helper is no
+longer parsed: about 0.7 M less. One that calls a helper pays the extra look at its text, within
+the noise. The agent's macros are read from the catalog only after a batch that may have made
+one, once until the next: `duckdb_functions()` costs about 0.1–0.2 G that once (a session of
+`CREATE MACRO` and one such WITH, 1.56 G on `main`, 1.67 G with the change, medians).
+
 ## The profile's claims, made true: what it costs
 
 Four `describe` claims were stated as facts and were not: an integer reading taken for the
