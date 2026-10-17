@@ -229,40 +229,28 @@ fn the_empty_result_note_stays_inside_the_deadline() {
             seen: None,
         })
         .unwrap();
+    let mut ws = bench.seal("1GB").unwrap();
     // An interrupted query stops when DuckDB next looks, which is a machine's own time: on a
     // shared macOS runner it was 164 ms past a 300 ms deadline, where this box takes a few. So
-    // the bound below is the deadline plus what stopping the note's own query takes here,
-    // measured on the same table, not a fixed allowance.
+    // the bound below is the deadline plus what the batch's own watchdog takes to stop a query
+    // on this engine and table, measured here, not a fixed allowance. (Measured on the bench's
+    // connection before the seal, with every thread, the same scan finished inside 100 ms on
+    // that runner, so it has to be the sealed engine.)
     let stop = {
-        let con = bench.connection();
-        let handle = con.interrupt_handle();
-        let at = std::time::Duration::from_millis(100);
-        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = done.clone();
+        let deadline = std::time::Duration::from_millis(100);
+        let caps = Caps {
+            deadline,
+            ..Caps::default()
+        };
         let t = std::time::Instant::now();
-        // Fired again until the query is over: a pending interrupt is cleared when a statement
-        // starts, so one fired early would be lost.
-        let fire = std::thread::spawn(move || {
-            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
-                if t.elapsed() >= at {
-                    handle.interrupt();
-                }
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-        });
-        let ran = con
-            .prepare("SELECT DISTINCT late FROM w WHERE late IS NOT NULL ORDER BY 1 LIMIT 21")
-            .and_then(|mut st| {
-                st.query_map([], |r| r.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()
-            });
+        let ran = ws.work("SELECT count(DISTINCT late || c1 || c2) FROM w", &caps);
         let took = t.elapsed();
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        fire.join().unwrap();
-        assert!(ran.is_err(), "the calibration query was interrupted");
-        took.saturating_sub(at)
+        assert!(
+            ran.is_err(),
+            "the calibration query ran past its deadline: {took:?}"
+        );
+        took.saturating_sub(deadline)
     };
-    let mut ws = bench.seal("1GB").unwrap();
     let mut timed = |sql: &str, deadline: std::time::Duration| {
         let caps = Caps {
             deadline,
