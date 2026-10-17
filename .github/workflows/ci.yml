@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
-        with: { toolchain: stable, components: "clippy, rustfmt" }
+        with: { toolchain: "1.98.1", components: "clippy, rustfmt" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # libduckdb-sys downloads DuckDB into target/duckdb-download, and its build script's
@@ -32,15 +32,25 @@ jobs:
         run: |
           ls target/duckdb-download/*/*/libduckdb.* >/dev/null 2>&1 ||
             rm -rf target/*/build/libduckdb-sys-* target/*/.fingerprint/libduckdb-sys-*
+      # libduckdb-sys's build script downloads DuckDB's library with no checksum. Put the release
+      # file, checked against packaging/duckdb.sha256, where that build script reuses it instead,
+      # and unpack the library from it over whatever the cache restored.
+      - name: Fetch DuckDB's release library, checked
+        run: python3 packaging/duckdb_lib.py fetch
 
       - run: cargo fmt --check
       # REQUIREMENTS.md may only name tests that exist, or mark them planned. Cheap, and it is
       # what stops the document claiming more than the code proves.
       - run: python3 scripts/check_requirements.py
-      # No DUCKDB_LIB_DIR: this builds what a stranger's `cargo build` builds, fetching DuckDB's
-      # release library the same way.
+      # One compiler for every build, and DuckDB's library only as released.
+      - run: python3 scripts/check_toolchain.py
+      - run: python3 -I packaging/test_duckdb_lib.py
+      # No DUCKDB_LIB_DIR: this builds what a stranger's `cargo build` builds, through the same
+      # libduckdb-sys path, with the release file already in place and checked.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
+      # And the copy of the library the tests ran against is still the released one.
+      - run: python3 packaging/duckdb_lib.py check
 
       # The escape corpus and the requirement tests are the point, but they run in-process.
       # This is the same assertion through a real MCP stdio handshake.
@@ -55,6 +65,28 @@ jobs:
       - name: Report what this runner can enforce
         run: ./target/release/benchy-mcp doctor
 
+  # RustSec advisories, licences and sources for Cargo.lock, by deny.toml. No build: it reads the
+  # lock and the advisory database. cargo-deny's release binary, pinned by version and SHA-256.
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CARGO_DENY_VERSION: 0.20.2
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # cargo-deny runs `cargo metadata`, and rust-toolchain.toml names the cargo.
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
+        with: { toolchain: "1.98.1" }
+      - name: Fetch cargo-deny, checked
+        run: |
+          name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -fsSLO "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/${name}.tar.gz"
+          echo "${CARGO_DENY_SHA256}  ${name}.tar.gz" | sha256sum -c
+          tar -xzf "${name}.tar.gz" -C "$RUNNER_TEMP" --strip-components=1 "${name}/cargo-deny"
+          rm "${name}.tar.gz"
+      - run: '"$RUNNER_TEMP/cargo-deny" --locked check'
+
   # REQ-16 and REQ-15's ClickHouse tests, against a real server they start themselves from the
   # official single binary. It is a 240 MB download (700 MB unpacked), so it has a job of its own,
   # and is pinned by version and SHA-512 — the same build the tests were written against.
@@ -67,7 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
-        with: { toolchain: stable }
+        with: { toolchain: "1.98.1" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-directories: target/duckdb-download
@@ -76,6 +108,8 @@ jobs:
         run: |
           ls target/duckdb-download/*/*/libduckdb.* >/dev/null 2>&1 ||
             rm -rf target/*/build/libduckdb-sys-* target/*/.fingerprint/libduckdb-sys-*
+      - name: Fetch DuckDB's release library, checked
+        run: python3 packaging/duckdb_lib.py fetch
       - name: Fetch ClickHouse, checked
         run: |
           tgz="clickhouse-common-static-${CLICKHOUSE_VERSION}-amd64.tgz"
@@ -94,15 +128,17 @@ jobs:
           ! grep -q '^skipped:' test.log
 
   # macOS builds and serves, but has no OS sandbox: benchy refuses to serve there unless started
-  # with --allow-unsandboxed, and the suite passes that flag off Linux.
+  # with --allow-unsandboxed, and the suite passes that flag off Linux. A macOS runner costs more,
+  # so not on every branch push; but on a pull request, or a macOS-only failure is found only
+  # after the merge.
   macos:
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable branch, 2026-09-12
-        with: { toolchain: stable, components: clippy }
+        with: { toolchain: "1.98.1", components: clippy }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-directories: target/duckdb-download
@@ -111,6 +147,8 @@ jobs:
         run: |
           ls target/duckdb-download/*/*/libduckdb.* >/dev/null 2>&1 ||
             rm -rf target/*/build/libduckdb-sys-* target/*/.fingerprint/libduckdb-sys-*
+      - name: Fetch DuckDB's release library, checked
+        run: python3 packaging/duckdb_lib.py fetch
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
       - name: Verify through a real MCP client

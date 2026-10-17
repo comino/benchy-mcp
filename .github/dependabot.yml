@@ -1,0 +1,19 @@
+# Weekly update pull requests for the crates and for the actions, which are pinned by commit SHA
+# (CONTRIBUTING.md). Each one is a change like any other: it passes scripts/ci.sh locally, with
+# the measurement that change asks for, before it is merged. A duckdb bump also needs new lines in
+# packaging/duckdb.sha256, which a dependabot pull request cannot write: test_duckdb_lib.py fails
+# until they are added.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      # duckdb, libduckdb-sys and arrow move together: duckdb pins the arrow it is built against.
+      duckdb:
+        patterns: ["duckdb", "libduckdb-sys", "arrow", "arrow-*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5

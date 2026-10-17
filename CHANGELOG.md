@@ -6,6 +6,20 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- DuckDB's release library is checked against a pinned SHA-256 before it is linked or shipped.
+  `packaging/duckdb_lib.py` fetches the release file for CI, the release builds and the
+  Dockerfile, so libduckdb-sys never downloads it unchecked there; `package.sh` checks it again,
+  pins DuckDB's LICENSE too, takes the exact DuckDB version from Cargo.lock, and writes a
+  `SHA256SUMS` of every file into the bundle, whose README names the DuckDB release file and its
+  SHA-256. Building from source: run `python3 packaging/duckdb_lib.py fetch` before `cargo build`.
+- The Rust compiler is pinned to 1.98.1 in `rust-toolchain.toml`, used by local builds, CI, the
+  release and the Dockerfile alike, with `rust-version` in Cargo.toml; `scripts/check_toolchain.py`
+  keeps them in step.
+- SECURITY.md (private vulnerability reporting), issue and pull request templates, Dependabot for
+  crates and actions, and `cargo deny check` in CI. The macOS CI job also runs on pull requests.
+  `packaging/container-smoke.sh` stages its fixtures under `$HOME` on macOS, where Colima does not
+  share `/var/folders`.
+
 ## [0.1.0] — 2026-10-16
 
 First public packaged release, under the MIT license. **This is an experimental prototype,

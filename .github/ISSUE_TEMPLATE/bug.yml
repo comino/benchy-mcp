@@ -1,0 +1,38 @@
+name: Bug
+description: Something benchy does that it should not, or does not do that it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **A way across a boundary — a sandbox or containment escape, one session reaching
+        another's data, a credential exposed — is a security bug: report it privately as
+        SECURITY.md says, not here.**
+
+        benchy-mcp is an experimental prototype; breaking changes are expected between releases.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations: { required: true }
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce it
+      description: |
+        The smallest config, data and SQL (or MCP / host-protocol messages) that show it.
+        Leave out host names, credentials and anything private.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`benchy-mcp --version` and `benchy-mcp doctor`"
+      description: How you installed it (bundle, Docker image, built from source) and on which OS.
+      render: text
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: The operator's log, if it says anything
+      render: text

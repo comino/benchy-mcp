@@ -17,11 +17,21 @@ cargo fmt --check
 step "requirements name tests that exist"
 python3 scripts/check_requirements.py
 
+step "one Rust compiler everywhere"
+python3 scripts/check_toolchain.py
+
+step "DuckDB's library only as released"
+python3 -I packaging/test_duckdb_lib.py
+# Into both target dirs, before cargo: libduckdb-sys would otherwise download it unchecked.
+python3 packaging/duckdb_lib.py fetch
+CARGO_TARGET_DIR="$PWD/target/clippy" python3 packaging/duckdb_lib.py fetch
+
 step "clippy, warnings are errors"
 CARGO_TARGET_DIR="$PWD/target/clippy" CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
 
 step "cargo test --release"
 cargo test --release
+python3 packaging/duckdb_lib.py check
 
 if [ -n "${BENCHY_CLICKHOUSE_BIN:-}" ]; then
   step "the ClickHouse tests, against $BENCHY_CLICKHOUSE_BIN"
@@ -50,5 +60,12 @@ python3 eval/test_eval.py
 
 step "what this machine enforces"
 ./target/release/benchy-mcp doctor
+
+step "advisories, licences and sources of Cargo.lock"
+if command -v cargo-deny >/dev/null; then
+  cargo deny --locked check
+else
+  echo "cargo deny: skipped, cargo-deny is not installed (ci.yml runs it)"
+fi
 
 printf '\nci.sh: everything passed\n'

@@ -11,6 +11,9 @@
 !docs/DIALECT.md
 !packaging/
 !packaging/package.sh
+!packaging/duckdb_lib.py
+!packaging/duckdb.sha256
+!rust-toolchain.toml
 !packaging/third_party_licenses.py
 !packaging/README.md
 !examples/

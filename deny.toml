@@ -1,0 +1,54 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny/), run by ci.yml's `deny` job and
+# by `cargo deny check` locally. A dependency with a RustSec advisory, a licence outside this
+# list, or a crate from anywhere but crates.io fails the build.
+
+[graph]
+# The targets that are built and shipped; a Windows-only crate is not in any bundle.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
+[advisories]
+# Vulnerabilities fail; so do unmaintained and unsound crates, and yanked versions. An advisory
+# that does not apply is ignored here by id, with the reason beside it.
+yanked = "deny"
+# zip 6.0.0 is a build-dependency of libduckdb-sys 1.10505.0, which asks for zip "6", so it
+# cannot be updated past these until the duckdb crate is. The build script calls
+# ZipArchive::extract only on a library it downloaded itself; packaging/duckdb_lib.py fetch, run
+# before every cargo build in CI, the release and the Dockerfile, puts the unpacked library in
+# place first, from a zip checked against packaging/duckdb.sha256, so extract never runs there.
+# Remove these with the duckdb update that moves zip to 9 or later.
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip extract in libduckdb-sys's build script; never reached after duckdb_lib.py fetch" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract in libduckdb-sys's build script; never reached after duckdb_lib.py fetch" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract in libduckdb-sys's build script; never reached after duckdb_lib.py fetch" },
+    { crate = "zip@6.0.0", reason = "yanked; libduckdb-sys 1.10505.0 asks for zip 6" },
+]
+
+[licenses]
+# What the tree uses today: permissive licences, compatible with shipping the binary under MIT
+# with every notice in THIRD-PARTY-LICENSES.txt. A crate under anything else is a decision, not
+# an update.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of one crate are worth knowing about, not a failure: duckdb and arrow pin theirs.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

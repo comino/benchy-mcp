@@ -4,7 +4,14 @@
 set -euo pipefail
 image=$1
 repo=$(cd "$(dirname "$0")/.." && pwd)
-work=$(mktemp -d)
+# The fixtures are bind-mounted, so they must be where the Docker VM can see them. On macOS a
+# plain mktemp lands under /var/folders, which Colima does not share; it shares $HOME.
+if [ "$(uname -s)" = Darwin ]; then
+  mkdir -p "$HOME/.cache"
+  work=$(mktemp -d "$HOME/.cache/benchy-container-smoke.XXXXXX")
+else
+  work=$(mktemp -d)
+fi
 trap 'rm -rf "$work"' EXIT
 
 flags=(--rm --init --read-only --cap-drop=ALL --security-opt=no-new-privileges

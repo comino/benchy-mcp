@@ -2,6 +2,10 @@
 name = "benchy-mcp"
 version = "0.1.0"
 edition = "2021"
+# The compiler every build uses is pinned in rust-toolchain.toml; this says so to cargo for a
+# build with another one. scripts/check_toolchain.py keeps the two, the workflows and the
+# Dockerfile in step.
+rust-version = "1.98.1"
 description = "An agent workbench for time-series analytics over the data you already have: SQL over a sealed DuckDB workspace, loaded before the first call"
 license = "MIT"
 publish = false
