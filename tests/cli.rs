@@ -139,6 +139,7 @@ fn a_skipped_file_is_named_in_the_operator_log() {
     // is said to the operator, file by file; nothing about it reaches the agent.
     let dir = data_dir();
     std::fs::write(dir.join("notes.txt"), "not data\n").unwrap();
+    std::fs::write(dir.join(".hidden.csv"), "a\n1\n").unwrap();
     std::fs::create_dir_all(dir.join("archive")).unwrap();
     std::fs::write(dir.join("archive").join("old.csv"), "a\n1\n").unwrap();
     let log = dir.with_extension("log");
@@ -166,7 +167,13 @@ fn a_skipped_file_is_named_in_the_operator_log() {
         "{text}"
     );
     assert!(
-        !described.contains("notes") && !described.contains("archive"),
+        text.contains(".hidden.csv") && text.contains("a hidden file"),
+        "{text}"
+    );
+    assert!(
+        !described.contains("notes")
+            && !described.contains("archive")
+            && !described.contains("hidden"),
         "{described}"
     );
     let _ = std::fs::remove_dir_all(&dir);

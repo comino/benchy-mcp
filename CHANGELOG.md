@@ -46,6 +46,20 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   run. DuckDB wraps each in a transaction of its own, which was refused as the agent's
   `TRANSACTION`. A transaction the agent writes is still refused, and a refused `TRANSACTION`
   now says what to do when the PIVOT reads a table made earlier in the same call.
+- **A folder's dotfiles are skipped** (REQ-4 `a_hidden_file_in_a_directory_is_not_a_table`).
+  `.secret.csv` became a table `secret`, and the AppleDouble `._meters.csv` macOS writes beside
+  `meters.csv` stopped startup as a second `meters`. Every name starting with `.` is now skipped
+  and named in the operator's log; a dotfile named with `--source` or in a config still loads
+  (`a_hidden_file_named_explicitly_still_loads`).
+- **Docs say what is true.** Only a macro is refused a built-in function's name: `CREATE TABLE
+  range` works (DIALECT.md, the `query` tool's description). COPY and EXPORT are refused by the
+  locked engine at prepare, not by the allowlist up front (`src/guard.rs`). HOST-PROTOCOL.md lists
+  every `sandbox` value `hello` reports, and that Node.js may destroy a closed channel, or hand a
+  write's error to its callback, before any `'error'` event. CAPACITY.md says which parts are
+  `capacity.py`'s output. A helper's comment is its `--` lines joined into one, at most 200 bytes.
+  The README's Limits measure how a long string's overshoot of `--memory` grows with its rows.
+  Commit hashes and issue numbers from before the public history began no longer read as links
+  into this repository.
 
 ## [0.1.0] — 2026-10-16
 
@@ -82,7 +96,7 @@ supersede earlier packaging decisions.
 - Make the prototype status and expected breaking changes prominent in the README, contributor
   guide and bundle documentation. The project remains MIT-licensed and is not ready for production.
 
-### A CTE cannot stand in for a helper's table in any statement (#70)
+### A CTE cannot stand in for a helper's table in any statement
 
 - **The CTE rule holds in UPDATE, DELETE, MERGE, INSERT and PIVOT too**
   (`a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`). From a host's
@@ -113,7 +127,7 @@ supersede earlier packaging decisions.
   `a_wide_csv_is_not_held_in_memory_while_it_is_staged`). Each thread filling a stage pins a
   block of every column, and DuckDB's JSON reader holds a vector of 2,048 parsed rows, so a stage
   of wide rows on every thread ran out of memory under its 256 MiB cap and was staged again
-  without it, held whole; since #75 such a file failed at the 1 GB loader ceiling. Now a file
+  without it, held whole; once loaders had a memory ceiling, such a file failed at its 1 GB. Now a file
   whose first 64 KiB show rows that wide (`a_file_is_read_on_one_thread_where_its_first_line_is_wide`)
   is read on one thread from the start: a CSV straight into its table, a JSON file through a
   stage held to the cap and its reader's vector
@@ -131,8 +145,8 @@ supersede earlier packaging decisions.
 ### A memory bound for loaders (host protocol 6)
 
 - **A loader past its memory ceiling is killed, and its load attaches nothing** (REQ-8
-  `a_loader_past_its_memory_ceiling_is_killed_and_attaches_nothing`). The engine had a ceiling
-  (#53); the loaders had none, and in a container one runaway load was every session's OOM kill.
+  `a_loader_past_its_memory_ceiling_is_killed_and_attaches_nothing`). The engine had a ceiling;
+  the loaders had none, and in a container one runaway load was every session's OOM kill.
   Measured unbounded: a 676 MB CSV of 300 columns, too wide for its 256 MiB stage, took its loader
   to 2,090 MB; a 188 MB NDJSON of 2,000 keys an object, 630 MB; a connector that held 800 MB
   before writing a row, any amount. The supervisor now reads each loader's resident memory every
@@ -169,7 +183,7 @@ supersede earlier packaging decisions.
   the HTTP admission; the redirect port; a root-owned connector; broken links to a README
   section that no longer exists).
 
-### A host's re-review (#70): doctor's entries, and macOS test hygiene
+### A host's re-review: doctor's entries, and macOS test hygiene
 
 - **Each `doctor --json` mechanism says what was checked** (`doctor_without_landlock_says_not_enforced`).
   At ABI 0 every entry of `mechanisms` said `"enforced": true` beside a `not_enforced` verdict.
@@ -187,7 +201,7 @@ supersede earlier packaging decisions.
   two exec tests quote the checkout's path in their connector, which may hold a space. `cargo
   clippy --all-targets --target aarch64-apple-darwin` is clean.
 
-### A host's re-review (#70): a refused request closes the channel, and a CTE cannot stand in for a helper's table
+### A host's re-review: a refused request closes the channel, and a CTE cannot stand in for a helper's table
 
 - **A request refused whole that names the stream channel closes it**
   (`a_refused_request_that_names_the_channel_closes_it`). A host may write streams ahead of its
@@ -215,7 +229,7 @@ supersede earlier packaging decisions.
 
 ### Hole A from a host's Linux run: a pivot ENUM pinned, and a ceiling that did not reclaim
 
-- **An object of the agent's keeps no ENUM spelled in its SQL** (#60 hole A, REQ-9
+- **An object of the agent's keeps no ENUM spelled in its SQL** (a re-review's hole A, REQ-9
   `an_object_that_keeps_an_enum_in_its_sql_is_refused`, `a_spoofed_pivot_enum_cannot_be_pinned`).
   A type named `__pivot_enum_0` passed as a dynamic PIVOT's, a table whose INTEGER column's
   DEFAULT cast to it passed the ENUM-column check, the type could not be dropped after the batch
@@ -255,7 +269,7 @@ supersede earlier packaging decisions.
 
 ### Holes B and C from a host's Linux run: names the helpers read, and system views
 
-- **A table a helper reads is taken for the agent, on the bench or not** (#60 hole B, REQ-18
+- **A table a helper reads is taken for the agent, on the bench or not** (the re-review's hole B, REQ-18
   `a_table_a_helper_reads_stays_taken_after_a_detach`). After a host detached `readings`, the
   agent's `CREATE TABLE readings AS SELECT 'FORGED' …` was kept: the helper `per_meter` then
   served the agent's rows, and the host's attach of `readings` again was refused with `E_NAME`.
@@ -264,7 +278,7 @@ supersede earlier packaging decisions.
   (`json_serialize_sql`, one more column of the function listing it already made), kept to the
   tables on the bench. The server keeps them for the session and gives them to every engine it
   starts, a rebuilt one too.
-- **The table a waiting helper needs is taken** (#60 hole C,
+- **The table a waiting helper needs is taken** (the re-review's hole C,
   `the_table_a_waiting_helper_needs_is_taken`). `describe` told the agent `per_meter` "works
   once `readings` is on the bench", and the agent's own `readings` then made the host's attach
   fail. A table DuckDB names only later, as a waiting helper's second missing one, stays the
@@ -360,11 +374,11 @@ supersede earlier packaging decisions.
   down as the engine is, makes them in a file of their own against empty stand-ins of the bench's
   tables, since DuckDB 1.5.5 binds a view's or a macro's body when it is created; the engine
   attaches the file `READ_ONLY` between the agent's schema and the tables, and an engine rebuilt
-  after the hard deadline or the memory ceiling gets it first. Their names are taken (#57's check): the agent cannot drop, change, replace or
+  after the hard deadline or the memory ceiling gets it first. Their names are taken (the no-shadowing check): the agent cannot drop, change, replace or
   shadow one, and a host cannot attach under one.
 - **Checked at startup.** A helper named like a DuckDB built-in (read from DuckDB's own catalog),
   with the `benchy_` prefix or like a table, one that reads a file, the network or an extension
-  or keeps an ENUM (held to the agent's rule, #55),
+  or keeps an ENUM (held to the agent's rule),
   any statement that is not a view or a macro, and a server's helper over a table no source
   provides stop startup with the reason. A host's helper over a table it has not attached yet
   waits for it, says so when called, and is made by that attach.
@@ -372,13 +386,13 @@ supersede earlier packaging decisions.
   substituted into its body, so `FROM rooms m, LATERAL above(m.meter, …)` bound `m` to the macro's
   own alias and gave every meter the count of all of them. docs/DIALECT.md and
   `examples/helpers.sql` read arguments once in a FROM-less CTE.
-- **A table macro over a missing table waits like a view** (#60,
+- **A table macro over a missing table waits like a view** (a re-review,
   `a_table_macro_over_a_missing_table_waits_like_a_view`). DuckDB 1.5.5 does not bind a table
   macro's body where it reads an argument, so one over a table not attached yet was listed as
   ready and failed with a bare Catalog Error. The helpers job now prepares a call of each macro,
   arguments NULL; one that reads a missing table is marked waiting in `describe`, says what it
   waits for when called, and is made by the attach.
-- **A `DROP` or `ALTER` of a helper is told it is a helper** (#60,
+- **A `DROP` or `ALTER` of a helper is told it is a helper** (a re-review,
   `a_write_to_a_helper_is_told_it_is_a_helper`), not that it wrote to a loaded table with the
   hint `CREATE TABLE my_dewpoint AS SELECT * FROM dewpoint`.
 - **Free when unused.** A session without helpers starts and queries in the same instructions as
@@ -618,7 +632,7 @@ supersede earlier packaging decisions.
   keeps no tally for one series beyond the sums of its times, hashes a tallied key once per
   series, and stops counting the key candidates when the first batch's times do not repeat. One
   series' runs of 0 or null are kept as they arrive instead of read from the table. The watch
-  runs on a thread of its own, started after the loader is confined. Against `e09f20a`: a
+  runs on a thread of its own, started after the loader is confined. Against the build before it: a
   10M-row connector load takes 13.7% fewer instructions (23.03 → 19.87 G), ClickHouse 13.4%,
   500 series 9.2%; `stream.watch` 670 → 160 ms of CPU for one series. Trace lines carry their
   thread, and `bench/ingest.py --record` places a sample on its own thread's stage.
@@ -650,8 +664,8 @@ supersede earlier packaging decisions.
   wider file's first `describe` is about 4% later at 5,000,000 rows, its profile now read on one
   thread after the write (R3-2). docs/CAPACITY.md and the README's numbers are regenerated, and
   the backlog is re-ranked for round 3, with what is DuckDB's and what is benchy's.
-- **Round 3, measured together** (docs/PERFORMANCE.md, round 4's baseline): `main` with #37–#46,
-  against round 3's start, interleaved: a 10M-row ClickHouse or connector load takes 16–27% fewer
+- **Round 3, measured together** (docs/PERFORMANCE.md, round 4's baseline): `main` with round 3
+  merged, against round 3's start, interleaved: a 10M-row ClickHouse or connector load takes 16–27% fewer
   instructions and answers its first `describe` 18–22% sooner (5% with an integer key); CSV,
   Parquet and NDJSON files at 1M rows 15–20% sooner, an HTTP CSV, NDJSON or Parquet body 28–35%
   sooner; a 10M-row CSV's loader peaks at 384 MB, not 512 MB. JSON pages are the one 1M-row path that did not move.
@@ -663,7 +677,7 @@ supersede earlier packaging decisions.
   write on one thread, which a parallel write could cut by two thirds if the layout can be kept
   origin-blind (R4-1).
 - **Round 4, measured together** (docs/PERFORMANCE.md, round 5's baseline): `main` with
-  #49–#51, against round 4's start, interleaved: a 10M-row NDJSON file answers its first
+  round 4 merged, against round 4's start, interleaved: a 10M-row NDJSON file answers its first
   `describe` 34% sooner (R4-2) and JSON pages 34% sooner (R4-3), each for the extra instructions
   its PR measured; every other path within ±1% in instructions. The write stays on one thread
   (R4-1, the owner's decision for REQ-15). Since round 1's start, a 10M-row ClickHouse load is
@@ -673,7 +687,7 @@ supersede earlier packaging decisions.
   on the path to `describe` is 3–5% at 10M rows, and the fetch thread of JSON pages: the
   backlog says so, and that it is small.
 - **The host-engine work, measured together** (docs/PERFORMANCE.md, round 6's baseline): `main`
-  at `b660bcd`, after #53–#72, against round 5's baseline, interleaved: every ingest path within
+  before the public history began, after the host-engine work, against round 5's baseline, interleaved: every ingest path within
   ±0.4% in instructions at 1M and 10M rows (exec-1m +1.0% by its minimum, +0.6% by its median),
   and no first `describe` later than the machine's spread; the stream channel costs what a
   streamed attach does. A session's fixed part is 1–9 M instructions more, no measurable time:
@@ -763,7 +777,7 @@ supersede earlier packaging decisions.
   agent already gave one of its own is refused with `E_NAME`. The taken set takes names a host
   provides (`Workspace::reserve_function`), for config-time helpers. A SELECT pays nothing for it
   (docs/PERFORMANCE.md, "The query path: no-shadowing").
-- **Names DuckDB's parser reads itself are taken too** (#60, REQ-9
+- **Names DuckDB's parser reads itself are taken too** (a re-review, REQ-9
   `a_name_the_parser_reads_itself_is_taken`). `coalesce`, `if`, `try`, `try_cast`, `extract`,
   `percentile_cont` and the like never reach the catalog, so `duckdb_functions()` does not list
   them, and `CREATE MACRO coalesce(a, b) AS 1` was kept: `"coalesce"(NULL, 2)` then answered 1.
@@ -846,22 +860,22 @@ supersede earlier packaging decisions.
   loads the same rows with ClickHouse's own Arrow defaults; ClickHouse is not told the deadline
   then, and a profile that makes zstd Arrow bodies or binary text is refused before the fetch,
   naming the setting. `check` says which way a source will load (docs/SOURCES.md).
-- **`describe` tells the shape of the data** (#7, REQ-14). For each table: the time column, its
+- **`describe` tells the shape of the data** (REQ-14). For each table: the time column, its
   range and cadence, the series key, each numeric column's range, nulls and zeros, and per series
   what is wrong with it — dead, late start, early end, runs of 0 or null, gaps, repeated times —
   and the moments every series shares, such as a clock-change hour. The loader profiles the table
   once; `describe` only renders it. `time_column` and `series` state the shape per source instead
   of guessing.
-- **ClickHouse is a built-in source** (#10, REQ-16). `type = "clickhouse"` loads tables, or a
+- **ClickHouse is a built-in source** (REQ-16). `type = "clickhouse"` loads tables, or a
   query, over ClickHouse's HTTP interface: the schema read and mapped to the bench's types, the
   time window and entity allowlist pushed down as query parameters, the load estimated before it
   is fetched, zstd on the wire by default (or Arrow's LZ4, or none), and the password in a header
   from a loader that holds it alone. `benchy-mcp check <cfg> <source>` checks one without a
   model. See docs/SOURCES.md.
-- **A session budget** (#8): `[budget]` in the config caps the rows and bytes every load in a
+- **A session budget**: `[budget]` in the config caps the rows and bytes every load in a
   session may fetch together (defaults 50,000,000 rows and 2 GiB).
 
-### Origin-blind (#9, REQ-15)
+### Origin-blind (REQ-15)
 
 - **The write stays on one thread, and the layout tests now compare blocks** (R4-1, measured, not
   done). A write on four threads, split into fixed groups of row groups committed in order,
@@ -884,7 +898,7 @@ supersede earlier packaging decisions.
 - When benchy refuses a stream mid-load, its refusal is reported, not the broken pipe the
   connector then dies of.
 
-### For agents and operators (#11)
+### For agents and operators
 
 - `describe` reads small tables right: the bundled example finds `meter` as its series key and
   says `office` repeats one reading and misses the next. When times repeat and no column tells
@@ -901,7 +915,7 @@ supersede earlier packaging decisions.
   its maintainers' notes. `exec-test` and `check` skip the checks a failed step makes meaningless,
   and name the conversion for common type mismatches.
 
-### Install and release (#6)
+### Install and release
 
 - Release bundles for Linux x86_64 and aarch64 and macOS arm64 and x86_64: the binary with
   DuckDB's release library beside it, the licences and example data. A release is smoke-tested
@@ -911,14 +925,14 @@ supersede earlier packaging decisions.
 - `benchy-mcp --version` names the DuckDB library; `doctor` names the file it was loaded from.
   Started by hand in a terminal, the server says it is waiting for an MCP client.
 
-### Testing (#8)
+### Testing
 
 - The weekly cargo-mutants run over `guard`, `lockdown`, `sandbox`, `admission` and `loader` is a
   gate: a mutant the suite does not catch fails it.
 
 ### Eval
 
-- Measured again on main (`d598c96`), 2026-10-11: deepseek-v4-flash-0731, gemini-3.8-flash,
+- Measured again on main, 2026-10-11, before the public history began: deepseek-v4-flash-0731, gemini-3.8-flash,
   gpt-5-mini and claude-haiku-4.5 took 38–48% fewer steps with benchy than with a shell. Two
   tasks `describe` does not answer join the eleven, and the report shows the five it does answer
   apart. Transcripts also hide the checkout's path and the host name. The 2026-09-30 results are

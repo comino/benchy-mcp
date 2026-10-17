@@ -748,7 +748,7 @@ impl Width {
 /// 1.5.5, `SET memory_limit = '12.7 GiB'` reads back as `12.6 GiB` (the text parses to a hair
 /// under 12.7 GiB, which is shown cut, not rounded). Put back from its text, a limit shrank by
 /// 0.1 GiB with each staged table, on a machine whose default was `12.7 GiB` (a host's
-/// re-review, #60); here, under a 4000 MB cgroup, `3.1 GiB` read back `3.0 GiB`. So where the
+/// re-review); here, under a 4000 MB cgroup, `3.1 GiB` read back `3.0 GiB`. So where the
 /// text does not read back as itself, the middle of what it stands for is set (`12.75 GiB`),
 /// which does, and stays within half its last digit of the limit it was read from. `RESET
 /// memory_limit` is no way back: on 1.5.5 it reports DuckDB's default and leaves the buffer pool
@@ -1318,7 +1318,7 @@ fn columns_of(
     rows.collect()
 }
 
-/// Put every supported file in a directory on the bench. The zero-config path: this is what
+/// Put every supported file at the top of a directory, but no dotfile, on the bench. The zero-config path: this is what
 /// `benchy-mcp ./data` does.
 pub fn load_dir(bench: &mut Bench, dir: &Path) -> Result<Vec<LoadedTable>, LoadError> {
     let mut out = Vec::new();
@@ -1342,7 +1342,16 @@ pub fn plan_dir(dir: &Path) -> Result<Vec<(String, PathBuf)>, LoadError> {
     // Skipped, never silently: the operator learns each file that did not become a table and
     // why (`a_skipped_file_is_named_in_the_operator_log`). The agent hears nothing of it.
     entries.retain(|p| {
-        let why = if p.is_dir() {
+        // A dotfile is one the operator may not know is there: `.secret.csv` became a table, and
+        // the AppleDouble `._meters.csv` macOS writes beside `meters.csv` on a non-APFS volume
+        // stopped startup as a second `meters` (`a_hidden_file_in_a_directory_is_not_a_table`).
+        // Named with --source or in a config it loads: the operator chose it.
+        let hidden = p
+            .file_name()
+            .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."));
+        let why = if hidden {
+            "a hidden file; a folder's dotfiles are not read"
+        } else if p.is_dir() {
             "a directory; a folder is read at its top level only"
         } else if !p.is_file() {
             "not a regular file"

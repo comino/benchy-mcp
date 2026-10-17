@@ -64,9 +64,10 @@ landlock = "0.4"
 
 [profile.release]
 strip = true
-# Measured and not adopted (bench/ingest.py on a8ffc3e, docs/PERFORMANCE.md, 2026-10-11, aarch64
-# Neoverse-N1): more than 85% of a load's instructions are in DuckDB's prebuilt library, which no
-# Rust flag reaches, so the whole-session changes stayed inside the run-to-run spread.
+# Measured and not adopted (bench/ingest.py, before the public history began, DuckDB 1.5.5,
+# docs/PERFORMANCE.md, 2026-10-11, aarch64 Neoverse-N1): more than 85% of a load's instructions
+# are in DuckDB's prebuilt library, which no Rust flag reaches, so the whole-session changes
+# stayed inside the run-to-run spread.
 # - lto = "fat" with codegen-units = 1: the ClickHouse fetch (ruzstd then, Arrow decode) -2%
 #   instructions, process start -0.6%, the binary 14.2 -> 10.8 MB; whole sessions -2.5% to +5.4%, within spread.
 #   The build went from 4 to 26 minutes and peaked at 2.6 GB of memory.

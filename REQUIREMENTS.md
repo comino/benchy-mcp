@@ -248,8 +248,13 @@ sources (ClickHouse, REQ-16; HTTP, REQ-17) and exec connectors.
 - `table_names_are_plain_identifiers` — a file name becomes a table name the agent can type, by
   the rules the README states.
 - `a_skipped_file_is_named_in_the_operator_log` — a folder is read at its top level; each
-  subdirectory and file of another kind is named in the operator's log, with the reason, and
-  nothing of it reaches the agent.
+  subdirectory, hidden file and file of another kind is named in the operator's log, with the
+  reason, and nothing of it reaches the agent.
+- `a_hidden_file_in_a_directory_is_not_a_table` — a folder's dotfiles, any name starting with
+  `.`, are skipped: `.secret.csv` is no table, and macOS's AppleDouble `._meters.csv` beside
+  `meters.csv` does not stop startup as a second `meters`.
+- `a_hidden_file_named_explicitly_still_loads` — a dotfile named with `--source` or in a config
+  loads: the operator chose it.
 - `the_help_example_names_the_binary_by_absolute_path` — `--help`'s JSON example gives the
   command as an absolute path, since desktop apps do not read `PATH`.
 - `the_catalogue_is_bounded` — the catalogue is in the agent's context on every turn, so it is
@@ -430,7 +435,8 @@ and never a type that could change a value (REQ-15).
 ## REQ-7 — Ceilings
 
 Every query batch runs under a wall deadline, DuckDB's memory budget and a ceiling on the
-engine's resident memory (REQ-8), and what comes back is capped. Capacity is measured, not claimed: `examples/capacity.py` produces `docs/CAPACITY.md`.
+engine's resident memory (REQ-8), and what comes back is capped. Capacity is measured, not claimed: `examples/capacity.py` produces `docs/CAPACITY.md` up to its
+ClickHouse section, whose table `examples/capacity_clickhouse.py` prints.
 
 - `a_deadline_of_zero_is_refused_at_startup` — at zero every query would fail at once, and the
   caps a host reads from `hello` could not be handed back.

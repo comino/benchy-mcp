@@ -1,12 +1,19 @@
 # Capacity — measured, not claimed
 
 REQ-7: capacity is measured, not claimed. **No capacity claim belongs in any benchy
-document that is not output from this file.** Regenerate it on your own hardware — these
+document that is not measured here.** Regenerate it on your own hardware — these
 numbers describe the machine below and nothing else:
 
 ```sh
 python3 examples/capacity.py ./target/release/benchy-mcp --out docs/CAPACITY.md
 ```
+
+Not all of this file is that script's output. From here to "What this does not measure" it is,
+except the runs of other builds added by hand to **Measured**. "A ClickHouse table, six ways" is
+written by hand around the table `examples/capacity_clickhouse.py` prints. `--out` writes the
+first part only and replaces the whole file, so put the second back after it, or measure it again.
+The builds named below are from before the public history began, all on DuckDB 1.5.5; their short
+hashes do not resolve in this repository.
 
 - **Machine** — Linux aarch64, 4 cores, 7.5 GB RAM
 - **Measured** — 2026-10-14, on `b660bcd` (round 6's baseline, docs/PERFORMANCE.md), the

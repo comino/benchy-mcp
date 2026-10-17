@@ -608,7 +608,7 @@ fn a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads() {
 
 #[test]
 fn a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads() {
-    // From a host's report (#70): the rule above held for SELECT, but `MERGE … USING (WITH meters
+    // From a host's report: the rule above held for SELECT, but `MERGE … USING (WITH meters
     // AS …)` made a helper macro count the CTE's rows and wrote that count into the agent's table,
     // `ok: true`. Measured on DuckDB 1.5.5, the macro binds to the caller's CTE wherever a
     // WITH-led query can stand: MERGE's USING, ON, conditions and actions; UPDATE's SET, FROM and
@@ -719,7 +719,7 @@ fn a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads() {
     for sql in [
         "UPDATE m SET v = (WITH d AS (SELECT * FROM meters) SELECT count(*) FROM d)",
         "UPDATE m SET note = 'done with meters'",
-        // On `main` at ff352ed this killed the engine: the fallback sliced the text inside `é`,
+        // Before the public history began, this killed the engine: the fallback sliced the text inside `é`,
         // and the agent's tables were lost with it.
         "UPDATE m SET note = 'é, done with meters'",
         "DELETE FROM m WHERE k = (WITH d AS (SELECT 5 AS k) SELECT k FROM d)",

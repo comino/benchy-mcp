@@ -3,8 +3,8 @@
 --
 --   benchy-mcp --config examples/benchy.toml
 --
--- Each helper is one CREATE VIEW or CREATE MACRO, and the `--` lines directly above it are what
--- `describe` says of it. Tables are named unqualified: they resolve when the helper is called.
+-- Each helper is one CREATE VIEW or CREATE MACRO, and the `--` lines directly above it, joined
+-- into one line of at most 200 bytes, are what `describe` says of it. Tables are named unqualified: they resolve when the helper is called.
 --
 -- A table macro reads its arguments once, in a FROM-less CTE, and uses them from there. DuckDB
 -- substitutes an argument's expression into the macro's body, so a body that names its arguments

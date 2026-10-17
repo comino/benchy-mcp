@@ -489,7 +489,7 @@ would reopen them.
    the source rather than reinterpreting earlier pages; `check` prints the schema to pin.
 7. **A bulk body that breaks mid-stream.** **Decided: fail (no retry) for now**; resuming with
    `Range` against an `ETag` is a later change, measured against a real flaky server.
-8. **An API that refuses a pushdown parameter** (a 400 naming it). #15 met the same shape with
+8. **An API that refuses a pushdown parameter** (a 400 naming it). The ClickHouse source met the same shape with
    ClickHouse's read-only users: the settings were a preference, not a need, so a refused request
    is retried without them. Here too correctness never rests on pushdown — the narrowing is
    re-applied after ingest. **Decided: no automatic retry**: a 400 cannot say which

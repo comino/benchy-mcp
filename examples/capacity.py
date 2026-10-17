@@ -4,7 +4,9 @@
     python3 examples/capacity.py ./target/release/benchy-mcp [--out docs/CAPACITY.md]
 
 Measured on the machine you run it on. No capacity claim belongs in any benchy document that is
-not output from this.
+not measured by this or by capacity_clickhouse.py. `--out` writes docs/CAPACITY.md from the top to
+"What this does not measure" and replaces the whole file: the ClickHouse section after it, and any
+runs added by hand, are not this script's and have to be put back.
 """
 import csv, json, os, shutil, subprocess, sys, tempfile, threading, time
 
@@ -152,7 +154,7 @@ def write_artifact(path, binary, rows_out):
         "# Capacity — measured, not claimed",
         "",
         "REQ-7: capacity is measured, not claimed. **No capacity claim belongs in any benchy",
-        "document that is not output from this file.** Regenerate it on your own hardware — these",
+        "document that is not measured here.** Regenerate it on your own hardware — these",
         "numbers describe the machine below and nothing else:",
         "",
         "```sh",
