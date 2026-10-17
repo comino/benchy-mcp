@@ -229,6 +229,39 @@ fn the_empty_result_note_stays_inside_the_deadline() {
             seen: None,
         })
         .unwrap();
+    // An interrupted query stops when DuckDB next looks, which is a machine's own time: on a
+    // shared macOS runner it was 164 ms past a 300 ms deadline, where this box takes a few. So
+    // the bound below is the deadline plus what stopping the note's own query takes here,
+    // measured on the same table, not a fixed allowance.
+    let stop = {
+        let con = bench.connection();
+        let handle = con.interrupt_handle();
+        let at = std::time::Duration::from_millis(100);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let t = std::time::Instant::now();
+        // Fired again until the query is over: a pending interrupt is cleared when a statement
+        // starts, so one fired early would be lost.
+        let fire = std::thread::spawn(move || {
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                if t.elapsed() >= at {
+                    handle.interrupt();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let ran = con
+            .prepare("SELECT DISTINCT late FROM w WHERE late IS NOT NULL ORDER BY 1 LIMIT 21")
+            .and_then(|mut st| {
+                st.query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()
+            });
+        let took = t.elapsed();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        fire.join().unwrap();
+        assert!(ran.is_err(), "the calibration query was interrupted");
+        took.saturating_sub(at)
+    };
     let mut ws = bench.seal("1GB").unwrap();
     let mut timed = |sql: &str, deadline: std::time::Duration| {
         let caps = Caps {
@@ -240,8 +273,9 @@ fn the_empty_result_note_stays_inside_the_deadline() {
         let took = t.elapsed();
         assert!(out[0].rows.is_empty(), "{sql}");
         assert!(
-            took < deadline + std::time::Duration::from_millis(150),
-            "{sql}: the batch and its note took {took:?} against a deadline of {deadline:?}"
+            took < deadline + 2 * stop + std::time::Duration::from_millis(50),
+            "{sql}: the batch and its note took {took:?} against a deadline of {deadline:?}, \
+             where an interrupted query takes {stop:?} to stop"
         );
         out[0].note.clone().unwrap_or_default()
     };
@@ -257,10 +291,11 @@ fn the_empty_result_note_stays_inside_the_deadline() {
     // and the column that can explain the empty result still does, after six that cannot
     assert!(note.contains("w.kind holds: k0, k1, k2"), "{note}");
     // `late` read whole takes about a second. A deadline shorter than the note's own budget
-    // is what bounds it.
+    // is what bounds it. 200 ms keeps the note's own 500 ms budget, were it the bound, well past
+    // the allowance.
     let note = timed(
         "SELECT late FROM w WHERE id = -1 AND late = 'b'",
-        std::time::Duration::from_millis(300),
+        std::time::Duration::from_millis(200),
     );
     assert_eq!(note, "", "the note ran out of time");
 }
