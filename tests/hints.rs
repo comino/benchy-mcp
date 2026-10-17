@@ -230,31 +230,13 @@ fn the_empty_result_note_stays_inside_the_deadline() {
         })
         .unwrap();
     let mut ws = bench.seal("1GB").unwrap();
-    // An interrupted query stops when DuckDB next looks, which is a machine's own time: on a
-    // shared macOS runner it was 164 ms past a 300 ms deadline, where this box takes a few. So
-    // the bound below is the deadline plus what the sealed engine takes to stop the note's own
-    // query on this table, measured here, not a fixed allowance. Both matter: on the bench's
-    // connection before the seal, with every thread, the scan finished inside 100 ms on that
-    // runner, and a `count(DISTINCT …)` stopped in 16 ms where the note's `DISTINCT … ORDER BY`
-    // ran 106 ms past its deadline.
-    let stop = {
-        let deadline = std::time::Duration::from_millis(50);
-        let caps = Caps {
-            deadline,
-            ..Caps::default()
-        };
-        let t = std::time::Instant::now();
-        let ran = ws.work(
-            "SELECT DISTINCT late FROM w WHERE late IS NOT NULL ORDER BY 1 LIMIT 21",
-            &caps,
-        );
-        let took = t.elapsed();
-        assert!(
-            ran.is_err(),
-            "the calibration query ran past its deadline: {took:?}"
-        );
-        took.saturating_sub(deadline)
-    };
+    // What the note may take past the deadline is what DuckDB needs to stop its interrupted
+    // query and the batch to finish, which is the machine's: about 1 ms on the development box,
+    // and on GitHub's shared runners 65–157 ms in four runs (macOS and Linux), more than either
+    // engine's measured stop latency explained. 250 ms covers that and still fails a note held
+    // to its own 500 ms budget instead of the deadline (about 500 ms against 450 here). The
+    // server's hard deadline is 10 s past the batch's, so this is the margin that matters.
+    const ALLOWANCE: std::time::Duration = std::time::Duration::from_millis(250);
     let mut timed = |sql: &str, deadline: std::time::Duration| {
         let caps = Caps {
             deadline,
@@ -265,9 +247,8 @@ fn the_empty_result_note_stays_inside_the_deadline() {
         let took = t.elapsed();
         assert!(out[0].rows.is_empty(), "{sql}");
         assert!(
-            took < deadline + 2 * stop + std::time::Duration::from_millis(50),
-            "{sql}: the batch and its note took {took:?} against a deadline of {deadline:?}, \
-             where an interrupted query takes {stop:?} to stop"
+            took < deadline + ALLOWANCE,
+            "{sql}: the batch and its note took {took:?} against a deadline of {deadline:?}"
         );
         out[0].note.clone().unwrap_or_default()
     };
