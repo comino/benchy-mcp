@@ -278,3 +278,140 @@ fn every_tool_response_obeys_the_byte_cap() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_query_without_a_limit_reads_no_further_than_it_keeps() {
+    // REQ-10. A query's result was built whole before its first 2,000 rows were kept, so a
+    // `SELECT` with no `LIMIT` cost the whole result in time and memory: on 1,000,000 rows 80 ms
+    // against 1 ms with a `LIMIT`, and on 10,000,000 an engine past its memory ceiling, killed
+    // and rebuilt with the agent's tables. A trillion rows can never be built inside the
+    // deadline, so before the result was streamed this was the deadline, or on Linux the memory
+    // ceiling first; read only as far as it is kept, it answers at once, and the agent's table
+    // made before it is still there.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &["--deadline", "5", "--memory", "128MB"]);
+    let (err, body, _) = s.query("CREATE TEMP TABLE kept AS SELECT 7 AS v");
+    assert!(!err, "{body}");
+    let (err, body, took) =
+        s.query("SELECT i, repeat('x', 100) || i AS s FROM range(1000000000000) t(i)");
+    assert!(!err, "the rows kept are the answer: {took:?} {body}");
+    assert!(
+        body.contains("of 2000+"),
+        "and it says more rows exist than are kept: {body}"
+    );
+    let (err, body, _) = s.query("SELECT v FROM kept");
+    assert!(
+        !err && body.contains('7'),
+        "the engine was not rebuilt: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_query_without_a_limit_holds_no_more_than_it_keeps() {
+    // REQ-10. The shape a host reported, through the shipped binary at `--memory 384MB`: every
+    // row of ten million, four columns, no `LIMIT`. Built whole, the result took the engine's
+    // peak resident memory up by 488 MB, most of the way to its ceiling (622 MiB at that budget);
+    // a wider row went past it, and the engine was killed and rebuilt. Read only as far as it is
+    // kept, the peak grows by what DuckDB's streaming buffer and a chunk or two hold.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &["--memory", "384MB"]);
+    assert!(s.alive());
+    let engine = common::engine_of(s.pid());
+    let peak = |pid: u32| -> u64 {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let kb: u64 = status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmHWM:"))
+            .and_then(|v| v.split_whitespace().next()?.parse().ok())
+            .unwrap();
+        kb * 1024
+    };
+    let before = peak(engine);
+    let (err, body, _) = s.query(
+        "SELECT TIMESTAMPTZ '2026-01-01 00:00:00+00' + to_minutes(i) AS ts, \
+         'm' || lpad((i % 500)::VARCHAR, 3, '0') AS meter, (i % 997) * 1.5 AS kw, i AS id \
+         FROM range(10000000) t(i)",
+    );
+    assert!(!err, "{body}");
+    assert!(body.contains("of 2000+"), "{body}");
+    assert_eq!(common::engine_of(s.pid()), engine, "the engine was rebuilt");
+    let grew = peak(engine).saturating_sub(before);
+    assert!(
+        grew < LIMITLESS_PEAK,
+        "the engine's peak resident memory grew by {grew} bytes for 2,000 rows kept"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the ten-million-row query may add to the engine's peak resident memory. Measured on the
+/// development box (4 cores, DuckDB 1.5.5): built whole, 488 MB; streamed, 2.3 MB in three runs
+/// (and 6–15 MiB over one to a hundred calls of a `SELECT *` over a loaded table of as many rows).
+/// 128 MiB leaves a machine with more threads, and so more chunks in flight, room many times over,
+/// and still fails a result built whole by a factor of almost four.
+#[cfg(target_os = "linux")]
+const LIMITLESS_PEAK: u64 = 128 << 20;
+
+#[test]
+fn an_error_past_the_rows_kept_is_not_raised() {
+    // REQ-10, and the price of reading no further than is kept: DuckDB computes the rows it is
+    // asked for, and an error it would raise only in a row far past the ones kept is never
+    // raised. The answer is the rows kept, and says more rows exist. Built whole, as before,
+    // this query failed with `late-10000000`.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &[]);
+    let (err, body, _) = s.query(
+        "SELECT CASE WHEN i < 10000000 THEN i ELSE error('late-' || i) END AS v \
+         FROM range(20000000) t(i)",
+    );
+    assert!(!err, "{body}");
+    assert!(body.contains("of 2000+"), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One row in four of `range`, each 1,600 bytes as DuckDB holds it (`BIGINT[200]`), so that a
+/// stream's first rows fill DuckDB's buffer and the rest of the 2,000 kept need a fetch.
+///
+/// Execution runs until about 1 MB of the result is buffered (`streaming_buffer_size`), counted
+/// by the width of the values' types, not the length of their text: probed on DuckDB 1.5.5, a
+/// `BIGINT` result of one row in 2,048, and 10 KB strings for 1,000 rows, never filled it, and an
+/// error or an interrupt in rows that close came from the execution, before any fetch. Here 1,024
+/// rows fill it, and the fetches after them are what runs on. Each cell renders cut to 256
+/// bytes, so the 2,000 kept stay inside the 1 MiB retained.
+const WIDE: &str = "list_resize([i], 200, i)::BIGINT[200] AS a";
+
+#[test]
+fn an_error_in_the_rows_kept_still_fails_the_query() {
+    // REQ-10. Read as a stream, an error past the rows DuckDB buffered comes from the fetch of
+    // a chunk rather than from the execution, and DuckDB's fetch answers it with no chunk, as it
+    // answers the end of the rows. Taken for the end, this was 1,024 rows called complete.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &[]);
+    let (err, body, _) = s.query(&format!(
+        "SELECT CASE WHEN i < 7200 THEN i ELSE error('early-' || i) END AS v, {WIDE} \
+         FROM range(100000000) t(i) WHERE i % 4 = 0"
+    ));
+    assert!(err, "{}", &body[body.len().saturating_sub(300)..]);
+    assert!(body.contains("early-7200"), "{body}");
+    assert!(s.alive());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_deadline_while_rows_are_read_is_the_deadline() {
+    // REQ-7 and REQ-10. A query whose first rows come at once and the rest slowly is still
+    // running as they are read, and the watchdog's interrupt lands in a fetch, which answers it
+    // with no chunk, as it answers the end of the rows. Taken for the end, this was the first
+    // 1,024 rows called complete.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &["--deadline", "2"]);
+    let (err, body, _) = s.query(&format!(
+        "SELECT {WIDE} FROM range(1000000000000) t(i) \
+         WHERE (i < 7200 AND i % 4 = 0) OR i = 999999999999"
+    ));
+    assert!(err, "{}", &body[body.len().saturating_sub(300)..]);
+    assert!(body.contains("deadline"), "{body}");
+    assert!(s.alive());
+    let _ = std::fs::remove_dir_all(&dir);
+}

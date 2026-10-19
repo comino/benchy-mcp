@@ -748,6 +748,35 @@ fetched again by id.
 - `a_truncated_result_can_be_paged` — a capped result is read further with `get_result` and an
   offset, without re-running the query; the last page says it is the end. The first 2,000 rows
   (at most 1 MiB) of each of the last 32 results are kept.
+- `a_query_without_a_limit_reads_no_further_than_it_keeps` — a `SELECT` is streamed and read
+  only as far as its rows are kept, then stopped. Built whole first, a `SELECT` with no `LIMIT`
+  cost the whole result: over 10,000,000 rows 0.63 G instructions and 150 ms a call, and over
+  more rows than the deadline can build, the deadline or a rebuilt engine. Now a trillion-row
+  `range` answers its 2,000 rows and `of 2000+`, and the agent's tables stay. Every other kind
+  of statement, DML and `CREATE … AS` among them, runs to completion as before.
+- `a_query_without_a_limit_holds_no_more_than_it_keeps` — at `--memory 384MB`, every row of
+  ten million took the engine's peak resident memory up by 488 MB, most of the way to its
+  622 MiB ceiling, and a wider row past it; streamed, by 2.3 MB. Linux only, where the engine's
+  memory can be read.
+- `an_error_past_the_rows_kept_is_not_raised` — the price, accepted: an error DuckDB would raise
+  only in rows past the ones read is never raised, and the answer is the rows kept, a prefix of
+  what the query makes, saying more exist. Reading on to find one was measured and not taken: it
+  cost more than building the result whole (0.88 G and 178 ms a call over 10,000,000 rows), for
+  rows the agent never sees, and a query over more rows than the deadline can read would have
+  become a deadline error instead of an answer. What counts as read is DuckDB's: before the
+  stream is handed over it runs until about 1 MB of the result is buffered, counted by the width
+  of the values' types, and an error there is raised.
+- `an_error_in_the_rows_kept_still_fails_the_query` — an error in the rows that are read fails
+  the statement, also where it comes in a fetch after that buffer. A stream's fetch answers an
+  error with no chunk, as it answers the end of the rows; taken for the end, this was 1,024 rows
+  called complete.
+- `a_deadline_while_rows_are_read_is_the_deadline` — the same for the watchdog's interrupt: a
+  query whose first rows come at once and the rest slowly is stopped by the deadline in a fetch,
+  and says so, instead of answering its first rows as all of them.
+- `every_common_type_is_streamed` — a `SELECT` is streamed only where its result reads as Arrow,
+  decided from its column types before it runs, since DuckDB 1.5.5's legacy reader builds a
+  stream outside any `try` and an error in it aborts the engine. Every common type, and BIT,
+  BIGNUM and TIME WITH TIME ZONE, does.
 - `a_page_past_the_end_says_so` — an offset at or past the last row kept is an empty page whose
   footer says there are no rows at that offset and where the rows end, not a range that runs
   backwards (`rows 10001–10000 of 500`). It is not an error: the result is there, and a host's
