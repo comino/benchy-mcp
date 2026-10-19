@@ -84,6 +84,15 @@ though under the lock DuckDB already refuses to prepare the corpus's file forms 
 `EXPORT`, before the allowlist sees them. The allowlist alone is not sufficient: file-reading
 table functions are typed `SELECT`, and only the engine lock stops them.
 
+A statement's type does not say what its table functions do, either: `enable_logging()`,
+`enable_profiling()` and `checkpoint()` are called in a `SELECT`, reach nothing outside, and
+so pass both the statement allowlist and the lock. The second half of the allowlist is one of
+DuckDB's table functions (`guard::TABLE_FUNCTIONS`): each is the agent's, left to the lock
+(the file and network readers), or refused by name, checked on the batch's text before any of
+it is prepared. A table function DuckDB adds is refused until it is classified. `query()` and
+`json_execute_serialized_sql` are refused with them, since SQL run from a string cannot be read
+before it runs.
+
 - `nothing_in_the_corpus_reaches_outside_the_workspace` — every case in `corpus/escape.toml` runs,
   and none returns a canary planted outside the workspace.
 - `a_denied_statement_says_what_is_allowed` — a refusal names what is allowed.
@@ -118,6 +127,38 @@ table functions are typed `SELECT`, and only the engine lock stops them.
   `COPY FROM DATABASE` TRANSACTION, and `COPY`, `EXPORT` and `EXECUTE` never bind.
 - `merge_is_ordinary_dml` — `MERGE` works on the agent's own tables like `INSERT` and `UPDATE`,
   and its source reads files no more than theirs can.
+- `a_table_function_that_changes_the_engine_is_refused` — measured on DuckDB 1.5.5 through
+  `query`: `enable_logging(storage='file', …)` left every later statement of the session failing
+  with "Permission Error: Cannot access directory", `disable_logging()` included;
+  `enable_profiling()` wrote every later plan tree to the operator's log; `enable_logging()` in
+  memory let the agent read the engine's log through `duckdb_logs`; `checkpoint()`,
+  `force_checkpoint()` and `truncate_duckdb_logs()` ran. Each is refused, says why, and the
+  session goes on.
+- `a_refused_call_runs_nothing_of_its_batch` — the whole batch is read before any of it is
+  prepared: nothing before a refused call runs, and a refused call inside a `CREATE TABLE … AS`,
+  an `INSERT`, an `UPDATE`, a view, a macro or `query('…')` is refused where it is written.
+- `a_refused_function_is_refused_however_it_is_written` — in any case, quoted, qualified, with a
+  comment or any white space before its `(`, inside a string; the check errs towards refusing.
+- `what_ends_a_name_that_is_not_called` — a column, alias or table named like a refused
+  function, a longer name that contains one, and the agent's table functions are not refused.
+- `every_table_function_duckdb_has_is_classified` — the shipped DuckDB's 89 table functions and
+  4 table macros are each classified, each once, and nothing classified is gone; the system
+  views refused are exactly those whose body calls a refused function (`duckdb_logs`); and no
+  refused name is a scalar's, an aggregate's or a macro's too.
+- `an_engine_it_was_not_measured_on_reads_its_own_catalog` — on a DuckDB other than the one
+  measured, the refusals come from that engine's catalog: a table function benchy has not
+  classified is refused, and a catalog that cannot be read refuses every batch.
+- `the_table_functions_left_to_the_lock_are_refused_by_it` — each of the 22 file and network
+  readers the allowlist leaves to the lock is refused by the locked engine.
+- `the_pragmas_typed_select_are_the_measured_ones` — DuckDB rewrites 15 PRAGMAs to a SELECT
+  over a table function the text does not name; they are pinned, and the two that do not only
+  read the catalog are stopped: `extension_versions` by the lock, `json_execute_serialized_sql`
+  by its call.
+- `the_agents_table_functions_still_run` — `range`, `generate_series`, `unnest`, `json_each`,
+  `summary`, `query_table`, `histogram`, the catalog's functions and views, the PRAGMAs that read
+  it, `SUMMARIZE`, `DESCRIBE`, and views and macros of the agent's over them all run.
+- `the_table_function_allowlist_does_what_the_corpus_says` — each corpus case is refused by the
+  table-function allowlist alone exactly when the corpus records `functions = "refuse"`.
 - `explain_cannot_smuggle_a_refused_statement` — `EXPLAIN ANALYZE` runs what it explains and is
   typed as EXPLAIN, so EXPLAIN is not allowed: `EXPLAIN ANALYZE SET VARIABLE` ran before.
 - `the_workspace_file_cannot_be_read_as_a_file` — turning external access off puts an attached
@@ -1630,8 +1671,9 @@ until a table of that name is attached again.
   reads a table on the bench, a batch that may call `query` or `json_execute_serialized_sql`
   (which reached a helper by its catalog's name, measured) is refused before anything runs, by
   any spelling: quoted, qualified, with a comment before its `(`. `query_table`, which reads only
-  a table named in its string, and a column named `query` stay allowed, and so does `query()`
-  without helper macros.
+  a table named in its string, and a column named `query` stay allowed. Without helper macros
+  `query()` is refused too, by REQ-2's table-function allowlist, since the table functions in its
+  string cannot be read either (`a_refused_call_runs_nothing_of_its_batch`).
 - `a_helper_that_names_a_table_in_a_string_is_refused_at_startup` — a table named in a string,
   `query_table('meters')`, `query('SELECT … FROM meters')`, `pragma_table_info('meters')`,
   `duckdb_table_sample('meters')`, is in no parse as a table, so it could not be taken from the

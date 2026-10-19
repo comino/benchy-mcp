@@ -17,6 +17,12 @@
 //! engine cannot prepare them (`locked = "unprepared"` in `corpus/escape.toml`), so they are
 //! refused when their turn comes, not up front, and the statements before them in the batch keep
 //! their effects.
+//!
+//! A statement's type does not say what its table functions do. `enable_logging()`,
+//! `enable_profiling()`, `checkpoint()` and the like are called in a `SELECT`, and none of them
+//! reaches outside, so neither the type nor the lock stops them. [`Calls`] is the second half of
+//! this layer: an allowlist of the table functions DuckDB has, checked against the batch's text
+//! before anything in it is prepared.
 
 // A bindgen enum constant is prefixed with its type name. An unprefixed name is not a constant
 // at all: it is a binding pattern that matches everything, silently allowing the whole allowlist
@@ -204,5 +210,499 @@ impl Classifier {
             }
             Verdict::Allow(kinds)
         }
+    }
+}
+
+/// What one of DuckDB's table functions is to the agent ([`TABLE_FUNCTIONS`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Use {
+    /// The agent's: it reads its arguments, the agent's tables, the catalog or the session's
+    /// settings, and changes nothing.
+    Agent,
+    /// Reads a file or the network, which the locked engine refuses, every one of them
+    /// (`the_table_functions_left_to_the_lock_are_refused_by_it`). Not refused by name: the lock
+    /// is the boundary for files, the escape corpus goes on proving it through the whole stack,
+    /// and the hint for a file reader goes on naming the tables already on the bench.
+    Lock,
+    /// Refused by name, because it does what this says.
+    Refused(&'static str),
+}
+
+const STATE: &str = "changes the engine's settings or storage for the rest of the session";
+const STRING: &str = "runs SQL from a string, which benchy cannot read before it runs: not for \
+     the table functions it calls, nor, beside the operator's helper macros, for the CTEs it \
+     names. Write the query out instead; `query_table('name')` still reads a table named in a \
+     string";
+const INSIDE: &str = "shows the engine's own workings (its log, memory, files, extensions or \
+     connections), not your data";
+const SECRETS: &str = "lists secrets, and this engine holds none";
+const INTERNAL: &str = "is DuckDB's internal or test machinery";
+const UNKNOWN: &str = "is a table function benchy has not classified for this version of DuckDB";
+
+/// The DuckDB [`TABLE_FUNCTIONS`] was measured on. On any other, what is refused is read from
+/// that engine's own catalog instead ([`Calls::for_version`]).
+pub const MEASURED_ON: &str = "v1.5.5";
+
+/// Every table function and table macro in DuckDB 1.5.5's `system` catalog, 89 and 4, and what
+/// each is to the agent. `every_table_function_duckdb_has_is_classified` holds this to the
+/// shipped engine's `duckdb_functions()`, so a DuckDB that brings a new one fails a test until it
+/// is classified here, and one that runs elsewhere refuses it ([`Calls::for_version`]).
+///
+/// Refused because the statement allowlist and the lock both let them run, measured on 1.5.5
+/// through `query`: `enable_logging(storage='file', …)` left every later statement of the
+/// session failing with "Permission Error: Cannot access directory", `disable_logging()`
+/// included; `enable_profiling()` wrote every later plan tree to the operator's log;
+/// `enable_logging()` in memory let the agent read the engine's log; `checkpoint()`,
+/// `force_checkpoint()` and `truncate_duckdb_logs()` ran
+/// (`a_table_function_that_changes_the_engine_is_refused`). `query` and
+/// `json_execute_serialized_sql` run a string as SQL, which may be built as it runs, so a look at
+/// the text cannot read what it calls; with them, every function refused here would be one
+/// `||` away. Each side effect above happened when the statement ran, not when it was prepared
+/// (measured: `enable_logging` and `enable_profiling` prepared left the settings untouched), but
+/// the check is made before the batch is prepared all the same, so nothing refused is even bound.
+pub const TABLE_FUNCTIONS: &[(&str, Use)] = &[
+    ("arrow_scan", Use::Refused(INTERNAL)),
+    ("arrow_scan_dumb", Use::Refused(INTERNAL)),
+    ("check_peg_parser", Use::Refused(INTERNAL)),
+    ("checkpoint", Use::Refused(STATE)),
+    ("disable_logging", Use::Refused(STATE)),
+    ("disable_peg_parser", Use::Refused(STATE)),
+    ("disable_profiling", Use::Refused(STATE)),
+    ("duckdb_approx_database_count", Use::Refused(INSIDE)),
+    ("duckdb_columns", Use::Agent),
+    ("duckdb_connection_count", Use::Refused(INSIDE)),
+    ("duckdb_constraints", Use::Agent),
+    ("duckdb_coordinate_systems", Use::Agent),
+    ("duckdb_databases", Use::Agent),
+    ("duckdb_dependencies", Use::Agent),
+    ("duckdb_extensions", Use::Refused(INSIDE)),
+    ("duckdb_external_file_cache", Use::Refused(INSIDE)),
+    ("duckdb_functions", Use::Agent),
+    ("duckdb_indexes", Use::Agent),
+    ("duckdb_keywords", Use::Agent),
+    ("duckdb_log_contexts", Use::Refused(INSIDE)),
+    ("duckdb_logs", Use::Refused(INSIDE)),
+    ("duckdb_logs_parsed", Use::Refused(INSIDE)),
+    ("duckdb_memory", Use::Refused(INSIDE)),
+    ("duckdb_optimizers", Use::Agent),
+    ("duckdb_prepared_statements", Use::Agent),
+    ("duckdb_profiling_settings", Use::Agent),
+    ("duckdb_schemas", Use::Agent),
+    ("duckdb_secret_types", Use::Refused(SECRETS)),
+    ("duckdb_secrets", Use::Refused(SECRETS)),
+    ("duckdb_sequences", Use::Agent),
+    ("duckdb_settings", Use::Agent),
+    ("duckdb_table_sample", Use::Refused(INSIDE)),
+    ("duckdb_tables", Use::Agent),
+    ("duckdb_temporary_files", Use::Refused(INSIDE)),
+    ("duckdb_types", Use::Agent),
+    ("duckdb_variables", Use::Agent),
+    ("duckdb_views", Use::Agent),
+    ("enable_logging", Use::Refused(STATE)),
+    ("enable_peg_parser", Use::Refused(STATE)),
+    ("enable_profiling", Use::Refused(STATE)),
+    ("force_checkpoint", Use::Refused(STATE)),
+    ("generate_series", Use::Agent),
+    ("glob", Use::Lock),
+    ("histogram", Use::Agent),
+    ("histogram_values", Use::Agent),
+    ("icu_calendar_names", Use::Agent),
+    ("json_each", Use::Agent),
+    ("json_execute_serialized_sql", Use::Refused(STRING)),
+    ("json_tree", Use::Agent),
+    ("parquet_bloom_probe", Use::Lock),
+    ("parquet_file_metadata", Use::Lock),
+    ("parquet_full_metadata", Use::Lock),
+    ("parquet_kv_metadata", Use::Lock),
+    ("parquet_metadata", Use::Lock),
+    ("parquet_scan", Use::Lock),
+    ("parquet_schema", Use::Lock),
+    ("pg_timezone_names", Use::Agent),
+    // The tables behind the PRAGMAs DuckDB 1.5.5 types SELECT (`PRAGMA table_info('t')` is
+    // `SELECT * FROM pragma_table_info('t')`), which the agent may run anyway
+    // (`the_pragmas_typed_select_are_the_measured_ones`).
+    ("pragma_collations", Use::Agent),
+    ("pragma_database_size", Use::Agent),
+    ("pragma_metadata_info", Use::Agent),
+    ("pragma_platform", Use::Agent),
+    ("pragma_show", Use::Agent),
+    ("pragma_storage_info", Use::Agent),
+    ("pragma_table_info", Use::Agent),
+    ("pragma_user_agent", Use::Agent),
+    ("pragma_version", Use::Agent),
+    ("query", Use::Refused(STRING)),
+    // Names a table or view, never a query or a function (measured: `query_table('checkpoint()')`
+    // is "Table with name checkpoint() does not exist!"). A name built as it runs can reach the
+    // `duckdb_logs` view past [`REFUSED_VIEWS`], and finds the log empty: nothing that turns
+    // logging on runs here.
+    ("query_table", Use::Agent),
+    ("range", Use::Agent),
+    ("read_blob", Use::Lock),
+    ("read_csv", Use::Lock),
+    ("read_csv_auto", Use::Lock),
+    ("read_duckdb", Use::Lock),
+    ("read_json", Use::Lock),
+    ("read_json_auto", Use::Lock),
+    ("read_json_objects", Use::Lock),
+    ("read_json_objects_auto", Use::Lock),
+    ("read_ndjson", Use::Lock),
+    ("read_ndjson_auto", Use::Lock),
+    ("read_ndjson_objects", Use::Lock),
+    ("read_parquet", Use::Lock),
+    ("read_text", Use::Lock),
+    ("repeat", Use::Agent),
+    ("repeat_row", Use::Agent),
+    ("seq_scan", Use::Refused(INTERNAL)),
+    ("sniff_csv", Use::Lock),
+    ("sql_auto_complete", Use::Refused(INTERNAL)),
+    ("summary", Use::Agent),
+    ("test_all_types", Use::Refused(INTERNAL)),
+    ("test_vector_types", Use::Refused(INTERNAL)),
+    ("truncate_duckdb_logs", Use::Refused(STATE)),
+    ("unnest", Use::Agent),
+    ("which_secret", Use::Refused(SECRETS)),
+];
+
+/// The views of DuckDB 1.5.5's `system` catalog whose body calls a refused table function,
+/// refused wherever they are named: `FROM duckdb_logs` reads `duckdb_logs()` with no call in the
+/// text. `every_table_function_duckdb_has_is_classified` holds this to the shipped catalog.
+pub const REFUSED_VIEWS: &[(&str, &str)] = &[("duckdb_logs", INSIDE)];
+
+/// The system catalog's table functions and table macros, for an engine this was not measured on.
+const CATALOG_FUNCTIONS: &CStr = c"SELECT DISTINCT function_name, '' \
+      FROM system.main.duckdb_functions() \
+      WHERE database_name = 'system' AND function_type IN ('table', 'table_macro')";
+/// The system catalog's views, and the SQL of each.
+const CATALOG_VIEWS: &CStr = c"SELECT view_name, coalesce(sql, '') \
+      FROM system.main.duckdb_views() WHERE database_name = 'system'";
+
+/// REQ-2: which of DuckDB's table functions the agent may not call, and which system views it
+/// may not name, checked on the text of a batch before any of it is prepared.
+///
+/// On the text, not on DuckDB's parse: `json_serialize_sql` serializes SELECTs alone, so a
+/// `CREATE TABLE … AS`, an `INSERT … SELECT`, an `UPDATE … FROM` or a `MERGE … USING` would go
+/// unread; and a function inside an agent's view or macro is named in the text that makes it.
+/// A call needs its name in the text, since DuckDB has no other spelling of an identifier
+/// (`U&"…"` is not implemented on 1.5.5) and folds ASCII case only; the only ways to call one
+/// without writing it are SQL run from a string, which is refused here itself, and DuckDB's own
+/// rewrites — the PRAGMAs it types SELECT (`the_pragmas_typed_select_are_the_measured_ones`),
+/// `SUMMARIZE`, `DESCRIBE`, `SHOW` and a system macro's or view's body. Measured, none of those
+/// calls one refused here but `PRAGMA extension_versions`, which reads `duckdb_extensions()` and
+/// is refused by the lock, and a system view whose body calls one is refused by its name
+/// ([`REFUSED_VIEWS`]). So the check errs one way only: a refused name in a string literal or a
+/// comment is refused too, and a name joined to another by `$` or a non-ASCII letter, which
+/// DuckDB reads as one identifier, is read here as a word of its own.
+pub struct Calls {
+    /// Folded name to why.
+    functions: std::collections::HashMap<String, &'static str>,
+    views: std::collections::HashMap<String, &'static str>,
+    /// Why this engine's table functions are not known, when they are not: then every batch is
+    /// refused.
+    unread: Option<String>,
+}
+
+impl Calls {
+    /// The refusals [`TABLE_FUNCTIONS`] and [`REFUSED_VIEWS`] record.
+    pub fn measured() -> Calls {
+        Calls {
+            functions: TABLE_FUNCTIONS
+                .iter()
+                .filter_map(|(name, what)| match what {
+                    Use::Refused(why) => Some((name.to_string(), *why)),
+                    _ => None,
+                })
+                .collect(),
+            views: REFUSED_VIEWS
+                .iter()
+                .map(|(name, why)| (name.to_string(), *why))
+                .collect(),
+            unread: None,
+        }
+    }
+
+    /// The refusals for an engine whose catalog holds the table functions and table macros
+    /// `functions` and the views `views` (name, SQL): every function not classified as the
+    /// agent's or the lock's is refused, and every view whose body calls a refused one.
+    pub fn from_catalog(functions: &[String], views: &[(String, String)]) -> Calls {
+        let functions = functions
+            .iter()
+            .map(|f| f.to_ascii_lowercase())
+            .filter_map(
+                |f| match TABLE_FUNCTIONS.iter().find(|(name, _)| *name == f) {
+                    Some((_, Use::Agent | Use::Lock)) => None,
+                    Some((_, Use::Refused(why))) => Some((f, *why)),
+                    None => Some((f, UNKNOWN)),
+                },
+            )
+            .collect();
+        let mut calls = Calls {
+            functions,
+            views: Default::default(),
+            unread: None,
+        };
+        let refused: Vec<(String, &'static str)> = views
+            .iter()
+            .filter_map(|(name, sql)| {
+                calls
+                    .first(&sql.to_ascii_lowercase())
+                    .map(|(_, why)| (name.to_ascii_lowercase(), why))
+            })
+            .collect();
+        calls.views.extend(refused);
+        calls
+    }
+
+    /// [`Calls::measured`] on the DuckDB it was measured on, and on any other, the refusals its
+    /// own catalog gives ([`Calls::from_catalog`]), read by `catalog`. Fails closed: a catalog
+    /// that cannot be read refuses every batch.
+    pub fn for_version(
+        version: &str,
+        catalog: impl FnOnce() -> Result<(Vec<String>, Vec<(String, String)>), String>,
+    ) -> Calls {
+        if version == MEASURED_ON {
+            return Calls::measured();
+        }
+        match catalog() {
+            Ok((functions, views)) => Calls::from_catalog(&functions, &views),
+            Err(e) => Calls {
+                functions: Default::default(),
+                views: Default::default(),
+                unread: Some(e),
+            },
+        }
+    }
+
+    /// The refusals for the engine `con` belongs to. Read before the agent has made anything,
+    /// and only on an engine [`TABLE_FUNCTIONS`] was not measured on: listing
+    /// `duckdb_functions()` costs about 0.19 G instructions (`Workspace::attach_all`).
+    ///
+    /// # Safety
+    /// `con` must be a valid connection, not used concurrently.
+    pub unsafe fn for_engine(con: ffi::duckdb_connection) -> Calls {
+        let version = CStr::from_ptr(ffi::duckdb_library_version())
+            .to_string_lossy()
+            .into_owned();
+        Calls::for_version(&version, || {
+            let functions = pairs(con, CATALOG_FUNCTIONS)?
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
+            Ok((functions, pairs(con, CATALOG_VIEWS)?))
+        })
+    }
+
+    /// Why the batch `sql` is refused, as the agent is told it, or `None`.
+    pub fn check(&self, sql: &str) -> Option<String> {
+        if let Some(e) = &self.unread {
+            return Some(format!(
+                "benchy could not read which table functions this DuckDB has ({e}), so it runs \
+                 no query. Nothing ran."
+            ));
+        }
+        let (name, why) = self.first(&sql.to_ascii_lowercase())?;
+        Some(if self.views.contains_key(&name) {
+            format!("`{name}` is not available here: it {why}. Nothing ran.")
+        } else {
+            format!(
+                "`{name}(…)` is not available here: it {why}. Nothing ran. The table functions \
+                 here are `range`, `generate_series`, `unnest`, `json_each`, `summary`, \
+                 `query_table` and the catalog's, such as `duckdb_tables()` and \
+                 `duckdb_columns()`; the data is in tables already, which `describe` names."
+            )
+        })
+    }
+
+    /// The first word of the folded text `text` that names a refused view, or calls a refused
+    /// function, and why it is refused.
+    fn first(&self, text: &str) -> Option<(String, &'static str)> {
+        let b = text.as_bytes();
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let mut at = 0;
+        while at < b.len() {
+            if !word(b[at]) {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            while at < b.len() && word(b[at]) {
+                at += 1;
+            }
+            // Both ends are ASCII bytes, so both are character boundaries.
+            let w = &text[start..at];
+            if let Some(why) = self.views.get(w) {
+                return Some((w.to_string(), why));
+            }
+            if let Some(why) = self.functions.get(w) {
+                if calls(&b[at..]) {
+                    return Some((w.to_string(), why));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Whether what follows a name, `rest`, may make it a call: past a `"` that closes it and
+/// white space, anything but what certainly ends a name that is not called. A comment, a byte
+/// DuckDB may read as white space and this does not, or any other byte this does not know
+/// counts as a call; so does a `(`.
+fn calls(rest: &[u8]) -> bool {
+    let rest = rest.strip_prefix(b"\"").unwrap_or(rest);
+    match rest
+        .iter()
+        .find(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+    {
+        None => false,
+        Some(c) => !(c.is_ascii_alphanumeric() || b"_,;).=<>'+*|:".contains(c)),
+    }
+}
+
+/// Two text columns of every row `sql` gives on `con`, as [`Calls::for_engine`] reads them.
+unsafe fn pairs(con: ffi::duckdb_connection, sql: &CStr) -> Result<Vec<(String, String)>, String> {
+    let mut r: ffi::duckdb_result = std::mem::zeroed();
+    if ffi::duckdb_query(con, sql.as_ptr(), &mut r) != ffi::duckdb_state_DuckDBSuccess {
+        let e = ffi::duckdb_result_error(&mut r);
+        let msg = if e.is_null() {
+            "the catalog could not be read".to_string()
+        } else {
+            CStr::from_ptr(e).to_string_lossy().into_owned()
+        };
+        ffi::duckdb_destroy_result(&mut r);
+        return Err(msg);
+    }
+    let text = |r: &mut ffi::duckdb_result, col: u64, row: u64| -> String {
+        if ffi::duckdb_value_is_null(r, col, row) {
+            return String::new();
+        }
+        let v = ffi::duckdb_value_varchar(r, col, row);
+        let s = CStr::from_ptr(v).to_string_lossy().into_owned();
+        ffi::duckdb_free(v as *mut std::ffi::c_void);
+        s
+    };
+    let rows = (0..ffi::duckdb_row_count(&mut r))
+        .map(|row| (text(&mut r, 0, row), text(&mut r, 1, row)))
+        .collect();
+    ffi::duckdb_destroy_result(&mut r);
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_function_is_refused_however_it_is_written() {
+        let calls = Calls::measured();
+        for sql in [
+            "SELECT * FROM checkpoint()",
+            "select * from CHECKPOINT()",
+            "SELECT * FROM \"Checkpoint\"()",
+            "SELECT * FROM \"checkpoint\" ()",
+            "SELECT * FROM system.main.checkpoint /* c */ ()",
+            "SELECT * FROM checkpoint\n-- c\n()",
+            "SELECT * FROM checkpoint\u{0b}()",
+            "SELECT * FROM checkpoint\u{a0}()",
+            "SELECT * FROM checkpoint\t\r\n\u{0c}()",
+            "SELECT 1; SELECT * FROM checkpoint()",
+            "CREATE TABLE t AS SELECT * FROM checkpoint()",
+            "INSERT INTO t SELECT * FROM checkpoint()",
+            "SELECT (SELECT count(*) FROM checkpoint())",
+            "CREATE MACRO m() AS TABLE SELECT * FROM checkpoint()",
+            "SELECT * FROM query('SELECT 1')",
+            "PRAGMA json_execute_serialized_sql('{}')",
+            "SELECT count(*) FROM duckdb_logs",
+            "SELECT count(*) FROM system.main.\"DUCKDB_LOGS\"",
+            "SELECT 'checkpoint()'",
+            "SELECT * FROM x$checkpoint()",
+            "SELECT * FROM écheckpoint()",
+            "SELECT * FROM checkpoint[1]",
+        ] {
+            let e = calls.check(sql);
+            assert!(
+                e.as_deref().is_some_and(
+                    |e| e.contains("is not available here") && e.contains("Nothing ran")
+                ),
+                "{sql:?}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_ends_a_name_that_is_not_called() {
+        let calls = Calls::measured();
+        for sql in [
+            "SELECT checkpoint FROM t",
+            "SELECT t.checkpoint, 1 FROM t",
+            "SELECT 1 AS checkpoint",
+            "SELECT checkpoint.x FROM t AS checkpoint",
+            "SELECT 1 WHERE checkpoint=1 OR checkpoint<2 OR checkpoint>0",
+            "SELECT checkpoint+1, checkpoint*2, checkpoint||'a', checkpoint::INT FROM t",
+            "SELECT \"checkpoint\" FROM t;",
+            "SELECT my_checkpoint(), checkpoints(), duckdb_logs_x FROM t",
+            "SELECT * FROM range(3), generate_series(1, 2), unnest([1]), duckdb_tables()",
+            "SELECT * FROM query_table('t'), json_each('{}'), summary((SELECT 1))",
+            "SELECT * FROM read_csv('x.csv'), glob('/*')",
+            "SELECT repeat('x', 3), range(3)",
+        ] {
+            assert_eq!(calls.check(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn an_engine_it_was_not_measured_on_reads_its_own_catalog() {
+        let measured = Calls::measured();
+        let same = Calls::for_version(MEASURED_ON, || panic!("the catalog is not read"));
+        assert_eq!(same.functions, measured.functions);
+        assert_eq!(same.views, measured.views);
+        // A function benchy does not know is refused; one it knows keeps its class; a view
+        // over a refused function is refused.
+        let other = Calls::for_version("v9.9.9", || {
+            Ok((
+                vec![
+                    "brand_new".into(),
+                    "Range".into(),
+                    "read_csv".into(),
+                    "checkpoint".into(),
+                ],
+                vec![
+                    ("fresh_view".into(), "SELECT * FROM brand_new()".into()),
+                    ("tables".into(), "SELECT * FROM range(1)".into()),
+                ],
+            ))
+        });
+        let e = other.check("SELECT * FROM brand_new()").expect("refused");
+        assert!(e.contains("not classified"), "{e}");
+        assert!(other.check("SELECT * FROM checkpoint()").is_some());
+        assert!(other.check("SELECT * FROM fresh_view").is_some());
+        assert_eq!(other.check("SELECT * FROM range(1), tables"), None);
+        assert_eq!(other.check("SELECT * FROM read_csv('x')"), None);
+        assert_eq!(
+            other.check("SELECT * FROM enable_logging()"),
+            None,
+            "not in it"
+        );
+        // Fails closed.
+        let unread = Calls::for_version("v9.9.9", || Err("no".into()));
+        let e = unread.check("SELECT 1").expect("refused");
+        assert!(e.contains("(no)") && e.contains("Nothing ran"), "{e}");
+    }
+
+    #[test]
+    fn the_refusal_says_why_and_what_to_use() {
+        let calls = Calls::measured();
+        let e = calls.check("SELECT * FROM enable_logging()").unwrap();
+        assert!(
+            e.starts_with("`enable_logging(…)` is not available here"),
+            "{e}"
+        );
+        assert!(
+            e.contains(STATE) && e.contains("`range`") && e.contains("describe"),
+            "{e}"
+        );
+        let e = calls.check("SELECT * FROM duckdb_logs").unwrap();
+        assert_eq!(
+            e,
+            format!("`duckdb_logs` is not available here: it {INSIDE}. Nothing ran.")
+        );
     }
 }

@@ -37,6 +37,9 @@ struct Case {
     /// REQ-9: refused and undone by the no-shadowing check, which neither layer above is.
     #[serde(default)]
     shadow: Option<String>,
+    /// What the table-function allowlist (`guard::Calls`) does alone: "refuse", or absent.
+    #[serde(default)]
+    functions: Option<String>,
 }
 
 fn load_corpus() -> Corpus {
@@ -907,4 +910,392 @@ fn merge_is_ordinary_dml() {
     );
     assert!(read.is_err(), "the engine lock stops the reader");
     let _ = std::fs::remove_file(&canary);
+}
+
+/// A server on a bench holding `readings`, its operator log (stderr) going to a file.
+fn logged_server() -> (common::Server, std::path::PathBuf) {
+    let data = common::data_dir();
+    let log = common::unique("operator-log");
+    let file = std::fs::File::create(&log).unwrap();
+    let s = common::Server::launch_logging(&[data.to_str().unwrap()], &[], file);
+    (s, log)
+}
+
+#[test]
+fn a_table_function_that_changes_the_engine_is_refused() {
+    // REQ-2. Each of these is a SELECT, which the statement allowlist lets through, and none
+    // reaches outside the workspace, so the lock lets it run too. Measured on DuckDB 1.5.5
+    // through `query`: `enable_logging` with file storage succeeded, and every statement after it
+    // failed with "Permission Error: Cannot access directory" for the rest of the session,
+    // `disable_logging()` and `SELECT 1` included; `enable_profiling()` wrote the plan tree of
+    // every later query to the operator's log; `enable_logging()` in memory let the agent read
+    // the engine's own log through `duckdb_logs`; `checkpoint()`, `force_checkpoint()` and
+    // `truncate_duckdb_logs()` ran. Each on a server of its own, so one that gets through cannot
+    // hide what the next does.
+    let refused = |err: bool, body: &str| {
+        err && body.contains("Nothing ran") && body.contains("is not available here")
+    };
+    let mut failed = Vec::new();
+    // Each, then a statement after it, and whether that one is refused too.
+    for (sql, then, also) in [
+        (
+            "SELECT * FROM enable_logging(storage='file', storage_path='/x')",
+            "SELECT * FROM disable_logging()",
+            true,
+        ),
+        (
+            "SELECT * FROM enable_logging()",
+            "SELECT count(*) FROM duckdb_logs",
+            true,
+        ),
+        (
+            "SELECT * FROM enable_profiling()",
+            "SELECT 7 AS seven",
+            false,
+        ),
+        ("SELECT * FROM checkpoint()", "SELECT 7 AS seven", false),
+        (
+            "SELECT * FROM force_checkpoint()",
+            "SELECT 7 AS seven",
+            false,
+        ),
+        (
+            "SELECT * FROM truncate_duckdb_logs()",
+            "SELECT 7 AS seven",
+            false,
+        ),
+    ] {
+        let (mut s, log) = logged_server();
+        let (err, body, _) = s.query(sql);
+        if !refused(err, &body) {
+            failed.push(format!("{sql}: not refused: {body}"));
+        }
+        let (err, body, _) = s.query(then);
+        if also != refused(err, &body) || (!also && (err || !body.contains('7'))) {
+            failed.push(format!("{sql}: then `{then}`: {body}"));
+        }
+        let (err, body, _) = s.query("SELECT count(*) AS n FROM readings");
+        if err || !body.contains("500") {
+            failed.push(format!("{sql}: then the bench failed: {body}"));
+        }
+        s.close(std::time::Duration::from_secs(10));
+        let said = std::fs::read_to_string(&log).unwrap_or_default();
+        if said.contains("Query Profiling Information") {
+            failed.push(format!("{sql}: a plan tree went to the operator's log"));
+        }
+    }
+    assert!(failed.is_empty(), "\n{}", failed.join("\n"));
+}
+
+/// A freshly locked engine, as `the_corpus_records_why_the_engine_is_the_boundary` makes one.
+fn locked_engine() -> duckdb::Connection {
+    let c = duckdb::Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "SET autoinstall_known_extensions = false; SET autoload_known_extensions = false; \
+         CREATE TABLE loaded AS SELECT 1 AS x",
+    )
+    .unwrap();
+    benchy_mcp::lockdown::apply(&c, "1GB").unwrap();
+    c
+}
+
+fn strings(c: &duckdb::Connection, sql: &str) -> Vec<String> {
+    let mut st = c.prepare(sql).unwrap();
+    let rows = st.query_map([], |r| r.get::<_, String>(0)).unwrap();
+    rows.collect::<Result<Vec<_>, _>>().unwrap()
+}
+
+#[test]
+fn every_table_function_duckdb_has_is_classified() {
+    // REQ-2. The table functions are an allowlist: one DuckDB brings that is not classified in
+    // `guard::TABLE_FUNCTIONS` fails here, before it ships; on an engine it was not measured on
+    // benchy refuses it (`Calls::for_version`). Measured on the shipped library.
+    use benchy_mcp::guard::{Calls, Use, MEASURED_ON, REFUSED_VIEWS, TABLE_FUNCTIONS};
+    let c = locked_engine();
+    assert_eq!(
+        strings(&c, "SELECT library_version FROM pragma_version()"),
+        vec![MEASURED_ON.to_string()],
+        "a new DuckDB: classify its table functions, then move MEASURED_ON"
+    );
+    let has = strings(
+        &c,
+        "SELECT DISTINCT function_name FROM duckdb_functions() WHERE database_name = 'system' \
+         AND function_type IN ('table', 'table_macro') ORDER BY 1",
+    );
+    let classified: Vec<String> = TABLE_FUNCTIONS.iter().map(|(n, _)| n.to_string()).collect();
+    let mut sorted = classified.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        classified, sorted,
+        "TABLE_FUNCTIONS is sorted, each name once"
+    );
+    let missing: Vec<&String> = has.iter().filter(|f| !classified.contains(f)).collect();
+    let stale: Vec<&String> = classified.iter().filter(|f| !has.contains(f)).collect();
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "unclassified: {missing:?}; classified but gone: {stale:?}"
+    );
+    assert_eq!(
+        has.len(),
+        93,
+        "89 table functions and 4 table macros on 1.5.5"
+    );
+
+    // What the catalog itself gives, as an engine benchy was not measured on reads it, is what
+    // was measured: the same calls and the same views refused.
+    let mut st = c
+        .prepare(
+            "SELECT view_name, coalesce(sql, '') FROM duckdb_views() \
+             WHERE database_name = 'system'",
+        )
+        .unwrap();
+    let views: Vec<(String, String)> = st
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let read = Calls::from_catalog(&has, &views);
+    let measured = Calls::measured();
+    for (f, what) in TABLE_FUNCTIONS {
+        let sql = format!("SELECT * FROM {f}()");
+        let refused = matches!(what, Use::Refused(_));
+        assert_eq!(measured.check(&sql).is_some(), refused, "{sql}");
+        assert_eq!(read.check(&sql).is_some(), refused, "{sql}");
+    }
+    let refused_views: Vec<&str> = REFUSED_VIEWS.iter().map(|(v, _)| *v).collect();
+    for (v, _) in &views {
+        let sql = format!("SELECT * FROM {v}");
+        let refused = refused_views.contains(&v.as_str());
+        assert_eq!(measured.check(&sql).is_some(), refused, "{sql}");
+        assert_eq!(read.check(&sql).is_some(), refused, "{sql}");
+    }
+
+    // A refused name is no scalar's, aggregate's or macro's too, so refusing its call never
+    // refuses one of those. Measured: `range`, `generate_series`, `repeat` and `histogram` are
+    // both, and all four the agent's.
+    let other = strings(
+        &c,
+        "SELECT DISTINCT function_name FROM duckdb_functions() WHERE database_name = 'system' \
+         AND function_type IN ('scalar', 'aggregate', 'macro')",
+    );
+    for (f, what) in TABLE_FUNCTIONS {
+        if matches!(what, Use::Refused(_)) {
+            assert!(!other.contains(&f.to_string()), "{f} is also a scalar");
+        }
+    }
+}
+
+#[test]
+fn the_table_functions_left_to_the_lock_are_refused_by_it() {
+    // REQ-2. A file reader is not refused by name: the lock is the boundary for files, and it
+    // refuses every one of them, measured here, so the corpus's file cases keep proving the lock
+    // through the whole stack.
+    use benchy_mcp::guard::{Use, TABLE_FUNCTIONS};
+    let canary = std::env::temp_dir().join(format!("benchy-lock-{}.csv", std::process::id()));
+    std::fs::write(&canary, format!("a\n{CANARY}\n")).unwrap();
+    let c = locked_engine();
+    let mut left = 0;
+    for (f, _) in TABLE_FUNCTIONS.iter().filter(|(_, u)| *u == Use::Lock) {
+        left += 1;
+        let more = if *f == "parquet_bloom_probe" {
+            ", 'a', 1"
+        } else {
+            ""
+        };
+        let sql = format!("SELECT * FROM {f}('{}'{more})", canary.display());
+        let e = c
+            .prepare(&sql)
+            .and_then(|mut st| st.query_map([], |_| Ok(())).map(|r| r.count()))
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(e.contains("disabled by configuration"), "{sql}: {e:?}");
+    }
+    assert_eq!(left, 22, "the file and network readers of 1.5.5");
+    let _ = std::fs::remove_file(&canary);
+}
+
+#[test]
+fn the_pragmas_typed_select_are_the_measured_ones() {
+    // REQ-2. DuckDB rewrites these PRAGMAs to a SELECT over a table function, which is not in
+    // the text the check reads, and types them SELECT, so they run. Every one of DuckDB 1.5.5's
+    // that does is here, and each reads only what an allowed table function reads, but two:
+    // `extension_versions`, which the lock refuses, as it does `duckdb_extensions()`; and
+    // `json_execute_serialized_sql('…')`, which runs SQL from a string and is refused by its
+    // call.
+    let mut ws = sealed();
+    ws.work("CREATE TABLE loaded AS SELECT 1 AS x", &Caps::default())
+        .expect("setup");
+    let c = locked_engine();
+    let json = strings(&c, "SELECT json_serialize_sql('SELECT 1')").remove(0);
+    let names = strings(
+        &c,
+        "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'pragma' \
+         ORDER BY 1",
+    );
+    let mut select = Vec::new();
+    for n in &names {
+        for sql in [
+            format!("PRAGMA {n}"),
+            format!("PRAGMA {n}('loaded')"),
+            format!("PRAGMA {n}('{json}')"),
+        ] {
+            if ws.classify(&sql) == Verdict::Allow(vec!["SELECT"]) {
+                select.push(n.as_str());
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        select,
+        [
+            "collations",
+            "database_list",
+            "database_size",
+            "extension_versions",
+            "functions",
+            "json_execute_serialized_sql",
+            "metadata_info",
+            "platform",
+            "show_databases",
+            "show_tables",
+            "show_tables_expanded",
+            "storage_info",
+            "table_info",
+            "user_agent",
+            "version",
+        ]
+    );
+    let e = ws
+        .work(
+            &format!("PRAGMA json_execute_serialized_sql('{json}')"),
+            &Caps::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("runs SQL from a string") && e.contains("Nothing ran"),
+        "{e}"
+    );
+    let e = ws
+        .work("PRAGMA extension_versions", &Caps::default())
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("disabled by configuration"), "{e}");
+}
+
+#[test]
+fn the_agents_table_functions_still_run() {
+    // REQ-2: what the allowlist lets through works, the table functions DIALECT.md and the
+    // hints name among them, alone and inside the agent's own objects.
+    let mut ws = sealed();
+    ws.work(
+        "CREATE TABLE t AS SELECT 1 AS x; CREATE TABLE duckdb_logs_x AS SELECT 1 AS y",
+        &Caps::default(),
+    )
+    .expect("setup");
+    for sql in [
+        "SELECT count(*) FROM range(3)",
+        "SELECT count(*) FROM generate_series(1, 3)",
+        "SELECT count(*) FROM unnest([1, 2, 3])",
+        "SELECT count(*) FROM repeat(1, 3)",
+        "SELECT count(*) FROM repeat_row(1, num_rows := 3)",
+        "SELECT count(*) FROM json_each('[1, 2, 3]')",
+        "SELECT count(*) FROM json_tree('[1, 2]')",
+        "SELECT count(*) FROM summary((SELECT 1))",
+        "SELECT count(*) FROM duckdb_tables()",
+        "SELECT count(*) FROM duckdb_columns()",
+        "SELECT count(*) FROM duckdb_functions() WHERE function_name = 'lower'",
+        "SELECT count(*) FROM duckdb_settings() WHERE name = 'threads'",
+        "SELECT count(*) FROM duckdb_types() WHERE type_name = 'INTEGER'",
+        "SELECT count(*) FROM pg_timezone_names() WHERE name = 'UTC'",
+        "SELECT count(*) FROM information_schema.tables",
+        "SELECT count(*) FROM duckdb_logs_x",
+        "PRAGMA table_info('t')",
+        "SELECT count(*) FROM pragma_table_info('t')",
+        "SELECT count(*) FROM query_table('t')",
+        "SELECT count(*) FROM histogram(t, x)",
+        "SELECT repeat('x', 3), range(3)",
+        "SUMMARIZE t",
+        "DESCRIBE t",
+        "SHOW TABLES",
+        "CREATE VIEW three AS SELECT * FROM range(3)",
+        "CREATE MACRO up_to(n) AS TABLE SELECT * FROM generate_series(1, n)",
+        "SELECT count(*) FROM up_to(3)",
+        "SELECT 1 AS checkpoint, 'enable_logging' AS query",
+    ] {
+        if let Err(e) = ws.work(sql, &Caps::default()) {
+            panic!("{sql}: {e}");
+        }
+    }
+}
+
+#[test]
+fn a_refused_call_runs_nothing_of_its_batch() {
+    // REQ-2: the check reads the whole batch before any of it is prepared, so nothing before
+    // the refused call runs either, and one inside the agent's own view or macro is refused
+    // where it is made.
+    let mut ws = sealed();
+    ws.work("CREATE TABLE marker(n INTEGER)", &Caps::default())
+        .unwrap();
+    for sql in [
+        "INSERT INTO marker VALUES (1); SELECT * FROM checkpoint()",
+        "INSERT INTO marker SELECT count(*) FROM enable_profiling()",
+        "CREATE TABLE w AS SELECT * FROM enable_logging()",
+        "CREATE VIEW w AS SELECT * FROM enable_logging()",
+        "CREATE MACRO w() AS TABLE SELECT * FROM truncate_duckdb_logs()",
+        "UPDATE marker SET n = (SELECT count(*) FROM force_checkpoint())",
+        "SELECT * FROM query('SELECT * FROM enable_' || 'profiling()')",
+    ] {
+        match ws
+            .work(sql, &Caps::default())
+            .map_err(|e| e.cause().to_string())
+        {
+            Err(e) if e.contains("is not available here") && e.contains("Nothing ran") => {}
+            other => panic!("{sql}: {other:?}"),
+        }
+    }
+    let out = ws
+        .work(
+            "SELECT count(*) FROM marker UNION ALL SELECT count(*) FROM duckdb_tables() \
+             WHERE table_name = 'w' UNION ALL SELECT count(*) FROM duckdb_views() \
+             WHERE view_name = 'w'",
+            &Caps::default(),
+        )
+        .unwrap();
+    assert_eq!(flatten(&out).trim(), "0 0 0");
+}
+
+#[test]
+fn the_table_function_allowlist_does_what_the_corpus_says() {
+    // REQ-2. The other half of layer 1, alone, on every case: it refuses the cases that call a
+    // table function that changes or shows the engine, or runs SQL from a string, and leaves
+    // the rest, the file readers among them, to the statement allowlist and the lock.
+    let canary = canary_path();
+    let path = canary.display().to_string();
+    let calls = benchy_mcp::guard::Calls::measured();
+    let mut drift = Vec::new();
+    let mut refused = 0;
+    for case in &load_corpus().case {
+        let sql = case.sql.replace("{canary}", &path);
+        let expected = match case.functions.as_deref() {
+            None => false,
+            Some("refuse") => true,
+            Some(other) => panic!("{}: functions = {other:?}", case.sql),
+        };
+        refused += usize::from(expected);
+        if calls.check(&sql).is_some() != expected {
+            drift.push(case.sql.clone());
+        }
+    }
+    assert!(
+        drift.is_empty(),
+        "measured otherwise:\n  {}",
+        drift.join("\n  ")
+    );
+    assert_eq!(
+        refused, 13,
+        "the corpus cases the table-function allowlist refuses"
+    );
 }

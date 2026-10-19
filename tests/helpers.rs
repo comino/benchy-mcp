@@ -794,9 +794,20 @@ fn sql_run_from_a_string_is_refused_beside_helper_macros() {
     }
     let _ = std::fs::remove_dir_all(dir);
 
-    // Without helper macros a string's SQL reads nothing a CTE could take, and runs.
+    // Without helper macros a string's SQL reads nothing a CTE could take, but the table
+    // functions it calls cannot be read before it runs either, so REQ-2's table-function
+    // allowlist refuses it there too (`a_refused_call_runs_nothing_of_its_batch`).
     let mut plain = Server::start(Path::new(DATA), &[]);
-    assert!(ok(&mut plain, "SELECT * FROM query('SELECT 42 AS x')").contains("42"));
+    let e = err(&mut plain, "SELECT * FROM query('SELECT 42 AS x')");
+    assert!(
+        e.contains("runs SQL from a string") && e.contains("Nothing ran"),
+        "{e}"
+    );
+    assert!(ok(
+        &mut plain,
+        "SELECT count(*) AS n FROM query_table('meters')"
+    )
+    .contains('n'));
 }
 
 #[test]

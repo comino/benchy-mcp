@@ -19,6 +19,11 @@
 #                                      prepared at all, so the engine refuses it BEFORE the
 #                                      allowlist ever sees a type. Four cases. Not a weakening:
 #                                      it is the engine acting earlier than layer 1 can.
+#   functions = "refuse"               what the table-function allowlist (`guard::Calls`, the
+#                                      other half of layer 1) does alone; "pass" when absent
+#                                      (`the_table_function_allowlist_does_what_the_corpus_says`).
+#                                      It refuses by name what neither the statement's type nor
+#                                      the lock stops, and leaves file readers to the lock.
 
 [[case]]
 sql = "ATTACH '{canary}' AS evil"
@@ -221,6 +226,7 @@ category = "recon"
 kind = "SELECT"
 allowlist = "pass"
 engine = "error"
+functions = "refuse"
 
 [[case]]
 sql = "SELECT getenv('HOME')"
@@ -424,6 +430,7 @@ category = "string to SQL"
 kind = "UNBOUND"
 allowlist = "pass"
 engine = "error"
+functions = "refuse"
 
 [[case]]
 sql = "SELECT * FROM query('SELECT * FROM read_' || 'text(''{canary}'')')"
@@ -431,6 +438,7 @@ category = "string to SQL"
 kind = "UNBOUND"
 allowlist = "pass"
 engine = "error"
+functions = "refuse"
 
 [[case]]
 sql = "SELECT * FROM json_execute_serialized_sql(json_serialize_sql('SELECT * FROM read_text(''{canary}'')'))"
@@ -438,6 +446,7 @@ category = "string to SQL"
 kind = "UNBOUND"
 allowlist = "pass"
 engine = "error"
+functions = "refuse"
 
 [[case]]
 sql = "SELECT * FROM query_table('{canary}')"
@@ -445,3 +454,83 @@ category = "string to SQL"
 kind = "UNBOUND"
 allowlist = "pass"
 engine = "error"
+
+# Table functions that change the engine (`a_table_function_that_changes_the_engine_is_refused`).
+# Each is a SELECT the locked engine runs, and none reaches outside, so neither the statement
+# allowlist nor the lock stops it. Measured on DuckDB 1.5.5 through `query`: file logging left
+# every later statement failing with "Permission Error: Cannot access directory", and profiling
+# wrote every later plan tree to the operator's log. The table-function allowlist refuses each by
+# name, before anything in the batch is prepared.
+[[case]]
+sql = "SELECT * FROM enable_logging(storage='file', storage_path='{canary}')"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+[[case]]
+sql = "SELECT * FROM enable_logging()"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+[[case]]
+sql = "SELECT * FROM disable_logging()"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+[[case]]
+sql = "SELECT * FROM enable_profiling()"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+[[case]]
+sql = "SELECT * FROM checkpoint()"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+# On the corpus's in-memory engine DuckDB refuses it ("Cannot FORCE CHECKPOINT: the current
+# transaction has been started for this database"); on a session's bench it ran.
+[[case]]
+sql = "SELECT * FROM force_checkpoint()"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "error"
+functions = "refuse"
+
+[[case]]
+sql = "SELECT * FROM truncate_duckdb_logs()"
+category = "engine state"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+[[case]]
+sql = "CREATE TABLE w AS SELECT * FROM enable_profiling()"
+category = "engine state"
+kind = "CREATE"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"
+
+[[case]]
+sql = "SELECT count(*) FROM duckdb_logs"
+category = "engine log"
+kind = "SELECT"
+allowlist = "pass"
+engine = "ok"
+functions = "refuse"

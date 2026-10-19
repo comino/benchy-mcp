@@ -6,6 +6,22 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **A `SELECT` over a table function that changes the engine is refused** (#49).
+  `SELECT * FROM enable_logging(storage='file', …)` left every later query of the session
+  failing, `enable_profiling()` wrote every plan tree to the operator's log, and
+  `checkpoint()`, `force_checkpoint()` and `truncate_duckdb_logs()` ran. The statement
+  allowlist now has a second half, an allowlist of DuckDB's table functions checked on the
+  batch's text before any of it is prepared: each of DuckDB 1.5.5's 93 is the agent's, left to
+  the engine lock (the file and network readers), or refused, and a test fails when a DuckDB
+  brings one that is not classified. On a DuckDB other than the one measured, any table
+  function not classified is refused.
+
+  Changed behaviour: `query('…')` and `json_execute_serialized_sql` are refused with or
+  without helper macros, since the table functions in their string cannot be read before it
+  runs; `query_table('name')` still works. The engine's own workings (`duckdb_logs`,
+  `duckdb_memory`, `duckdb_extensions`, `duckdb_secrets` and the like) and DuckDB's test
+  functions are refused too.
+
 ## [0.2.0] — 2026-10-17
 
 Fixes from a review of 0.1.0. Still an experimental prototype: **some of these change what a

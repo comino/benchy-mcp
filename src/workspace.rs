@@ -52,6 +52,8 @@ pub struct Workspace {
     #[allow(dead_code)]
     ingest: Connection,
     classifier: Classifier,
+    /// REQ-2: the table functions the agent may not call (`crate::guard::Calls`).
+    calls: crate::guard::Calls,
     next_result_id: u64,
     /// What every result id starts with, before its number: `r`, or a session's own prefix
     /// (`set_result_prefix`).
@@ -533,6 +535,9 @@ pub enum WorkError {
     /// REQ-9 `an_attached_name_is_taken_too`: a table may not be attached under a name the agent
     /// already gave an object of its own.
     Taken(String),
+    /// REQ-2 `a_table_function_that_changes_the_engine_is_refused`: the batch calls a table
+    /// function, or names a system view, the agent may not use. Nothing ran.
+    Refused(String),
     /// REQ-7: the batch outlived its deadline and was interrupted. The workspace survives.
     Deadline {
         seconds: f32,
@@ -599,7 +604,7 @@ impl std::fmt::Display for WorkError {
                 Ok(())
             }
             WorkError::Open(m) => write!(f, "could not open the workspace: {m}"),
-            WorkError::Taken(m) => write!(f, "{m}"),
+            WorkError::Taken(m) | WorkError::Refused(m) => write!(f, "{m}"),
             WorkError::Partial { ran, error } => {
                 let n = ran.len();
                 let (which, they, results) = if n == 1 {
@@ -1036,6 +1041,7 @@ impl Bench {
             agent,
             ingest,
             classifier: unsafe { Classifier::from_raw(agent) },
+            calls: unsafe { crate::guard::Calls::for_engine(agent) },
             next_result_id: 1,
             result_prefix: "r".into(),
             unavailable: Vec::new(),
@@ -1083,6 +1089,7 @@ impl Workspace {
             agent,
             ingest,
             classifier: unsafe { Classifier::from_raw(agent) },
+            calls: unsafe { crate::guard::Calls::for_engine(agent) },
             next_result_id: 1,
             result_prefix: "r".into(),
             unavailable: Vec::new(),
@@ -1593,6 +1600,11 @@ impl Workspace {
         sql: &str,
         cap: &crate::result::Caps,
     ) -> Result<Vec<QueryResult>, WorkError> {
+        // On the text, before the classifier prepares anything, so a refused function is never
+        // even bound.
+        if let Some(why) = self.calls.check(sql) {
+            return Err(WorkError::Refused(why));
+        }
         match self.classifier.check(sql) {
             Verdict::Unparseable(m) => {
                 let hint = crate::hint::for_parse_error(&m, sql);
