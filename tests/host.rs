@@ -2135,63 +2135,6 @@ fn a_view_over_a_missing_table_errors_until_attached() {
 }
 
 #[test]
-fn a_table_macro_over_a_missing_table_waits_like_a_view() {
-    // DuckDB 1.5.5 binds a table macro's body when it is made, but not where the body reads an
-    // argument, as the documented pattern does in a FROM-less CTE: such a macro over a table the
-    // host has not attached was made, listed as ready, and answered "Catalog Error: Table with
-    // name readings does not exist!", measured. It waits as a view does.
-    let dir = unique("host-table-macro");
-    let cfg = helpers_config(
-        &dir,
-        "-- Readings of one meter.\n\
-         CREATE MACRO of_meter(id) AS TABLE \
-           WITH arg AS (SELECT id AS id) \
-           SELECT r.* FROM arg, readings r WHERE r.meter = arg.id;\n\
-         -- How many readings one meter has.\n\
-         CREATE MACRO counted(id) AS TABLE \
-           WITH arg AS (SELECT id AS id) SELECT count(*) AS n FROM arg, of_meter(arg.id);\n",
-    );
-    let mut h = Host::start(&["--config", cfg.to_str().unwrap()]);
-    let d = h.call("describe", json!({}));
-    let text = d["text"].as_str().unwrap();
-    for name in ["of_meter", "counted"] {
-        assert!(
-            text.lines().any(|l| l.trim_start().starts_with(name)
-                && l.contains("(works once `readings` is on the bench)")),
-            "{name} waits in describe: {d}"
-        );
-        let r = h.call(
-            "query",
-            json!({"sql": format!("SELECT * FROM {name}('a-1')")}),
-        );
-        assert_eq!(code(&r), "E_SQL", "{r}");
-        let said = r["error"]["message"].as_str().unwrap();
-        assert!(
-            said.contains(&format!("`{name}` is a helper"))
-                && said.contains("`readings`, which is not on the bench yet"),
-            "{name}: {said}"
-        );
-    }
-    let r = attach(
-        &mut h,
-        "readings",
-        &arrows(&dir.join("a.arrows"), &readings(4, "a"), true),
-    );
-    assert_eq!(r["ok"], true, "{r}");
-    let r = h.call(
-        "query",
-        json!({"sql": "SELECT n + 700 AS k FROM counted('a-1')"}),
-    );
-    assert!(r["text"].as_str().unwrap_or("").contains("701"), "{r}");
-    let d = h.call("describe", json!({}));
-    assert!(
-        !d["text"].as_str().unwrap().contains("works once"),
-        "made once attached: {d}"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn a_host_cannot_attach_under_a_helpers_name() {
     // REQ-18: a helper's name is taken from the start, a waiting one's too, so no table the host
     // attaches later hides it or is hidden by it.
@@ -2214,14 +2157,16 @@ fn a_host_cannot_attach_under_a_helpers_name() {
 
 /// Helpers that read three tables. Each waits for `readings` at first, the first table DuckDB
 /// finds missing in each; attached all at once, the others are known only from what DuckDB made
-/// of each helper: `sites` from the view's bound plan, `meters` from the macro's body, which
-/// DuckDB binds only where it is called.
+/// of each helper: `sites` from a join in one view's bound plan, `meters` from a scalar subquery
+/// in another's. A helper macro reads no table
+/// (`a_helper_macro_that_reads_a_table_is_refused_at_startup`).
 const READING_HELPERS: &str = "-- Rows per meter.\n\
     CREATE VIEW per_meter AS SELECT meter, count(*) AS n FROM readings GROUP BY ALL;\n\
     -- Readings at a site.\n\
     CREATE VIEW at_sites AS SELECT r.meter FROM readings r, sites s WHERE r.id = s.id;\n\
     -- Readings and meters.\n\
-    CREATE MACRO counted() AS (SELECT count(*) FROM readings) + (SELECT count(*) FROM meters);\n";
+    CREATE VIEW counted AS \
+    SELECT (SELECT count(*) FROM readings) + (SELECT count(*) FROM meters) AS c;\n";
 
 /// Attach `names` from `file` in one request, each answered ok.
 fn attach_all(h: &mut Host, names: &[&str], file: &Path) {
@@ -2256,7 +2201,7 @@ fn a_table_a_helper_reads_stays_taken_after_a_detach() {
     let file = arrows(&dir.join("a.arrows"), &readings(4, "a"), true);
     let all = ["readings", "sites", "meters"];
     let ask = "SELECT (SELECT count(*) FROM per_meter) + 700 AS k, \
-               (SELECT count(*) FROM at_sites) + 800 AS s, counted() + 900 AS c";
+               (SELECT count(*) FROM at_sites) + 800 AS s, (SELECT c FROM counted) + 900 AS c";
     attach_all(&mut h, &all, &file);
     let r = h.call("query", json!({ "sql": ask }));
     let text = r["text"].as_str().unwrap_or("");

@@ -13,8 +13,15 @@
 //! SQL, which DuckDB binds again on every query (measured: a view made over a stand-in reads the
 //! attached table, and still reads it after the table is replaced by one with other types).
 //!
-//! A helper that reads a table the bench does not have yet **waits**: it is listed, its name is
+//! A view that reads a table the bench does not have yet **waits**: it is listed, its name is
 //! taken, and calling it says what it waits for. The next attach of that table makes it.
+//!
+//! **A macro reads no table.** DuckDB 1.5.5 expands a macro, scalar or table, inside the caller's
+//! query, so a table its body names binds to a CTE of the caller's of that name: `WITH meters AS
+//! (…) SELECT lab_peak()` returned the CTE's maximum, with no error, where a view over `meters`
+//! read the table, measured. So a helper macro whose body reads a table is refused
+//! ([`macro_body`]), and what reads a table is a view. No query of the agent's is looked at for
+//! a CTE then.
 //!
 //! **Unqualified names.** A helper names the bench's tables unqualified, and that is safe: the
 //! agent's search path resolves them at query time, a table's catalog is renamed by every attach
@@ -51,7 +58,7 @@ pub struct Def {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shown {
     pub name: String,
-    /// `dewpoint(t, rh)`, `hours_above(series_id, …)`, or a view's name and columns.
+    /// `dewpoint(t, rh)`, `hours_of(start_at, end_at)`, or a view's name and columns.
     pub signature: String,
     /// `view`, `macro` or `table macro`.
     pub what: String,
@@ -73,14 +80,6 @@ pub struct Built {
     /// `a_table_a_helper_reads_stays_taken_after_a_detach`).
     #[serde(default)]
     pub reads: Vec<String>,
-    /// Of what the helpers read, what a helper **macro** reads, ASCII case folded, sorted: the
-    /// bench's tables and the helper views its body names, and the table a waiting macro waits
-    /// for. DuckDB expands a macro inside the caller's query, so a CTE of the caller's under one
-    /// of these names is what the macro would read; the agent may not name a CTE so (REQ-18
-    /// `a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads`). A view is bound in its own
-    /// context, so what only views read is not here.
-    #[serde(default)]
-    pub macro_reads: Vec<String>,
 }
 
 impl Built {
@@ -404,52 +403,6 @@ impl Raw {
         }
     }
 
-    /// Whether a call of table macro `name` binds, its arguments all NULL: `Err` only for a name
-    /// it reads that is not there, a table or another helper. DuckDB 1.5.5 binds a table
-    /// macro's body when it is made, except where the body reads an argument, as the documented
-    /// pattern does in a FROM-less CTE (`WITH arg AS (SELECT id AS id) … FROM arg, readings`):
-    /// such a macro over a missing table was made, and failed when called with "Table with name
-    /// readings does not exist!", measured. A call binds the whole body, and is prepared, never
-    /// run. The arity is found by trying: DuckDB answers a call with the wrong number of
-    /// arguments "Macro … does not support the supplied arguments". A scalar macro, which DuckDB
-    /// binds when it is made, is no table function, which is no missing table either.
-    fn call_binds(&self, name: &str) -> Result<(), Failed> {
-        for n in 0..=64 {
-            let args = vec!["NULL"; n].join(", ");
-            let sql = format!("SELECT * FROM bench.main.{}({args})", quoted(name));
-            let c = CString::new(sql).map_err(|_| Failed::Other("NUL byte".into()))?;
-            let msg = unsafe {
-                let mut prep: ffi::duckdb_prepared_statement = std::ptr::null_mut();
-                let ok = ffi::duckdb_prepare(self.0, c.as_ptr(), &mut prep)
-                    == ffi::duckdb_state_DuckDBSuccess;
-                let msg = if ok {
-                    None
-                } else {
-                    let e = ffi::duckdb_prepare_error(prep);
-                    Some(if e.is_null() {
-                        String::new()
-                    } else {
-                        CStr::from_ptr(e).to_string_lossy().into_owned()
-                    })
-                };
-                ffi::duckdb_destroy_prepare(&mut prep);
-                msg
-            };
-            let Some(msg) = msg else { return Ok(()) };
-            if msg.contains("does not support the supplied arguments") {
-                continue;
-            }
-            return match Failed::classify(msg) {
-                Failed::Missing { name: missing, .. } if missing.eq_ignore_ascii_case(name) => {
-                    Ok(())
-                }
-                m @ Failed::Missing { .. } => Err(m),
-                Failed::Other(_) => Ok(()),
-            };
-        }
-        Ok(())
-    }
-
     /// Prepare and run one helper statement, which must be exactly one CREATE.
     fn create(&self, sql: &str) -> Result<(), Failed> {
         let c = CString::new(sql).map_err(|_| Failed::Other("it holds a NUL byte".into()))?;
@@ -607,21 +560,19 @@ fn build_in(
             ));
             continue;
         }
-        let mut outcome = raw.create(&d.sql);
-        if outcome.is_ok() && d.kind == Kind::Macro {
-            // REQ-18 `a_table_macro_over_a_missing_table_waits_like_a_view`
-            if let Err(missing) = raw.call_binds(&d.name) {
-                let dropped = raw.exec(&format!("DROP MACRO TABLE bench.main.{}", quoted(&d.name)));
-                outcome = match dropped {
-                    Ok(()) => Err(missing),
-                    Err(e) => Err(Failed::Other(format!("it could not be put aside: {e}"))),
-                };
-            }
-        }
-        let wait = match outcome {
+        let wait = match raw.create(&d.sql) {
             Ok(()) => {
                 made.push(d);
                 None
+            }
+            // A macro that reads a table, or a helper view, which is not there yet: it reads one,
+            // which no helper macro may (`a_helper_macro_that_reads_a_table_is_refused_at_startup`),
+            // so it does not wait as a view does.
+            Err(Failed::Missing { name, table, .. }) if table && d.kind == Kind::Macro => {
+                built
+                    .broken
+                    .push(reads_a_table(&d.name, &format!("its body reads `{name}`")));
+                continue;
             }
             Err(Failed::Missing { name, table, said }) => {
                 let folded_missing = name.to_ascii_lowercase();
@@ -687,9 +638,7 @@ fn build_in(
         ")::VARCHAR FROM system.main.duckdb_views() WHERE database_name = 'bench' AND NOT internal",
     ))?;
     let mut named: HashSet<String> = HashSet::new();
-    // What the helper macros' bodies name, apart: a CTE of the caller's can stand in for it.
-    let mut macro_named: HashSet<String> = HashSet::new();
-    // Whether a plan or a body could not be serialized, so its tables are not known.
+    // Whether a plan could not be serialized, so its tables are not known.
     let mut unread = false;
     for v in &views {
         if let Some(f) = named_tables(&v[1], &mut named, &mut unread) {
@@ -706,18 +655,19 @@ fn build_in(
     // all the same.
     let mut functions = Vec::new();
     let mut strays = Vec::new();
+    // Each helper macro's overloads, by folded name, with what DuckDB's parser made of each body.
+    let mut bodies: Vec<(String, Result<Calls, String>)> = Vec::new();
     let mut builtin: HashSet<String> = raw
         .rows("SELECT view_name FROM system.main.duckdb_views() WHERE database_name = 'system'")?
         .into_iter()
         .map(|r| r[0].to_ascii_lowercase())
         .collect();
-    // With each helper macro's body as DuckDB's parser reads it, for the tables it names. A
-    // macro is bound only where it is called, with what it is called with, and a call with NULL
-    // arguments is no stand-in for that: DuckDB 1.5.5's binder folds `NULL + (SELECT max(t) FROM
-    // weather)` to a NULL constant, scan and all, measured. So a macro's tables are the names its
-    // body reads in FROM that are tables on the bench: a body was bound when it was made (or the
-    // helper waits), so a table it reads is one of them, and a CTE of the body named otherwise
-    // is not. One more column of the one listing, computed for the helpers' rows alone.
+    // With each helper macro's body as DuckDB's parser reads it, for whether it reads a table
+    // ([`macro_body`]). A macro is bound only where it is called, with what it is called with,
+    // and a call with NULL arguments is no stand-in for that: DuckDB 1.5.5's binder folds `NULL +
+    // (SELECT max(t) FROM weather)` to a NULL constant, scan and all, measured. So the body is
+    // read as parsed, which is what DuckDB expands into the caller's query. One more column of
+    // the one listing, computed for the helpers' rows alone.
     for f in raw.rows(concat!(
         "SELECT database_name, function_name, function_type, \
          array_to_string(parameters, ', '), \
@@ -729,12 +679,7 @@ fn build_in(
          FROM system.main.duckdb_functions()",
     ))? {
         if f[0] == "bench" {
-            if let Some(by) = named_tables(&f[5], &mut macro_named, &mut unread) {
-                let why = by_name(&f[1], &by);
-                if !built.broken.contains(&why) {
-                    built.broken.push(why);
-                }
-            }
+            bodies.push((f[1].to_ascii_lowercase(), macro_body(&f[5])));
         }
         if f[0] == "system" {
             builtin.insert(f[1].to_ascii_lowercase());
@@ -752,6 +697,12 @@ fn build_in(
                  made in the helpers' own catalog, and nothing else.",
                 f[1], f[0]
             ));
+        }
+    }
+    let reading = macros_that_read(&bodies);
+    for d in defs {
+        if let Some(how) = reading.get(&d.name.to_ascii_lowercase()) {
+            built.broken.push(reads_a_table(&d.name, how));
         }
     }
     for d in defs {
@@ -880,10 +831,10 @@ fn build_in(
             ));
         }
     }
-    // What the helpers read, of the tables on the bench, and what the waiting ones wait for.
-    // Where DuckDB could not serialize a plan or a body, every table on the bench counts, which
-    // takes too many names from the agent rather than too few.
-    named.extend(macro_named.iter().cloned());
+    // What the helpers read, of the tables on the bench, and what the waiting ones wait for: what
+    // the views read, since a helper macro reads no table. Where DuckDB could not serialize a
+    // plan, every table on the bench counts, which takes too many names from the agent rather
+    // than too few.
     let mut reads: HashSet<String> = tables
         .iter()
         .map(|(t, _)| t.to_ascii_lowercase())
@@ -897,33 +848,6 @@ fn build_in(
     );
     built.reads = reads.into_iter().collect();
     built.reads.sort();
-    // What the macros read: the bench's tables and the helper views their bodies name, and
-    // what a waiting macro waits for. Where a body could not be serialized, every table on the
-    // bench and every helper view counts, as above.
-    let views: Vec<String> = defs
-        .iter()
-        .filter(|d| d.kind == Kind::View)
-        .map(|d| d.name.to_ascii_lowercase())
-        .collect();
-    let mut macro_reads: HashSet<String> = tables
-        .iter()
-        .map(|(t, _)| t.to_ascii_lowercase())
-        .chain(views)
-        .filter(|t| unread || macro_named.contains(t))
-        .collect();
-    macro_reads.extend(
-        defs.iter()
-            .filter(|d| d.kind == Kind::Macro)
-            .filter_map(|d| {
-                built
-                    .shown
-                    .iter()
-                    .find(|s| s.name == d.name)
-                    .and_then(|s| s.waits.as_ref().map(|w| w.to_ascii_lowercase()))
-            }),
-    );
-    built.macro_reads = macro_reads.into_iter().collect();
-    built.macro_reads.sort();
     Ok(built)
 }
 
@@ -932,9 +856,10 @@ fn build_in(
 /// `json_execute_serialized_sql(…)`, `duckdb_table_sample('readings')` and the `pragma_*` that
 /// take a table. Found by listing `duckdb_functions()`'s table functions with a VARCHAR argument
 /// and keeping those that read the bench; the rest read a file, which the engine's lock refuses
-/// (`a_helper_cannot_reach_outside_the_bench`), or name a database or a setting. A helper that
+/// (`a_helper_cannot_reach_outside_the_bench`), or name a database or a setting. A view that
 /// calls one is refused (`a_helper_that_names_a_table_in_a_string_is_refused_at_startup`): the
-/// table it reads could not be taken from the agent.
+/// table it reads could not be taken from the agent. A helper macro calls no table function but
+/// [`TABLE_FREE`] ones, so these are looked for in views alone.
 const BY_NAME: &[&str] = &[
     "query",
     "query_table",
@@ -953,15 +878,14 @@ fn by_name(name: &str, function: &str) -> String {
     )
 }
 
-/// Collect, from JSON DuckDB serialized, the names of the tables in it: `table` of a scan in a
-/// bound plan (`json_serialize_plan`), `table_name` of a `BASE_TABLE` in a parsed statement
-/// (`json_serialize_sql`), ASCII case folded. A name that is no table on the bench is dropped by
-/// the caller. Sets `unread` when DuckDB answered with an error instead.
+/// Collect, from a view's bound plan as DuckDB serialized it (`json_serialize_plan`), the names
+/// of the tables in it, ASCII case folded: `table` of a scan (and `table_name`, should a plan
+/// carry one). A name that is no table on the bench is dropped by the caller. Sets `unread` when
+/// DuckDB answered with an error instead.
 ///
-/// Returns the first [`BY_NAME`] function it calls, if any: a `TABLE_FUNCTION` of a parse, or a
-/// `LOGICAL_GET` of a plan. In a view's plan `query_table` and `query` are already bound to the
-/// scans they make, measured on 1.5.5, so a view's tables are found through them and only the
-/// others are left to refuse.
+/// Returns the first [`BY_NAME`] function it calls, if any: a `LOGICAL_GET` of the plan. In a
+/// view's plan `query_table` and `query` are already bound to the scans they make, measured on
+/// 1.5.5, so a view's tables are found through them and only the others are left to refuse.
 fn named_tables(json: &str, out: &mut HashSet<String>, unread: &mut bool) -> Option<String> {
     fn walk(v: &serde_json::Value, out: &mut HashSet<String>, by: &mut Option<String>) {
         match v {
@@ -972,7 +896,6 @@ fn named_tables(json: &str, out: &mut HashSet<String>, unread: &mut bool) -> Opt
                     }
                 }
                 let called = match o.get("type").and_then(|t| t.as_str()) {
-                    Some("TABLE_FUNCTION") => o["function"]["function_name"].as_str(),
                     Some("LOGICAL_GET") => o["name"].as_str(),
                     _ => None,
                 };
@@ -993,6 +916,172 @@ fn named_tables(json: &str, out: &mut HashSet<String>, unread: &mut bool) -> Opt
         _ => *unread = true,
     }
     by
+}
+
+/// The table functions a helper macro may call: they make rows from their arguments alone and
+/// read no table. Every other table function is refused in a helper macro, the ones that read
+/// the bench (`query_table`, `duckdb_tables`), a file (`read_text`) or something not yet known
+/// alike, so a function DuckDB adds is refused until it is listed here. A table macro of the
+/// operator's that reads no table may be called too ([`macros_that_read`]). A CTE of the caller's
+/// cannot stand in for a table function: `WITH range AS (…)` left `range(3)` in a macro's body
+/// as it was, measured on DuckDB 1.5.5 (`a_table_free_helper_macro_and_a_view_serve`).
+const TABLE_FREE: &[&str] = &["range", "generate_series", "unnest"];
+
+/// The kinds of FROM item, as DuckDB 1.5.5's parser serializes them, that read no table of
+/// their own: no FROM, a subquery, a join, VALUES, a PIVOT or UNPIVOT, and a table function,
+/// which [`TABLE_FREE`] judges. What each holds is read in turn. A `BASE_TABLE` names a table, a
+/// view or a CTE, and a `SHOW_REF` is a DESCRIBE, SUMMARIZE or SHOW: those read a table, and so
+/// does any kind not listed here, as far as benchy knows.
+const READS_NONE: &[&str] = &[
+    "EMPTY",
+    "SUBQUERY",
+    "JOIN",
+    "EXPRESSION_LIST",
+    "PIVOT",
+    "TABLE_FUNCTION",
+];
+
+/// What a helper macro's body calls that is not DuckDB's: each function and table function by
+/// folded name, which may be another helper's.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Calls {
+    functions: HashSet<String>,
+    table_functions: HashSet<String>,
+}
+
+/// What a helper macro's body, as DuckDB's parser serialized it (`json_serialize_sql` of the body
+/// DuckDB keeps, a scalar one after `SELECT `), calls, or `Err` with how it reads a table, REQ-18
+/// `a_helper_macro_that_reads_a_table_is_refused_at_startup`.
+///
+/// This fails closed: a body DuckDB's parser could not serialize, or did as anything but one
+/// SELECT, is taken to read a table, as is a FROM item of a kind not in [`READS_NONE`]. A FROM
+/// item is found by its shape, whatever its kind: every table reference DuckDB 1.5.5 serializes
+/// has a `type` and a `sample`, and neither an expression (which has a `class`) nor a query node
+/// (which has `modifiers`) is one, measured on DuckDB 1.5.5 over every kind of FROM item, query
+/// node and modifier, and some forty kinds of expression. A `BASE_TABLE` anywhere is refused even
+/// so, and named, whatever its shape. A body's own CTE is a `BASE_TABLE`
+/// where it is read, and refused like a table: telling the two apart takes DuckDB's scoping
+/// rules (a CTE's own body, `WITH RECURSIVE`, the order of a WITH), which a check of benchy's
+/// could get wrong in the direction that lets a table through, and a subquery in FROM does what
+/// such a CTE does.
+fn macro_body(json: &str) -> Result<Calls, String> {
+    fn walk(v: &serde_json::Value, calls: &mut Calls) -> Result<(), String> {
+        match v {
+            serde_json::Value::Object(o) => {
+                if let Some(ty) = o.get("type").and_then(|t| t.as_str()) {
+                    let from_item = o.contains_key("sample")
+                        && !o.contains_key("class")
+                        && !o.contains_key("modifiers");
+                    match ty {
+                        "BASE_TABLE" => {
+                            let t = o.get("table_name").and_then(|t| t.as_str()).unwrap_or("");
+                            return Err(format!(
+                                "its body reads `{t}`, a table, a view or a CTE of its own, which \
+                                 benchy does not tell apart"
+                            ));
+                        }
+                        _ if from_item && !READS_NONE.contains(&ty) => {
+                            return Err(format!(
+                                "its body reads from a `{ty}`, which benchy does not know to read \
+                                 no table"
+                            ))
+                        }
+                        _ => {}
+                    }
+                    let name = |f: &serde_json::Value| {
+                        f["function_name"].as_str().map(str::to_ascii_lowercase)
+                    };
+                    if from_item && ty == "TABLE_FUNCTION" {
+                        let f = name(&o["function"])
+                            .ok_or("its body calls a table function benchy cannot name")?;
+                        calls.table_functions.insert(f);
+                    } else if o.contains_key("class") {
+                        // Any expression that names a function: a call, a window or an
+                        // aggregate. Only a helper's name among them counts.
+                        if let Some(f) = name(v) {
+                            calls.functions.insert(f);
+                        }
+                    }
+                }
+                o.values().try_for_each(|x| walk(x, calls))
+            }
+            serde_json::Value::Array(a) => a.iter().try_for_each(|x| walk(x, calls)),
+            _ => Ok(()),
+        }
+    }
+    let unread = || {
+        "benchy could not read its body as DuckDB parses it, so cannot tell that it reads none"
+            .to_string()
+    };
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|_| unread())?;
+    if v["error"] != serde_json::Value::Bool(false)
+        || v["statements"].as_array().map(Vec::len) != Some(1)
+    {
+        return Err(unread());
+    }
+    let mut calls = Calls::default();
+    walk(&v["statements"], &mut calls)?;
+    Ok(calls)
+}
+
+/// Of the helper macros, by folded name with each overload's body ([`macro_body`]), the ones
+/// that read a table, and how: a body that reads one, a table function that is neither
+/// [`TABLE_FREE`] nor a helper macro, or a call of a helper macro that reads one, at any depth.
+/// DuckDB expands a macro in the body of one that calls it, so the outer one reads what the
+/// inner one does, where it is called.
+fn macros_that_read(bodies: &[(String, Result<Calls, String>)]) -> HashMap<String, String> {
+    let helpers: HashSet<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+    let mut reading: HashMap<String, String> = HashMap::new();
+    for (name, body) in bodies {
+        let how = match body {
+            Err(how) => Some(how.clone()),
+            Ok(c) => c
+                .table_functions
+                .iter()
+                .filter(|f| !TABLE_FREE.contains(&f.as_str()) && !helpers.contains(f.as_str()))
+                .min()
+                .map(|f| format!("it calls table function `{f}`")),
+        };
+        if let Some(how) = how {
+            reading.entry(name.clone()).or_insert(how);
+        }
+    }
+    loop {
+        let mut more = Vec::new();
+        for (name, body) in bodies {
+            let Ok(c) = body else { continue };
+            if reading.contains_key(name) {
+                continue;
+            }
+            if let Some(h) = c
+                .functions
+                .iter()
+                .chain(&c.table_functions)
+                .filter(|f| reading.contains_key(*f))
+                .min()
+            {
+                more.push((
+                    name.clone(),
+                    format!("it calls helper `{h}`, which reads one"),
+                ));
+            }
+        }
+        if more.is_empty() {
+            return reading;
+        }
+        reading.extend(more);
+    }
+}
+
+/// Why helper macro `name`, which reads a table as `how` says, is refused.
+fn reads_a_table(name: &str, how: &str) -> String {
+    format!(
+        "helper `{name}` reads a table: {how}. DuckDB expands a macro inside the query that calls \
+         it, where a CTE of that query named like the table would stand in for it, so a helper \
+         macro may read none. Write it as a view (`CREATE VIEW {name} AS SELECT …`), which DuckDB \
+         binds on its own, for the agent to filter; a macro may compute from its arguments, with \
+         `range`, `generate_series`, `unnest` or VALUES."
+    )
 }
 
 /// The helpers' part of `describe`: one line each, as many as fit in `room` bytes as the client
@@ -1048,6 +1137,27 @@ mod tests {
         );
         assert!(pieces[1].text.ends_with("FROM t"), "{}", pieces[1].text);
         assert!(split("CREATE MACRO a() AS 'open").is_err());
+    }
+
+    #[test]
+    fn a_macro_body_benchy_cannot_read_reads_a_table() {
+        // Fails closed (REQ-18 `a_helper_macro_that_reads_a_table_is_refused_at_startup`): what
+        // DuckDB's parser did not serialize as exactly one statement is taken to read a table.
+        let one = r#"{"error":false,"statements":[{"node":{"type":"SELECT_NODE","modifiers":[],
+            "from_table":{"type":"EMPTY","alias":"","sample":null}}}]}"#;
+        assert_eq!(macro_body(one), Ok(Calls::default()));
+        for unread in [
+            "",
+            "not json",
+            r#"{"error":true,"error_message":"Parser Error"}"#,
+            r#"{"error":false,"statements":[]}"#,
+            r#"{"statements":[{"node":{}}]}"#,
+            one.replace("}]}", "},{\"node\":{}}]}").as_str(),
+        ] {
+            assert!(macro_body(unread).is_err(), "{unread}");
+        }
+        let unknown = one.replace("\"EMPTY\"", "\"SOME_NEW_REF\"");
+        assert!(macro_body(&unknown).unwrap_err().contains("SOME_NEW_REF"));
     }
 
     #[test]

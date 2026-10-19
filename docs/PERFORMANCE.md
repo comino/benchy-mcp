@@ -200,78 +200,33 @@ listing, 88 M, and is not done. A helper costs a query nothing over its SQL writ
 Finding the tables the helpers read (REQ-18 `a_table_a_helper_reads_stays_taken_after_a_detach`)
 adds one `json_serialize_plan` per view to the listing of views, and one `json_serialize_sql` of
 each helper macro's body to the listing of functions the job already makes, computed for the
-helpers' rows alone: no second `duckdb_functions()`. A session over `examples/data` with the
+helpers' rows alone: no second `duckdb_functions()`. That body is now read for whether it reads
+a table at all (REQ-18 `a_helper_macro_that_reads_a_table_is_refused_at_startup`), from the
+same column. A session over `examples/data` with the
 three example helpers, start to end with no query, every process: 1,252 M at `cdae07a`, 1,264 M
 with the change (seven runs each, medians; the runs spread over 1,226–1,481 M).
 
-### A CTE named like a table a helper macro reads
+### No check of the agent's SQL for a helper's CTE
 
-REQ-18 `a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads` looks at every query before it
-runs. Without helper macros it is one test of an empty set. With them, the query's text is
-searched for a WITH and for one of the names, ASCII case folded, and only a query with both is
-parsed, by DuckDB's `json_serialize_sql` on the agent's connection; a batch that also holds a
-statement other than a SELECT is parsed again from its WITH. Measured with `perf stat -e
-instructions:u` over a whole `benchy-mcp examples/data` session, every process of it, 1,000
-calls of each, three runs, medians, a session with no call subtracted; `main` at `3a85182`
-against the change, without helpers and with the three example ones (`hours_above` reads
-`meters`):
+0.2.0 read every batch, beside helper macros, for a CTE named like a table a macro reads, and
+parsed one with a WITH and such a name (about 0.67 M a call, measured then). A helper macro now
+reads no table, so that check is gone (REQ-18
+`a_helper_macro_that_reads_a_table_is_refused_at_startup`). Measured with `perf stat -e
+instructions:u` over a whole `benchy-mcp examples/data` session, every process, 1,000 calls,
+five runs, medians, a session with no call subtracted; the 0.2.0 binary with its example helpers
+(`hours_above` read `meters`) and with this change's (no macro reads a table), against the
+change:
 
-| Each call | No helpers, `main` | No helpers, change | Helpers, `main` | Helpers, change |
-|---|---|---|---|---|
-| `SELECT count(*) FROM meters WHERE …` | 1.38 M | 1.35–1.37 M | 1.37 M | 1.36 M |
-| `WITH d AS (SELECT * FROM meters) SELECT …` | 1.89 M | 1.86–1.88 M | 1.90 M | 2.56 M |
-| `WITH d AS (SELECT 1) SELECT … FROM meters, d` | | | 1.71 M | 2.38 M |
-| `CREATE TEMP TABLE t AS WITH d AS (…) SELECT …; DROP TABLE t` | | | 13.5 M | 14.5 M |
+| | 0.2.0, its helpers | 0.2.0, these helpers | change |
+|---|---|---|---|
+| A session, start to end, no call | 1,515 M | 1,312 M | 1,336 M |
+| `WITH d AS (SELECT * FROM meters) SELECT dewpoint(20, 50) …` | 6.59 M | 5.92 M | 5.98 M |
+| `SELECT count(*) FROM meters WHERE …` | 1.24 M | 1.43 M | 1.36 M |
 
-So a query pays about 0.67 M instructions, a fifth of a millisecond here, when it has a WITH and
-names a table a helper macro reads, CTE or not; a CREATE TABLE AS with one about 0.9 M, its whole
-batch parsed and refused as no SELECT, then its query. Every other query pays nothing measurable.
-Parsing every query instead would put the 0.67 M on all of them.
-
-**Every statement kind** (REQ-18
-`a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`). The check above read
-a statement other than a SELECT only from a WITH to a `;` or the end, so a WITH in a subquery of
-an UPDATE, DELETE, MERGE or INSERT was parsed and never read. Now DuckDB is given the text from
-each WITH and says where its query ends: a syntax error's position is cut and parsed again, and
-a text read whole but not as SELECTs is cut at a `;` or ahead of the statement keyword after its
-CTEs. A WITH costs one to three parses. Measured the same way, 500 calls of each, three runs,
-medians, `main` at `ff352ed` against the change:
-
-| Each call | No helpers, `main` | No helpers, change | Helpers, `main` | Helpers, change |
-|---|---|---|---|---|
-| `UPDATE m SET v = v + 1 WHERE k = 1` | 1.68 M | 1.70 M | 1.73 M | 1.75 M |
-| `UPDATE m SET v = (WITH d AS (SELECT * FROM meters) …)` | 2.80 M | 2.77 M | 3.65 M | 4.00 M |
-| `DELETE FROM m WHERE k = (WITH d AS (… FROM meters) …)` | 3.10 M | 3.08 M | 4.03 M | 4.44 M |
-| `MERGE INTO m USING (WITH d AS (… FROM meters) …) s …` | 3.25 M | 3.19 M | 4.20 M | 4.56 M |
-| `WITH d AS (… FROM meters) UPDATE m …` | 2.56 M | 2.59 M | 3.45 M | 3.85 M |
-| `INSERT INTO m WITH d AS (… FROM meters) SELECT …` | 1.77 M | 1.80 M | 2.76 M | 2.79 M |
-
-Without helpers nothing changed beyond the noise (±0.06 M). With them, a statement with a WITH
-and a matching name already paid about 0.9 M on `main` for parses that found nothing; reading
-its CTEs costs about 0.35–0.4 M more, a tenth of a millisecond here, and an INSERT whose query
-runs to the end nothing. A statement without a WITH or a matching name is not parsed at all.
-
-**Only beside a helper call, and no SQL from a string** (REQ-18
-`a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`,
-`sql_run_from_a_string_is_refused_beside_helper_macros`). With helper macros, every batch's
-folded text is now also searched for a call of `query` or `json_execute_serialized_sql`, and a
-batch with a WITH and a matching name is parsed only when it names a helper macro, one of the
-agent's macros that calls one, or `view`, `macro` or `function`. Measured the same way, 1,000
-calls of each, three runs, medians, a session with no call subtracted, `main` at `2e5400a`
-against the change, the three example helpers:
-
-| Each call | No helpers, `main` | No helpers, change | Helpers, `main` | Helpers, change |
-|---|---|---|---|---|
-| `SELECT count(*) FROM meters WHERE …` | 1.41 M | 1.41 M | 1.37 M | 1.41 M |
-| `WITH d AS (SELECT * FROM meters) SELECT …` | 1.47 M | 1.70 M | 2.23 M | 1.52 M |
-| `WITH d AS (… FROM meters) SELECT … FROM d, hours_above(…)` | | | 7.77 M | 7.92 M |
-
-Sessions vary by ±0.15 G here, so ±0.15 M a call; without helpers the code is one store, and
-the 0.23 M is that noise. With them, a WITH that names a taken table and calls no helper is no
-longer parsed: about 0.7 M less. One that calls a helper pays the extra look at its text, within
-the noise. The agent's macros are read from the catalog only after a batch that may have made
-one, once until the next: `duckdb_functions()` costs about 0.1–0.2 G that once (a session of
-`CREATE MACRO` and one such WITH, 1.56 G on `main`, 1.67 G with the change, medians).
+A batch that calls a helper macro beside a WITH naming a table a macro read paid about 0.6 M for
+its parse, and no longer does; the rest is within the ±0.15 M a call and ±0.15 G a session these
+sessions vary by. The check that a macro reads no table adds nothing measurable to startup: it
+reads the column of `json_serialize_sql` the job already computed.
 
 ## The profile's claims, made true: what it costs
 

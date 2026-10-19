@@ -41,8 +41,9 @@
 # `sql = """…"""`; one of the two. Read at startup and fixed for the session: the agent cannot
 # drop, change or shadow one, and no call adds one. A helper named like a DuckDB built-in, a macro
 # named like a word DuckDB's parser reads itself (`coalesce`, `try`), one that reads a file, the network or an extension, one that keeps an ENUM, or one that reads a table no
-# source here provides stops startup. With `benchy-mcp host --config`, a helper over a table the host has not attached
-# yet waits for it. Name tables unqualified. docs/DIALECT.md says how to write a table macro.
+# source here provides stops startup, and so does a macro that reads any table: write that as a
+# view. With `benchy-mcp host --config`, a view over a table the host has not attached yet waits
+# for it. Name tables unqualified.
 [helpers]
 file = "./helpers.sql"
 

@@ -6,6 +6,26 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+Changed behaviour:
+
+- **A helper macro may not read a table** (#58). DuckDB expands a macro inside the caller's
+  query, where a CTE of the caller's named like a table the macro reads stands in for it; 0.2.0
+  guarded that by reading every batch for such a CTE. Now a helper macro whose body reads a
+  table, a helper view, or a table function other than `range`, `generate_series` and `unnest`,
+  or calls a helper macro that does, stops startup with a message naming it
+  (`a_helper_macro_that_reads_a_table_is_refused_at_startup`). A macro over a table not attached
+  yet no longer waits; it is refused the same way. Views and macros that compute from their
+  arguments are unchanged. **To migrate**, write a table-reading macro as a view and let the
+  agent filter it: `CREATE MACRO hours_above(id, kw) AS TABLE … FROM meters m WHERE m.meter =
+  id …` becomes `CREATE VIEW reading_spans AS SELECT meter, observed_at, power_kw, lead(…) … FROM
+  meters`, and the agent writes the `WHERE meter = 'lab'` and the sum. `examples/helpers.sql`
+  does so.
+- With that, the agent's SQL is no longer checked against the helpers: a CTE named like a table
+  a helper reads is never refused, and `query()` and `json_execute_serialized_sql` run beside
+  helpers as without them. This fixes the refusal of `query (` inside a string literal (#35,
+  `a_string_that_looks_like_sql_from_a_string_runs_beside_helpers`) and removes the check that
+  let a batch through unread when its parser could not be prepared (#36).
+
 ## [0.2.0] — 2026-10-17
 
 Fixes from a review of 0.1.0. Still an experimental prototype: **some of these change what a
