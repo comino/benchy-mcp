@@ -211,13 +211,8 @@ pub fn run() -> ! {
                 },
                 None => Reply::err("the bench has not been opened"),
             },
-            Request::Helpers {
-                file,
-                shown,
-                reads,
-                macro_reads,
-            } => match &mut bench {
-                Some(ws) => match ws.put_helpers(Path::new(&file), shown, &reads, &macro_reads) {
+            Request::Helpers { file, shown, reads } => match &mut bench {
+                Some(ws) => match ws.put_helpers(Path::new(&file), shown, &reads) {
                     Ok(()) => Reply::ok(""),
                     Err(e) => Reply::fail("E_DATA", e.to_string()),
                 },
