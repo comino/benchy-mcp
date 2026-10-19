@@ -175,6 +175,44 @@ At `--deadline 3 --hard-grace 1` the same query with `c1 <> 'zz'` in place of th
 work in the same batch the batch finishes and the agent's tables stay. A query that quotes no
 string, or names no text column, pays nothing: the note returns before it reads.
 
+### A query read only as far as it is kept
+
+A query's result was built whole (`duckdb_execute_prepared`) before its first 2,000 rows were
+kept, so a `SELECT` with no `LIMIT` paid for every row it made. Now a `SELECT` is streamed
+(`duckdb_execute_prepared_streaming`), read chunk by chunk until the rows kept are full, and its
+result destroyed before the next statement (`a_query_without_a_limit_reads_no_further_than_it_keeps`).
+Every other kind runs to completion as before.
+
+Measured over `benchy-mcp <dir> --memory 384MB` through MCP, one Parquet table of 10,000,000
+rows (`ts`, `meter`, `kw`), `perf stat -e instructions:u` across every process, the session with
+no call subtracted, medians of three runs, `a961d81` against the change. The engine's peak is
+its `VmHWM`, read before and after the calls:
+
+| Each call | Before | After | Reading on to the end (not taken) |
+|---|---|---|---|
+| `SELECT * FROM readings` | 0.63 G, 150 ms | 23 M, 7–18 ms | 0.88 G, 178 ms |
+| its engine's peak resident memory, idle 45 MiB | 402–424 MiB | 51–60 MiB | 92 MiB |
+| `SELECT * FROM readings LIMIT 100` | 45 M | 41 M | |
+
+The `LIMIT` query is the same within the noise: the session's own load varied by 1.3 G between
+runs, about 6 M a call at 200 calls. The ceiling at that budget is 622 MiB; a four-column
+`range` of 10,000,000 rows took the engine up by 488 MB, and 2.3 MB streamed
+(`a_query_without_a_limit_holds_no_more_than_it_keeps`). At `--memory 128MB` a trillion-row
+`range` with a 100-byte string passed the ceiling in 0.9 s, and the engine was killed and
+rebuilt; streamed, it answers at once (`a_query_without_a_limit_reads_no_further_than_it_keeps`).
+
+A streamed query still runs ahead of its reader: DuckDB executes until about 1 MB of the result
+is buffered (`streaming_buffer_size`), counted by the width of the values' types, before it hands
+the stream over, and an error in that much is raised by the execution. Errors and interrupts
+past it come from a fetch (`an_error_in_the_rows_kept_still_fails_the_query`,
+`a_deadline_while_rows_are_read_is_the_deadline`).
+
+Reading on to the end, fetching every chunk and dropping it, would have raised an error DuckDB
+raises only in rows past the ones kept. It was built and measured and not taken: it costs more
+than building the result whole, since every chunk is still made and flattened, and a query over
+more rows than the deadline can read would be a deadline error instead of its first 2,000 rows
+(`an_error_past_the_rows_kept_is_not_raised`).
+
 ## Helpers
 
 REQ-18's helpers. Measured with `perf stat -e instructions:u` over a whole `benchy-mcp

@@ -6,6 +6,15 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **A `SELECT` with no `LIMIT` no longer builds its whole result.** It is streamed and read only
+  as far as the 2,000 rows that are kept, so a `SELECT *` over 10,000,000 rows costs 23 M
+  instructions instead of 0.63 G, and the engine's peak memory is 51–60 MiB instead of
+  402–424 MiB (45 MiB idle). A wider result, or a smaller `--memory`, had put the engine past
+  its ceiling, which cost the agent its tables (#53). The reply still says `of 2000+`. Every
+  other kind of statement runs to completion. Changed behaviour: an error DuckDB would raise
+  only in rows past the ones read, such as a cast that fails at row 5,000,000, is no longer
+  raised; the answer is the rows kept. An error in the rows read still fails the query.
+
 ## [0.2.0] — 2026-10-17
 
 Fixes from a review of 0.1.0. Still an experimental prototype: **some of these change what a

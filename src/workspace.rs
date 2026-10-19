@@ -1788,9 +1788,36 @@ impl Workspace {
                         break;
                     }
                 }
+                // REQ-10 `a_query_without_a_limit_reads_no_further_than_it_keeps`. A SELECT is
+                // streamed and read only as far as its rows are kept (`Keep`); its result is
+                // destroyed before the next statement, which ends its execution. Built whole,
+                // a `SELECT *` over 10,000,000 rows cost the result before 2,000 rows of it were
+                // kept: through MCP at `--memory 384MB`, 0.63 G instructions and 150 ms a call,
+                // and the engine's peak resident memory 45 → 402–424 MiB, at a ceiling of
+                // 622 MiB; streamed, 23 M and 7–18 ms, and 45 → 51–60 MiB
+                // (`a_query_without_a_limit_holds_no_more_than_it_keeps`).
+                //
+                // The price is that an error DuckDB would raise only in rows past the ones kept
+                // is never raised (`an_error_past_the_rows_kept_is_not_raised`): the answer is
+                // the rows kept, a prefix of what the query makes, and says more exist. Reading
+                // the rest within the deadline to find such an error was measured and not taken:
+                // fetched and dropped, the same query cost 0.88 G and 178 ms a call, more than
+                // building the result whole, for a query whose rows past the 2,000th the agent
+                // never sees; and a query over more rows than the deadline can read would have
+                // become a deadline error instead of an answer. An error in the rows that are
+                // read, or the watchdog's interrupt while they are, still fails the statement
+                // (`an_error_in_the_rows_kept_still_fails_the_query`,
+                // `a_deadline_while_rows_are_read_is_the_deadline`). Every other kind runs to
+                // completion as before: DML, a CREATE … AS, and the CREATE TYPE of a dynamic
+                // PIVOT have their effects in full.
+                let streamed = kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT
+                    && arrow_reads(self.agent, prep);
                 let mut r: ffi::duckdb_result = std::mem::zeroed();
-                let ok =
-                    ffi::duckdb_execute_prepared(prep, &mut r) == ffi::duckdb_state_DuckDBSuccess;
+                let ok = if streamed {
+                    ffi::duckdb_execute_prepared_streaming(prep, &mut r)
+                } else {
+                    ffi::duckdb_execute_prepared(prep, &mut r)
+                } == ffi::duckdb_state_DuckDBSuccess;
                 if !ok {
                     let e = ffi::duckdb_result_error(&mut r);
                     let msg = if e.is_null() {
@@ -1811,8 +1838,21 @@ impl Workspace {
                 }
                 let id = format!("{}{}", self.result_prefix, self.next_result_id);
                 let result = collect(&mut r, &id, cap);
+                // A streamed result stopped at the rows kept is destroyed here, before the next
+                // statement: that is what ends its execution.
                 ffi::duckdb_destroy_result(&mut r);
                 ffi::duckdb_destroy_prepare(&mut prep);
+                let result = match result {
+                    Ok(result) => result,
+                    // Only a streamed result fails here: its error, the watchdog's interrupt
+                    // among them, comes with the fetch of a chunk rather than the execution.
+                    // A SELECT is never in a transaction of benchy's, so there is none to settle.
+                    Err(msg) => {
+                        let timed_out = watchdog.take().is_some_and(|w| finish(&done, w));
+                        failure = Some(fault(self, timed_out, cap, mine, &msg, sql));
+                        break;
+                    }
+                };
                 if create || alter {
                     // Under the watchdog's lock, so it cannot fire into the check or the COMMIT:
                     // an interrupted COMMIT that had committed was reported as stopped by the
@@ -2844,13 +2884,69 @@ impl Drop for Alarm {
 ///
 /// Arrow is also the direction REQ-6 already points, and arrow-rs renders every type correctly
 /// rather than us hand-decoding two dozen physical layouts.
-unsafe fn collect(r: &mut ffi::duckdb_result, id: &str, cap: &crate::result::Caps) -> QueryResult {
+///
+/// `Err` is the error a streamed result raised as its rows were read (`Workspace::work`).
+unsafe fn collect(
+    r: &mut ffi::duckdb_result,
+    id: &str,
+    cap: &crate::result::Caps,
+) -> Result<QueryResult, String> {
     match collect_arrow(r, id, cap) {
         Some(q) => q,
+        // Never given a stream: a statement is streamed only once `arrow_reads` says this
+        // reader can read it. On DuckDB 1.5.5 the legacy reader builds a stream whole outside
+        // any `try`, and an error in building it is a C++ exception through the C API, which
+        // aborts the process: a test that handed it a stream that failed at row 2,500,000 was
+        // killed by SIGABRT ("Rust cannot catch foreign exceptions").
+        None if ffi::duckdb_result_is_streaming(*r) => {
+            Err("the result could not be read as Arrow".into())
+        }
         // Nothing has been fetched yet when this returns `None`, so the legacy path is still
         // usable. It renders less, but it renders.
-        None => collect_legacy(r, id, cap),
+        None => Ok(collect_legacy(r, id, cap)),
     }
+}
+
+/// Whether a prepared statement's result can be read as Arrow, decided from its column types
+/// before it runs, as `collect_arrow` decides from the result's: only such a statement is
+/// streamed, so the legacy reader is never handed a stream (`collect`). No SQL is known for
+/// which it cannot, as no SQL is known that sends a result to the legacy reader.
+unsafe fn arrow_reads(con: ffi::duckdb_connection, prep: ffi::duckdb_prepared_statement) -> bool {
+    use duckdb::arrow::ffi::FFI_ArrowSchema;
+    let cols = ffi::duckdb_prepared_statement_column_count(prep) as usize;
+    if cols == 0 {
+        return false;
+    }
+    let owned: Vec<CString> = (0..cols)
+        .map(|c| CString::new(format!("c{c}")).unwrap())
+        .collect();
+    let mut names: Vec<*const std::os::raw::c_char> = owned.iter().map(|n| n.as_ptr()).collect();
+    let mut types: Vec<ffi::duckdb_logical_type> = (0..cols)
+        .map(|c| ffi::duckdb_prepared_statement_column_logical_type(prep, c as u64))
+        .collect();
+    let mut opts: ffi::duckdb_arrow_options = ptr::null_mut();
+    ffi::duckdb_connection_get_arrow_options(con, &mut opts);
+    let mut schema = FFI_ArrowSchema::empty();
+    let failed = arrow_error(ffi::duckdb_to_arrow_schema(
+        opts,
+        types.as_mut_ptr(),
+        names.as_mut_ptr(),
+        cols as u64,
+        &mut schema as *mut FFI_ArrowSchema as *mut ffi::ArrowSchema,
+    ));
+    for t in &mut types {
+        ffi::duckdb_destroy_logical_type(t);
+    }
+    ffi::duckdb_destroy_arrow_options(&mut opts);
+    failed.is_none()
+}
+
+/// The error a result holds, if it holds one. A streamed result's fetch answers an error, the
+/// watchdog's interrupt among them, with no chunk, as it answers the end of the rows; this is
+/// what tells them apart (`an_error_in_the_rows_kept_still_fails_the_query`).
+unsafe fn result_error(r: &mut ffi::duckdb_result) -> Option<String> {
+    let e = ffi::duckdb_result_error(r);
+    (!e.is_null()).then(|| CStr::from_ptr(e).to_string_lossy().into_owned())
 }
 
 /// The retention rule, in one place, so the Arrow and legacy readers cannot drift apart on it:
@@ -2920,6 +3016,7 @@ unsafe fn collect_legacy(
     cap: &crate::result::Caps,
 ) -> QueryResult {
     let cols = ffi::duckdb_column_count(r) as usize;
+    // Never a stream (`collect`): of a stream, DuckDB 1.5.5 counts 0 rows.
     let rows = ffi::duckdb_row_count(r) as usize;
     let mut names = Vec::with_capacity(cols);
     for c in 0..cols {
@@ -3210,7 +3307,7 @@ unsafe fn collect_arrow(
     r: &mut ffi::duckdb_result,
     id: &str,
     cap: &crate::result::Caps,
-) -> Option<QueryResult> {
+) -> Option<Result<QueryResult, String>> {
     use duckdb::arrow::array::{Array, StructArray};
     use duckdb::arrow::ffi::{from_ffi, FFI_ArrowArray, FFI_ArrowSchema};
     use duckdb::arrow::util::display::{ArrayFormatter, ArrayFormatterFactory, FormatOptions};
@@ -3273,6 +3370,11 @@ unsafe fn collect_arrow(
     'chunks: loop {
         let mut chunk = ffi::duckdb_fetch_chunk(*r);
         if chunk.is_null() {
+            if let Some(e) = result_error(r) {
+                let mut opts = opts;
+                ffi::duckdb_destroy_arrow_options(&mut opts);
+                return Some(Err(e));
+            }
             break;
         }
         let mut array = FFI_ArrowArray::empty();
@@ -3335,7 +3437,7 @@ unsafe fn collect_arrow(
     let mut opts = opts;
     ffi::duckdb_destroy_arrow_options(&mut opts);
 
-    Some(QueryResult {
+    Some(Ok(QueryResult {
         result_id: id.to_string(),
         columns: column_names,
         rows: keep.rows,
@@ -3344,7 +3446,7 @@ unsafe fn collect_arrow(
         note: None,
         cut_values: keep.cut,
         sql: None,
-    })
+    }))
 }
 
 /// Dates and timestamps, rendered as DuckDB's own `::VARCHAR` renders them, at the top level of
@@ -3717,6 +3819,42 @@ mod tests {
         };
         assert_eq!(seen, "UTC", "a connection opened after the bench's");
         let _ = bench.finish();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_common_type_is_streamed() {
+        // A SELECT is streamed only where `arrow_reads` says its result reads as Arrow; one
+        // that does not is built whole, as every result was. So a type it wrongly turns away
+        // costs the whole result again (`a_query_without_a_limit_reads_no_further_than_it_keeps`).
+        // A sweep of the types `every_common_type_renders_as_something_a_reader_can_use` renders,
+        // and the three Arrow carries unfaithfully.
+        let dir = std::env::temp_dir().join(fresh_name("benchy-arrow-reads"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = Workspace::open_sealed(&dir, "1GB").unwrap();
+        for sql in [
+            c"SELECT 1::TINYINT, 1::SMALLINT, 1::INTEGER, 1::BIGINT, 1::HUGEINT, 1::UBIGINT, \
+              1::UHUGEINT, 1.5::FLOAT, 1.5::DOUBLE, 1.5::DECIMAL(18,3), 1.5::DECIMAL(38,3)",
+            c"SELECT 'x', 'x'::BLOB, true, NULL, uuid(), INTERVAL 1 DAY",
+            c"SELECT DATE '2026-01-01', TIME '01:02:03', TIMESTAMP '2026-01-01', \
+              TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMP_S '2026-01-01', \
+              TIMESTAMP_MS '2026-01-01', TIMESTAMP_NS '2026-01-01'",
+            c"SELECT [1, 2], {'a': 1}, MAP {'k': 1}, [1, 2]::INTEGER[2], \
+              union_value(n := 1), 'a'::ENUM('a', 'b')",
+            c"SELECT '0101'::BIT, 1::BIGNUM, TIMETZ '01:02:03+01'",
+        ] {
+            let ok = unsafe {
+                let mut prep: ffi::duckdb_prepared_statement = ptr::null_mut();
+                let prepared = ffi::duckdb_prepare(ws.agent, sql.as_ptr(), &mut prep)
+                    == ffi::duckdb_state_DuckDBSuccess;
+                assert!(prepared, "{sql:?}");
+                let ok = arrow_reads(ws.agent, prep);
+                ffi::duckdb_destroy_prepare(&mut prep);
+                ok
+            };
+            assert!(ok, "{sql:?} is built whole");
+        }
+        drop(ws);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
