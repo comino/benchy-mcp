@@ -190,6 +190,9 @@ fn resident(pid: u32) -> u64 {
     kb * 1024
 }
 
+/// There is no lower "idle" ceiling, because what an engine keeps between requests is its
+/// tables, inside DuckDB's budget, and memory its allocator gives back by itself: a hash
+/// aggregate at a 512 MB budget left the engine at 274 MB, and at 120 MB a second later.
 #[test]
 #[cfg(target_os = "linux")]
 fn an_engine_left_past_its_memory_ceiling_is_rebuilt_at_once() {
@@ -331,6 +334,8 @@ fn result_ids(body: &str) -> Vec<String> {
         .collect()
 }
 
+/// The prefix is 32 bits (`3fa9c1b2-7`), so a stale id resolves in another session once in
+/// four billion tries.
 #[test]
 fn two_sessions_never_issue_the_same_result_id() {
     // REQ-10. Ids never repeat within a session, and every session numbered from `r1`: a host

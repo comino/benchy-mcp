@@ -1,6 +1,7 @@
-# Probe 8: which decoder for a compressed HTTP response (docs/PERFORMANCE.md, item 3).
-# A package of its own, not a bin of the spike: each decoder sits behind a feature so that each can
-# be built alone, and its build time, peak memory and binary size measured without DuckDB's.
+# Probe 8: which decoder for a compressed HTTP response (docs/history/PERFORMANCE-rounds.md, round 1
+# item 3). A package of its own, not a bin of the spike: each decoder sits behind a feature so that
+# each can be built alone, and its build time, peak memory and binary size measured without
+# DuckDB's.
 [package]
 name = "probe8_decompress"
 version = "0.0.0"

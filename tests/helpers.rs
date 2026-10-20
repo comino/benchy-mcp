@@ -202,6 +202,8 @@ fn unsandboxed() -> (Workspace, PathBuf) {
     (ws, dir)
 }
 
+/// Built-ins are DuckDB's own functions, table functions and views, read from its catalog through
+/// `system.main`. Each refusal says why.
 #[test]
 fn a_helper_that_shadows_a_builtin_is_refused_at_startup() {
     // DuckDB's own catalog says what is built in, read through `system.main`: a scalar function,
@@ -233,6 +235,11 @@ fn a_helper_that_shadows_a_builtin_is_refused_at_startup() {
     );
 }
 
+/// The string readers are DuckDB 1.5.5's table functions that read the bench by a string:
+/// `query_table('meters')`, `query('SELECT … FROM meters')`, `pragma_table_info('meters')`,
+/// `duckdb_table_sample('meters')`. A view over `query_table` or `query` stays allowed when its
+/// bound plan no longer calls them: the plan is bound to the scans they make, so its tables are
+/// found.
 #[test]
 fn a_helper_that_names_a_table_in_a_string_is_refused_at_startup() {
     // The tables a helper reads are taken from the agent (REQ-18
@@ -284,6 +291,17 @@ fn a_helper_that_names_a_table_in_a_string_is_refused_at_startup() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The body is read as DuckDB's parser serializes it (`json_serialize_sql` of the body DuckDB
+/// keeps), which is what DuckDB expands into the caller's query, and the check fails closed: a
+/// body that does not serialize as one SELECT, a FROM item of a kind benchy does not know to read
+/// no table, a `BASE_TABLE` or a `SHOW_REF` anywhere, and a table function other than `range`,
+/// `generate_series` and `unnest` each count as reading one. Covered: a table macro, the FROM-less
+/// CTE of its arguments, a scalar subquery, nested subqueries, `IN` and `EXISTS`, a CTE of the
+/// body over a table, a join, a set operation, a LATERAL subquery, one overload of several, a
+/// helper view, a table no source provides, `duckdb_tables()`, `query_table(t)`, `DESCRIBE`; and
+/// a macro that calls such a helper macro, scalar or table, at any depth, each named. A CTE of
+/// the body's own is read as a table too, a table-free one and `WITH RECURSIVE` included: telling
+/// it from a table takes DuckDB's scoping rules, and a subquery in FROM does the same.
 #[test]
 fn a_helper_macro_that_reads_a_table_is_refused_at_startup() {
     // DuckDB 1.5.5 expands a macro, scalar or table, inside the caller's query, so a table its
@@ -424,6 +442,9 @@ fn a_helper_macro_that_reads_a_table_is_refused_at_startup() {
     }
 }
 
+/// A CTE of the agent's named like the view's table, like `range` or like a helper table macro
+/// changes none of their answers: measured on DuckDB 1.5.5, a table function is no table a CTE
+/// can take.
 #[test]
 fn a_table_free_helper_macro_and_a_view_serve() {
     // What stays: views, scalar macros over their arguments, and table macros over their
@@ -536,6 +557,9 @@ fn a_helper_named_like_a_parser_keyword_is_refused_at_startup() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An object of the agent's created or renamed into a helper's name is refused and undone (REQ-9's
+/// check), and a `CREATE OR REPLACE`, `DROP`, `ALTER`, `COMMENT` or `CREATE` in the helpers'
+/// catalog by its qualified name is refused by DuckDB.
 #[test]
 fn an_agent_cannot_replace_or_shadow_a_helper() {
     let (mut s, dir) = start(EXAMPLE, &[]);
@@ -634,6 +658,11 @@ fn helpers_survive_a_rebuild() {
     }
 }
 
+/// A helper that keeps an ENUM — a view with an ENUM column, or a macro whose body spells one — is
+/// held to the agent's rule (`the_agent_keeps_no_enum`: DuckDB holds an ENUM's values outside its
+/// memory budget). A macro that would read a file only when called calls a table function that
+/// is not table-free, and is refused at startup as a macro that reads a table; the agent's own
+/// such macro is refused by the engine's lock when called.
 #[test]
 fn a_helper_cannot_reach_outside_the_bench() {
     // Made under the engine's lock, in a loader confined to its staging directory: one that

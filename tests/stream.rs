@@ -298,6 +298,8 @@ fn a_descriptor_is_taken_only_by_a_streamed_attach() {
     // From before the pipe is made until its writer is told: no other test of this binary starts
     // a process meanwhile, which would hold a copy of the read end until it execs (#48,
     // `common::no_forks`). Every process start in this binary goes through `common::spawn`.
+    // Without that, a process not yet exec'd held a copy of the read end, and the write that
+    // proves the descriptor closed went through now and then.
     let quiet = common::no_forks();
     let (read, mut write) = pipe();
     let r = s.call("ping", json!({}), &[read.as_raw_fd()]);

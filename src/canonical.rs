@@ -21,8 +21,8 @@
 //! whole load, where `make_timestamptz(epoch_us(ts))` — the same instant, without ICU's calendar
 //! — cost 0.01 s. That one gives NULL for `infinity` and `-infinity`, so ICU's cast is kept as
 //! the fallback for the rows it returns nothing for: 47 M instructions where it cost 29 M, where
-//! `timezone` costs 1,269 M (docs/PERFORMANCE.md, "Infinite timestamps kept on load";
-//! REQ-15 `an_infinite_timestamp_is_kept_from_every_source`).
+//! `timezone` costs 1,269 M (docs/history/PERFORMANCE-rounds.md, "Infinite timestamps kept on
+//! load"; REQ-15 `an_infinite_timestamp_is_kept_from_every_source`).
 
 /// The zone a zone-less timestamp is read in when its source names none.
 pub const UTC: &str = "UTC";

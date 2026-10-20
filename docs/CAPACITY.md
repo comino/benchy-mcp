@@ -125,7 +125,7 @@ stage held in memory whole. zstd moves 5.9
 times fewer bytes than none on the synthetic table and 10 times fewer on the meter data.
 Decoding it (C libzstd) cost benchy 5.17 against 4.58 s of CPU here, where on `35ad7db` the order
 was the other way (6.17 against 6.48 s): the difference is inside what three runs on a shared
-machine resolve. What zstd costs is ClickHouse's CPU to compress (docs/PERFORMANCE.md, round 1 item 3), which is why an unset
+machine resolve. What zstd costs is ClickHouse's CPU to compress (docs/history/PERFORMANCE-rounds.md, round 1 item 3), which is why an unset
 `compression` is `none` for a server on loopback and zstd for any other. The table above sets
 `compression` on every built-in row.
 
@@ -142,10 +142,10 @@ JSON file, of any size since R4-2 (up to 64 MiB before, R2-1); since 2026-10-12 
 spills past it to the loader's staging directory, so the loader's peak no longer grows with the
 file past the cap (`a_large_csv_is_not_held_in_memory_while_it_is_staged`), for about a tenth
 more CPU where it spills (4.5% more instructions at the harness's 10M-row CSV,
-docs/PERFORMANCE.md), and the harness's 10M-row CSV now peaks at 384 MB in the loader where it
+docs/history/PERFORMANCE-rounds.md), and the harness's 10M-row CSV now peaks at 384 MB in the loader where it
 took 512 MB; a 10M-row NDJSON file, 351 MB, spilling 134 MB, where read straight in it took
 132 MB and 2 s longer to its first `describe` (docs/PERFORMANCE.md R4-2). A Parquet file is read
 straight into its table, without the stage, and its loader peaked at 584 MB at 10,000,000 rows before that
-(docs/PERFORMANCE.md, round 1 item 4). A paged JSON source holds at most four pages between its
+(docs/history/PERFORMANCE-rounds.md, round 1 item 4). A paged JSON source holds at most four pages between its
 fetch and its table, besides the one each side has (R4-3): its loader peaked at 69 MB at
 1,000,000 rows of 10,000-row pages, 63 MB when it read a page at a time.

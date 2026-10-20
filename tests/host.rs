@@ -426,7 +426,9 @@ fn a_host_lowers_the_loader_ceiling_and_cannot_raise_it() {
     // REQ-8. The operator sets the loader memory ceiling, on the command line or in the config;
     // from protocol 6 `hello` reports it, and a host may lower it for its session, never raise
     // it. Lowered, it is the one enforced: past it the attach is `E_LIMIT`, saying what
-    // happened, and nothing is attached.
+    // happened, and nothing is attached. Before protocol 6 it is not reported, since a host may
+    // send `limits` back as it got them. A channel stream whose loader is killed for it loses
+    // its place and closes the channel (`a_channel_that_loses_its_place_is_closed_and_says_so`).
     const MB: u64 = 1_000_000;
     let dir = unique("host-loader-ceiling");
     let wide = wide_readings(&dir.join("wide.arrows"), 300_000, 400);
@@ -1155,7 +1157,9 @@ fn a_reply_the_reader_cannot_write_ends_the_session() {
     // `hello`, `ping` and a second `hello` are answered by the reader itself, not the call loop.
     // A host that has closed its end of the replies is gone whichever of them it was sent: the
     // session ends, though its stdin is still open, as it does for a query's reply
-    // (`a_host_that_has_gone_is_not_worked_for`).
+    // (`a_host_that_has_gone_is_not_worked_for`). These replies were written and the failure
+    // dropped, so a host that had gone kept its session, engine and warden running for as long
+    // as its stdin stayed open.
     let gone = |h: &mut Host| drop(std::mem::replace(&mut h.stdout, spare_stdout()));
     let mut h = Host::spawn(&[]);
     gone(&mut h);
@@ -2276,6 +2280,8 @@ const HOST_HELPERS: &str = "-- Rows per meter.\n\
     -- Twice a number.\n\
     CREATE MACRO twice(x) AS 2 * x;\n";
 
+/// `describe` says what the helper waits for and calling it says so; detached again, the view
+/// says which table it misses. A macro over a missing table reads a table, and is refused.
 #[test]
 fn a_view_over_a_missing_table_errors_until_attached() {
     // REQ-18: a host's helpers are made before its first attach. One that reads a table the host
@@ -2391,6 +2397,10 @@ fn wedge() -> String {
     format!("WITH {} SELECT m FROM l18", ctes.join(", "))
 }
 
+/// Taken by any spelling, created or renamed into. DuckDB finds the tables, benchy parses no SQL:
+/// a view's bound plan (`json_serialize_plan`, before the optimizer), and the table a waiting view
+/// waits for. A helper macro reads none
+/// (`a_helper_macro_that_reads_a_table_is_refused_at_startup`).
 #[test]
 fn a_table_a_helper_reads_stays_taken_after_a_detach() {
     // REQ-18, from a host's report on Linux: once `readings` was detached, the agent's `CREATE
@@ -2583,6 +2593,8 @@ fn a_table_the_agent_had_first_stays_its_own() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The views are taken as DuckDB lists them, read once per engine. A schema of the agent's under
+/// a system schema's name, and a view in the system catalog, DuckDB refuses itself.
 #[test]
 fn a_system_view_name_is_taken() {
     // From the same report: an agent view named `sqlite_master` or `duckdb_tables` was kept, and

@@ -275,7 +275,9 @@ fn page_sql_keeps_every_literal_whole() {
     // knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
     // `SELECT $$a`, and `$$a/*b*/c$$` as `$$a c$$`: SQL for a replay or an audit log that is not
     // what ran. Each literal form DuckDB 1.5.5 lexes, and a quoted name, keeps its text; only the
-    // comments around them go.
+    // comments around them go. The split now lexes as the table-function check does
+    // (`the_literals_the_check_skips_are_duckdbs`), and a `;` in a dollar-quoted string, which
+    // used to leave the SQL out, no longer does.
     let mut h = Host::start(&[]);
     for (batch, written) in [
         ("SELECT $$a/*b*/c$$ AS x", vec!["SELECT $$a/*b*/c$$ AS x"]),

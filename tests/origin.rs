@@ -406,6 +406,10 @@ fn assert_all_alike(seen: &[(&str, Vec<String>)]) {
     }
 }
 
+/// One fixture, cut from the eval's public meter data, in the forms that differ most: CSV,
+/// Parquet with nanosecond timestamps and an unsigned integer, NDJSON, a host's attach with
+/// second-resolution timestamps and a dictionary-encoded string (from a file and through a pipe),
+/// and a connector sending zoned millisecond timestamps and an 8-bit integer.
 #[test]
 fn the_same_data_looks_the_same_from_every_source() {
     let dir = unique("same");
@@ -465,6 +469,9 @@ fn without_session_dir(text: &str) -> String {
     out
 }
 
+/// The session's own directory is still named: DuckDB's allowed directory must be a real path, and
+/// a path inside the session, random, says nothing of the source. It is set aside before the
+/// file's catalog and the connector's are compared.
 #[test]
 fn the_catalog_says_nothing_of_where_data_came_from() {
     let dir = unique("catalog");
@@ -561,6 +568,14 @@ fn many_rows(dir: &Path) -> PathBuf {
     fixture
 }
 
+/// A CSV used to be converted in place, and every table written in parallel: on the eval's meter
+/// data that left 8.0 MiB in 9 row groups from CSV and 11.5 MiB with 15 free blocks in 8 from
+/// Parquet. Written in one pass on one thread, each is 7.3 MiB in 7 row groups and 29 blocks, and
+/// a server's start took about 0.1 s longer. (7.0 MiB and 28 blocks until a loader wrote each row
+/// group as it filled: each row group's segments now start a block of their own.) The block and
+/// offset of every segment are compared too, because a parallel write from row-group-sized
+/// batches made the same counts, row groups and segments from a CSV file and its HTTP body, in
+/// different blocks.
 #[test]
 fn the_physical_layout_says_nothing_of_where_data_came_from() {
     // `pragma_database_size()` and `pragma_storage_info` show how a table's file was written,
@@ -626,6 +641,8 @@ fn serve_one_column(
     Ok(Server::launch(&["--config", cfg.to_str().unwrap()], &[]))
 }
 
+/// Refused, naming the column: a wider integer, an unsigned 64-bit one for a signed one, a float
+/// for an integer, a zone-less time for an instant, and a nanosecond the bench cannot hold.
 #[test]
 fn a_stream_may_be_narrower_than_its_declaration_never_wider() {
     // The operator declares what a column holds; the connector may send any type every value of
@@ -804,6 +821,8 @@ fn clickhouse_looks_the_same_as_a_file() {
 /// The sixth way: the built-in ClickHouse source (REQ-16), reading the fixture from a ClickHouse
 /// server table typed the way ClickHouse tables of meter data are — `DateTime`,
 /// `LowCardinality(String)`, `UInt8` — none of them the CSV's.
+/// The sixth way in: the server table is typed `DateTime('UTC')`, `LowCardinality(String)` and
+/// `UInt8`.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_clickhouse_source_looks_the_same_as_a_file() {
@@ -976,6 +995,7 @@ fn an_http_table_has_the_physical_layout_of_a_file_table() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The host's attach is made both from a file and through a pipe.
 #[test]
 fn a_stated_shape_looks_the_same_from_every_source() {
     // REQ-14 and REQ-15 together: the same data with the same stated shape — the time column and
@@ -1051,6 +1071,8 @@ fn infinities(table: &str) -> String {
     )
 }
 
+/// From a CSV, a Parquet file at every precision, a host's Arrow stream at every unit, zone-less
+/// and zoned, declared non-nullable, and a connector's.
 #[test]
 fn an_infinite_timestamp_is_kept_from_every_source() {
     // DuckDB holds `infinity` and `-infinity` as timestamps — an open-ended validity range, a

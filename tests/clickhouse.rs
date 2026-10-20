@@ -56,6 +56,7 @@ fn toml_str(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
 }
 
+/// Against the server: a Tokyo `DateTime` loads as the same instant in UTC.
 #[test]
 fn a_clickhouse_table_loads_with_its_schema_read_and_mapped() {
     let Some(ch) = common::clickhouse::server() else {
@@ -128,6 +129,8 @@ fn a_clickhouse_table_loads_with_its_schema_read_and_mapped() {
     );
 }
 
+/// Origin-blind (REQ-15): the ClickHouse table holds `DateTime`, `LowCardinality(String)`,
+/// `Nullable(Float32)` and `UInt16`, and `describe` matches, profile included.
 #[test]
 fn the_same_rows_from_csv_and_clickhouse_describe_and_answer_identically() {
     // Origin-blind: the agent cannot tell which of two tables came from a CSV file and which from
@@ -232,6 +235,7 @@ fn the_same_rows_from_csv_and_clickhouse_describe_and_answer_identically() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The ids are ones a careless connector would splice into SQL.
 #[test]
 fn the_window_and_the_allowlist_are_pushed_down_as_parameters() {
     let Some(ch) = common::clickhouse::server() else {
@@ -445,6 +449,8 @@ fn an_over_budget_clickhouse_load_is_refused_before_transfer() {
     assert_eq!(fetched.rows, 100_000);
 }
 
+/// zstd moves a quarter of the bytes or fewer, and the cap counts the decoded Arrow: a cap between
+/// the two sizes refuses the load.
 #[test]
 fn a_compressed_response_is_decoded_and_bounded() {
     let Some(ch) = common::clickhouse::server() else {
@@ -501,6 +507,9 @@ fn a_compressed_response_is_decoded_and_bounded() {
     assert_eq!(f.code, "E_TOO_LARGE", "{}", f.detail);
 }
 
+/// The user is sent no setting once it has been refused them, and loads with each `compression`.
+/// A profile that makes zstd Arrow bodies or binary text, which a read-only user cannot change,
+/// refuses the load before ClickHouse sends a row, naming the setting.
 #[test]
 fn a_read_only_clickhouse_user_loads_what_any_user_loads() {
     // `readonly = 1` is how analytics accounts are usually set up, and it refuses every setting a
@@ -568,6 +577,8 @@ fn a_read_only_clickhouse_user_loads_what_any_user_loads() {
     assert_eq!(fetched_by("ro_binary"), "0");
 }
 
+/// The unknown table's `E_CONFIG` carries ClickHouse's own code for the operator; the slow query
+/// times out at its deadline.
 #[test]
 fn clickhouse_failures_map_to_fault_codes() {
     let Some(ch) = common::clickhouse::server() else {
@@ -621,6 +632,8 @@ fn clickhouse_failures_map_to_fault_codes() {
     assert!(t.elapsed() < Duration::from_secs(12), "{:?}", t.elapsed());
 }
 
+/// Served, the password from benchy's environment signs in; a wrong one stops startup with
+/// `E_AUTH`, and neither password reaches the operator log.
 #[test]
 fn clickhouse_credentials_stay_in_the_loader() {
     // The password goes from benchy's environment, through the config, to the loader that
@@ -688,6 +701,9 @@ fn clickhouse_credentials_stay_in_the_loader() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `check` says when a user is read-only and which of ClickHouse's settings its load will run
+/// with, and names the fix for an unknown table, a wrong password, a read-only user's profile that
+/// makes Arrow benchy does not read, and an address with nothing listening.
 #[test]
 fn check_names_the_fix_for_each_clickhouse_failure() {
     let Some(ch) = common::clickhouse::server() else {
@@ -792,6 +808,9 @@ fn check_names_the_fix_for_each_clickhouse_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Each stops startup: a key of another kind of source, an `env` name it would hand to nothing,
+/// `tables` with `query`, a URL with a password, a window without an offset, columns both pinned
+/// and named.
 #[test]
 fn a_clickhouse_source_refuses_what_it_cannot_apply() {
     // Config only: no server needed. Each of these would otherwise do nothing, or do something
@@ -861,6 +880,7 @@ fn a_clickhouse_source_refuses_what_it_cannot_apply() {
     assert_eq!(names, ["a", "b"]);
 }
 
+/// Loopback is `localhost`, 127.0.0.0/8 and ::1.
 #[test]
 fn an_unset_compression_follows_where_the_server_is() {
     // Config only. On this machine, compressing costs ClickHouse CPU and decoding costs benchy
@@ -982,6 +1002,9 @@ fn arrow_stream(columns: Vec<(&str, arrow::array::ArrayRef)>) -> Vec<u8> {
     buf
 }
 
+/// A server is trusted no more than a connector, and needs none to test: views that unpack past
+/// the cap, a zstd body that decodes past it (decoded as it is read, so the read stops at the
+/// cap), and an exception written after a whole stream.
 #[test]
 fn a_clickhouse_response_is_held_to_what_a_connectors_stream_is() {
     // No server needed: what is tested is what benchy does with a response no real ClickHouse
@@ -1048,6 +1071,8 @@ fn a_clickhouse_response_is_held_to_what_a_connectors_stream_is() {
     assert!(bytes > 0 && bytes <= body.len() as u64, "{bytes}");
 }
 
+/// ClickHouse's message — an error status with its exception code, or an exception after the
+/// stream — names hosts, databases and users, so it is the operator's.
 #[test]
 fn a_clickhouse_error_reaches_the_operator_not_the_agent() {
     // ClickHouse's errors carry its own words: hosts, databases, users, query text. The code

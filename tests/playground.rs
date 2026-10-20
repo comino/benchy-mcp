@@ -202,6 +202,15 @@ fn the_agent_keeps_no_enum() {
     );
 }
 
+/// Read from the SQL DuckDB keeps of each object (`duckdb_tables()`, `duckdb_views()`,
+/// `duckdb_indexes()`, `duckdb_functions()`), since on DuckDB 1.5.5 `duckdb_dependencies()` lists
+/// nothing of the temporary catalog. Only what the statement may have made is read: a new or
+/// altered table's, a new view's, and everything when it made neither; a CREATE TABLE pays about
+/// 2 M instructions more, a CREATE VIEW 7 M, a CREATE MACRO 11 M on its 125 M. String literals
+/// are read too, because a string can spell a type DuckDB builds
+/// (`json_transform(…, '"ENUM(''a'')"')` is an ENUM on 1.5.5). So a literal that only mentions one
+/// (`SELECT 'use ENUM(' AS note`, from a host's report) is refused as well: telling them apart
+/// would take a list of the functions that read a type from a string.
 #[test]
 fn an_object_that_keeps_an_enum_in_its_sql_is_refused() {
     // An ENUM need not be a column's type to be kept: a column's DEFAULT, a generated column, a

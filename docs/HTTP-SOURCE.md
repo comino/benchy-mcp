@@ -246,7 +246,7 @@ decoded by benchy, not ureq, so the decode is bounded (below), in `src/decompres
 ClickHouse's source uses too: `Encoding::from_header` reads `Content-Encoding`, and
 `decoder(encoding, body)` decodes as the reader pulls. zstd is C libzstd there (the `zstd` crate);
 gzip is `flate2` on the zlib-rs backend beside it, measured at 0.53 s of CPU for a
-72 MB gzip body where miniz_oxide took 0.66 s (docs/PERFORMANCE.md, item 3).
+72 MB gzip body where miniz_oxide took 0.66 s (docs/history/PERFORMANCE-rounds.md, round 1 item 3).
 
 ## The fastest path for each format
 
@@ -343,7 +343,7 @@ by position and would load one column's values into another for a body in anothe
 declared CSV's dialect is stated rather than sniffed — `delimiter` (`,` unless set), `"` as quote
 and escape — so the sniffer reads only the header and the date formats: 66 M instructions for
 a 1,000-row body instead of 462 M, and a 1,000-row session's first `describe` 34% sooner
-(docs/PERFORMANCE.md, R2-3). A body in another dialect fails, naming `delimiter`.
+(docs/history/PERFORMANCE-rounds.md, R2-3). A body in another dialect fails, naming `delimiter`.
 
 ## Schema
 
@@ -523,7 +523,7 @@ settles what it left open:
   page before it went in, and whatever was fetched past it is not loaded
   (`json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order`). http-json-1m's first
   `describe` 1,131 / 1,174 → 675 / 740 ms (minimum / median), for 11% more instructions
-  (docs/PERFORMANCE.md R4-3).
+  (docs/history/PERFORMANCE-rounds.md, R4-3).
 - **CSV and NDJSON are spooled, then read on every thread** (R3-3, 2026-10-12). Through the FIFO
   they were first written into, DuckDB read a body in order on one thread whatever `threads`
   said (so the read was set to one: with the loader's four, the 1M-row NDJSON body cost 9.08 G

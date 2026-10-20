@@ -63,6 +63,8 @@ fn time_zone_conversion_works_in_the_shipped_build() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// A `SET` or `RESET` of `TimeZone` is refused with the way to local periods in any spelling,
+/// rather than with the list of statements allowed.
 #[test]
 fn the_agent_is_told_times_are_utc_and_how_to_bucket_local_days() {
     // #52: the session is pinned to UTC, and nothing said so: `SET TimeZone` was refused with the

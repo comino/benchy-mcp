@@ -28,7 +28,7 @@ The main build links the same library, fetched by `cargo build` itself.
 | 4 | Does either REQ-2 mechanism stop the escape corpus alone? | **No** — the allowlist leaks 5 of 40; only the locked engine holds |
 | 6 | Does Landlock actually hold, and do open fds survive it? | Yes — V1–V4 fully enforced; open fds survive, everything else denied |
 | 7 | Which decoder is fastest for each format an HTTP source sends? | DuckDB's readers for Parquet, CSV and NDJSON (CSV and NDJSON from a pipe at no extra cost); arrow-json for JSON pages. Numbers in docs/HTTP-SOURCE.md |
-| 8 | Which decoder for a compressed HTTP body? (`decompress/`, a package of its own) | C libzstd: 1.64 G instructions for a 10M-row ClickHouse zstd response against ruzstd's 5.99 G; gzip on flate2 + zlib-rs, 20% less CPU than miniz_oxide. Numbers in docs/PERFORMANCE.md |
+| 8 | Which decoder for a compressed HTTP body? (`decompress/`, a package of its own) | C libzstd: 1.64 G instructions for a 10M-row ClickHouse zstd response against ruzstd's 5.99 G; gzip on flate2 + zlib-rs, 20% less CPU than miniz_oxide. Numbers in docs/history/PERFORMANCE-rounds.md (round 1 item 3) |
 
 Probe 8 is `decompress/`, a package of its own with each decoder behind a feature, so each builds
 alone: `cd decompress && cargo build --release --features czstd` (or `ruzstd`, `lz4`, `gz-miniz`,

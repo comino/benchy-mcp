@@ -242,8 +242,8 @@ impl Where<'_> {
     /// it arrives, then read as the same file is read, under its name and options, staged on
     /// every thread (R3-3). Through a FIFO, as they were until then, DuckDB parsed the body on
     /// one thread: at 1,000,000 rows the first `describe` came 0.3 s (CSV) and 0.55 s (NDJSON)
-    /// after the file's (docs/PERFORMANCE.md R3-3). The spool is held to `max_bytes` as it is
-    /// written, by the reader that decodes it, and removed once read, loaded or not
+    /// after the file's (docs/history/PERFORMANCE-rounds.md R3-3). The spool is held to `max_bytes`
+    /// as it is written, by the reader that decodes it, and removed once read, loaded or not
     /// (`a_csv_or_ndjson_body_is_spooled_to_staging_within_max_bytes_and_removed`).
     ///
     /// A body that broke off, or passed its cap, is refused before DuckDB reads any of it
@@ -367,16 +367,16 @@ impl Where<'_> {
     ///
     /// R4-3: fetched, decoded and followed a page at a time on one thread, the decode was most
     /// of http-json-1m's 1.24 s to its first `describe` (arrow-json's tape decoder 46% of
-    /// `http.fetch`, docs/PERFORMANCE.md). Now a thread of its own fetches the pages: the pager is
-    /// told a page's rows and cursor by a scan that skips what it does not need ([`skim`]), the
-    /// next page is asked for at once, and the page goes to one of [`decoders`] threads. This
-    /// thread takes the batches into the table in page order, whatever order they decode in, so
-    /// the table is laid out as one thread lays it out (REQ-15). At most [`PAGES_AHEAD`] pages wait
-    /// between the fetch and the table. A page's decode must find the rows and cursor its scan
-    /// found, or the source fails. A page the scan cannot read plainly is decoded by the fetch
-    /// before it asks for the next, as every page was. Faults come in page order: a later page's
-    /// fetch failing, or the pager's refusal, is reported once every page before it went in, so
-    /// the source fails where and as it did a page at a time
+    /// `http.fetch`, docs/history/PERFORMANCE-rounds.md). Now a thread of its own fetches the
+    /// pages: the pager is told a page's rows and cursor by a scan that skips what it does not need
+    /// ([`skim`]), the next page is asked for at once, and the page goes to one of [`decoders`]
+    /// threads. This thread takes the batches into the table in page order, whatever order they
+    /// decode in, so the table is laid out as one thread lays it out (REQ-15). At most
+    /// [`PAGES_AHEAD`] pages wait between the fetch and the table. A page's decode must find the
+    /// rows and cursor its scan found, or the source fails. A page the scan cannot read plainly is
+    /// decoded by the fetch before it asks for the next, as every page was. Faults come in page
+    /// order: a later page's fetch failing, or the pager's refusal, is reported once every page
+    /// before it went in, so the source fails where and as it did a page at a time
     /// (`json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order`).
     ///
     /// The threads start here, in the loader, after it confined itself (`loader::open_then`):

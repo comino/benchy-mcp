@@ -114,6 +114,8 @@ fn with_landlock_exhausted<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     })
 }
 
+/// Tested for real, not with a flag that pretends: Landlock allows sixteen stacked layers, and
+/// `with_landlock_exhausted` fills them, so the engine's own restriction cannot be applied.
 #[test]
 fn a_missing_sandbox_is_refused_without_the_flag() {
     let dir = common::data_dir();
@@ -641,6 +643,10 @@ fn a_network_loader_reaches_only_its_source_and_its_staging() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every ruleset once handled Landlock V1's filesystem rights alone, which left truncate(2) by
+/// path unhandled, so a confined engine or loader could empty any file this user can write. They
+/// now handle the kernel's own ABI, up to V5 (`Refer`, `Truncate`, `IoctlDev`). Measured on
+/// kernel 6.8 (ABI 4) after the change: every posture still fully enforced.
 #[test]
 fn a_confined_process_cannot_truncate_what_it_was_not_granted() {
     // Truncating by path, truncate(2), is Landlock's to refuse only from ABI 3 (Linux 6.2), and

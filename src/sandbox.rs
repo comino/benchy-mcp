@@ -374,6 +374,10 @@ mod tests {
     use super::alone_by;
     use std::time::{Duration, Instant};
 
+    /// A grant of `Truncate` once went into every loader's ruleset whatever the kernel, and on
+    /// kernels before 6.2 (ABI 1 and 2), whose rulesets do not handle it, landlock refused the
+    /// rule: every loader went unconfined, or refused to run. Each grant is now cut to what its
+    /// ruleset handles.
     #[cfg(target_os = "linux")]
     #[test]
     fn every_ruleset_builds_for_every_landlock_abi() {

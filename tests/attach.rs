@@ -269,9 +269,9 @@ fn anything_else_in_one_file_of_a_batch_refuses_that_file_alone() {
 #[test]
 fn a_function_in_one_file_of_a_batch_refuses_that_file_alone() {
     // Several tables are attached in one request, and the check for functions is asked once for
-    // all of them (docs/PERFORMANCE.md, item 5). It must stay as strict as one table at a time:
-    // the file that brings a macro is refused before any catalog of the batch reaches the search
-    // path, and the files around it are attached.
+    // all of them (docs/history/PERFORMANCE-rounds.md, round 1 item 5). It must stay as strict as
+    // one table at a time: the file that brings a macro is refused before any catalog of the batch
+    // reaches the search path, and the files around it are attached.
     let dir = unique("batch");
     let mut ws = Workspace::open_sealed(&dir, "1GB").unwrap();
     let shadowing = host_file(&dir, "middle", 2, "m");

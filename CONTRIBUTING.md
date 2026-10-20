@@ -16,11 +16,11 @@ guard is decoration.
 | | |
 |---|---|
 | [`REQUIREMENTS.md`](REQUIREMENTS.md) | what benchy is held to. Eighteen requirements, each naming the tests that prove it |
-| [`docs/`](docs/) | the connector and host protocols, the built-in sources (ClickHouse, HTTP), the dialect reference the `dialect` tool serves, measured capacity |
+| [`docs/`](docs/) | the connector and host protocols, the built-in sources (ClickHouse, HTTP), the dialect reference the `dialect` tool serves, measured capacity; [`docs/history/`](docs/history/) holds what is no longer current: the measurement rounds, the prototype changelog, narrative moved out of REQUIREMENTS.md |
 | [`corpus/escape.toml`](corpus/escape.toml) | the escape corpus, shared by the tests |
 | [`scripts/check_requirements.py`](scripts/check_requirements.py) | fails if REQUIREMENTS.md names a test that does not exist, or plans one that already does |
 | [`scripts/ci.sh`](scripts/ci.sh) | everything CI would run, run here: the one verification a change gets. See [Before you push](#before-you-push) |
-| [`bench/`](bench/) | the ingest benchmark: the same table loaded every way, with instructions, CPU time and peak memory per process and per stage. [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the method, the baseline and the backlog |
+| [`bench/`](bench/) | the ingest benchmark: the same table loaded every way, with instructions, CPU time and peak memory per process and per stage. [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the method, the current baseline and the standing decisions; [docs/history/](docs/history/) the rounds that measured them |
 | [`packaging/`](packaging/), [`install.sh`](install.sh), [`Dockerfile`](Dockerfile) | native bundles, container images, their smoke tests and the installer. See [Releasing](#releasing) |
 | [`spike/`](spike/) | throwaway probes that answered requirement-blocking questions. Not product code |
 | [`eval/`](eval/) | measures what the bench costs an agent against the same agent with a jailed shell and the DuckDB CLI, on public data. The run needs an API key; its scorer and jail checks, `eval/test_eval.py`, run in `scripts/ci.sh` |
@@ -209,6 +209,11 @@ To check a new test by hand, make the change cargo-mutants names, run the test, 
 A requirement names its acceptance tests. When one is not met yet, its test is marked
 *(planned)* and the bullet says what happens today; remove the marker in the same change that
 makes the test exist. `scripts/check_requirements.py` enforces both directions.
+
+A bullet says what its test proves, in a line or two. The story behind it (how the gap was
+found, what happened before, the measurement of the bug) goes in the test's doc comment, and
+narrative that belongs to no one test in `docs/history/`. The normative docs say what holds now;
+`docs/history/` keeps how they got there, and its test citations are checked too.
 
 Requirements here have been falsified by measurement before. That is the expected way for one to
 change: **measure first, then rewrite the requirement to say what is true.** Do not quietly widen

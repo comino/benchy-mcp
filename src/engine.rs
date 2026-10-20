@@ -40,7 +40,8 @@ fn holding(path: &Path) {
 ///
 /// The watch sleeps on a condvar rather than in `sleep`, so stopping it is immediate. It slept
 /// 100 ms at a time, and the seal joins it before confining: every engine's `Open` waited out the
-/// rest of that sleep, 65–100 ms of every cold start (docs/PERFORMANCE.md, item 6), and of every
+/// rest of that sleep, 65–100 ms of every cold start (docs/history/PERFORMANCE-rounds.md, round 1
+/// item 6), and of every
 /// rebuild. `stopping_the_watch_does_not_wait_out_its_poll` is the regression test.
 struct Watch {
     stop: Arc<(Mutex<bool>, Condvar)>,

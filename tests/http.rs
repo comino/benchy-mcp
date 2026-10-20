@@ -140,6 +140,11 @@ fn every_http_config_the_design_shows_is_accepted() {
     }
 }
 
+/// Each stops startup: a key of another kind of source, a format or a paging style that does not
+/// exist, a paging key of another style, a pushdown parameter with no narrowing to carry, a
+/// parameter set twice or by both the operator and benchy, a header benchy sets itself, columns
+/// both pinned and named, a cursor with no key to be kept in, a rows path inside the cursor's,
+/// and a `delimiter` on another format, longer than one character, the quote or a line break.
 #[test]
 fn an_http_source_refuses_what_it_cannot_apply() {
     // Config only. Each would otherwise do nothing, or something other than it says.
@@ -353,6 +358,8 @@ fn an_http_source_refuses_what_it_cannot_apply() {
     }
 }
 
+/// Refused: a user, password or query string on the URL, a credential header in `headers`,
+/// `${…}` outside `env`, an `env` key `auth` does not read and an `auth` key `env` does not set.
 #[test]
 fn an_http_secret_comes_only_from_env_through_auth() {
     // A secret in this file is in the clear, and a URL reaches logs: a credential has one way
@@ -524,6 +531,8 @@ fn scripted(replies: Vec<Reply>) -> (FakeHttp, Arc<Mutex<Vec<Instant>>>) {
     (server, at)
 }
 
+/// The wait is `Retry-After`'s or a growing, jittered one; a server that never answers is held
+/// to the deadline too.
 #[test]
 fn retries_back_off_and_honour_retry_after_within_the_deadline() {
     // A 503 that says when to come back is retried then, not sooner; a 429 that does not is
@@ -593,6 +602,9 @@ fn retries_back_off_and_honour_retry_after_within_the_deadline() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
+/// To a host and port in `redirect_hosts` it goes without the `auth` header, the `auth`
+/// parameter or a secret the API echoed into its URL; any other is refused, naming only where it
+/// pointed, and nothing is sent there. The loader may connect to those ports alone.
 #[test]
 fn a_redirect_off_the_origin_carries_no_credential() {
     // The shape of a presigned object-store URL behind an API: the API answers with a redirect
@@ -694,6 +706,7 @@ fn gzip(body: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
+/// gzip or zstd, by `Content-Encoding` or by `compression`.
 #[test]
 fn an_http_body_is_held_to_max_bytes_as_it_decompresses() {
     // `max_bytes` counts the body as it decodes, so a small compressed body that decodes to a
@@ -762,6 +775,8 @@ fn parquet(n: u64) -> Vec<u8> {
     bytes
 }
 
+/// A body whose row groups are garbage is refused on the footer alone, and its staged file is
+/// gone.
 #[test]
 fn a_parquet_body_over_max_rows_is_refused_from_its_footer() {
     // A Parquet file says how many rows it holds in its footer, which DuckDB reads without a row
@@ -851,6 +866,9 @@ fn three_pages() -> Vec<String> {
         .collect()
 }
 
+/// A page that errors past its retries, is cut short, is not JSON or has no rows leaves no table,
+/// not the pages before it; a CSV or NDJSON body cut short, which DuckDB's reader would take for a
+/// whole one, fails too.
 #[test]
 fn a_failed_page_fails_the_source_with_no_partial_table() {
     // Page 0 is fine; page 1 breaks. Nothing of page 0 may be left on the bench: a table that
@@ -950,6 +968,8 @@ fn left_in(bench: &Bench) -> Vec<String> {
         .collect()
 }
 
+/// A body past `max_bytes` is refused without waiting for the rest, and the spool is gone whether
+/// it loaded, was cut short or was too large.
 #[test]
 fn a_csv_or_ndjson_body_is_spooled_to_staging_within_max_bytes_and_removed() {
     // R3-3: a CSV or NDJSON body is written to a file in the loader's staging directory as it
@@ -1044,6 +1064,8 @@ fn a_csv_or_ndjson_body_is_spooled_to_staging_within_max_bytes_and_removed() {
     }
 }
 
+/// An undeclared JSON source is typed by DuckDB's sniff of its first page; `2.5` on a later page
+/// where the first held integers fails rather than loading as another type, or as `2`.
 #[test]
 fn a_later_json_page_with_a_wider_type_fails_the_source() {
     // Decision 6: the first page is sniffed by DuckDB, as a file of its rows would be, and that
@@ -1077,6 +1099,9 @@ fn a_later_json_page_with_a_wider_type_fails_the_source() {
     );
 }
 
+/// Decoded a page at a time, http-json-1m's first `describe` took 1.13 s; fetched ahead of the
+/// decode, 0.68 s. The next page is asked for once a scan has read the page's cursor, and each
+/// row's `rowid` is its place in the source.
 #[test]
 fn json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order() {
     // R4-3: a page's next request is found by a scan for its cursor, not by decoding its rows,
@@ -1132,6 +1157,10 @@ fn json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order() {
     );
 }
 
+/// JSON pages are decoded by arrow-json, not DuckDB's JSON reader, which reads `infinity`,
+/// `-infinity` and `epoch` as 1900-01-01 (`an_ndjson_infinity_is_refused`). arrow-json reads none
+/// of them as a timestamp or a date, so the source fails rather than loading a wrong time, on the
+/// first page or a later one. Two keys that differ only in case fail the first page's sniff.
 #[test]
 fn a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900() {
     // #38: an NDJSON body is read by DuckDB's JSON reader, which takes `infinity`, `-infinity`
@@ -1184,6 +1213,8 @@ fn a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900() {
     assert!(!has_table(&bench, "readings"));
 }
 
+/// Cursor, offset, page number, `Link` and next URL, with the rows at the top of the page or
+/// nested.
 #[test]
 fn every_paging_style_loads_every_page() {
     // 250 rows, 100 to a page, five ways of saying where the next page is. Offset and page
@@ -1616,6 +1647,9 @@ fn an_http_error_reaches_the_operator_not_the_agent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Cases: a body split on `;` is refused naming `delimiter` until it is set, then loads as the
+/// comma body does; a day-first date still loads as the file does; quotes escaped with a
+/// backslash are refused, and leave no table.
 #[test]
 fn a_declared_csv_is_read_in_its_stated_dialect() {
     // A declared CSV is read with its dialect stated, not sniffed: `delimiter` (`,` unless set),

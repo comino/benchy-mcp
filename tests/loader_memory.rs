@@ -164,6 +164,8 @@ fn holding_connector(dir: &Path) -> std::path::PathBuf {
     p
 }
 
+/// Measured: a connector that held 100 MB itself, and one whose child held 200 MB, each passed a
+/// 150 MB ceiling and was killed with its whole process group.
 #[test]
 fn a_connectors_memory_counts_against_its_loaders_ceiling() {
     // REQ-8. A connector is a process of the loader's, and is not confined: a connector that

@@ -145,6 +145,9 @@ fn every_common_type_renders_as_something_a_reader_can_use() {
     }
 }
 
+/// Covers a DATE, a TIMESTAMP at every precision and a TIMESTAMPTZ, at the top level, in a list
+/// and in a struct. A TIMESTAMPTZ in a list renders as its instant, where before it rendered as
+/// a "not rendered" marker.
 #[test]
 fn an_infinite_time_renders_as_duckdb_writes_it() {
     // DuckDB holds `infinity` and `-infinity` as the largest and smallest values of a date or a

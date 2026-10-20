@@ -131,6 +131,10 @@ fn time_zone_refused(icu_loaded: i64) -> duckdb::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// Results are in UTC whatever the host's zone. A library without ICU has no zone to set
+    /// and UTC is its only one; with ICU loaded, a refusal to set UTC stops the engine rather
+    /// than leaving results host-dependent. The shipped library always has ICU and always
+    /// accepts, so this is tested at the decision.
     #[test]
     fn a_refused_time_zone_fails_only_where_icu_is_loaded() {
         assert!(
