@@ -25,7 +25,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BULLET = re.compile(r"^\s*-\s+`([a-z][a-z0-9_]*)`(\s+\*\(planned\)\*)?\s+—", re.M)
 CITATION = re.compile(r"REQ-\d+:?\s+`([a-z][a-z0-9_]*)`")
 CITING = ["src/**/*.rs", "tests/**/*.rs", "docs/*.md", "README.md", "CONTRIBUTING.md",
-          "corpus/*.toml", "examples/**/*.py", "examples/**/*.sh", "examples/*.toml",
+          "SECURITY.md", "corpus/*.toml", "examples/**/*.py", "examples/**/*.sh", "examples/*.toml",
           "spike/src/*.rs", "spike/*.md", "spike/*.py", ".cargo/mutants.toml"]
 TEST = re.compile(r"#\[test\]\s*(?:#\[[^\]]*\]\s*)*(?:pub\s+)?fn\s+([a-z][a-z0-9_]*)\s*\(")
 
