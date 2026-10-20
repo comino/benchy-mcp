@@ -87,6 +87,24 @@ Changed behaviour:
   `duckdb_memory`, `duckdb_extensions`, `duckdb_secrets` and the like) and DuckDB's test
   functions are refused too.
 
+Added:
+
+- **A release has an SBOM and a compat.json** (#57). Each bundle has a CycloneDX SBOM,
+  `benchy-mcp-<platform>.cdx.json`, attested of the bundle: every crate the release builds for
+  the platform, with its Cargo.lock checksum and whether it is in the binary, and DuckDB's library
+  with the SHA-256 of the file shipped and of the pinned release file it came from
+  (`packaging/sbom.py`). `compat.json` says what a pin bump changes — `benchy`, `duckdb`,
+  `host_protocols`, `platforms`, `full_sandbox_min_landlock_abi` and `min_glibc`, the last read
+  from the Linux bundles' ELF version needs — and `benchy-mcp --version --json` prints the same,
+  less `min_glibc`, from the binary (`version_json_says_what_a_pin_bump_checks`). Both are in
+  `SHA256SUMS`; each smoke test holds its platform's binary to compat.json
+  (docs/HOST-PROTOCOL.md, Versions).
+- **A host can read the timeouts and the limits of a flag set** (#29). `hello` has
+  `timeouts: {load_timeout_secs, hard_grace_secs}` beside the caps
+  (`hello_says_how_long_a_load_and_the_hard_grace_may_take`), and `benchy-mcp host [flags]
+  --print-limits` prints what `hello` would report to a session agreeing on the newest protocol,
+  and starts nothing (`print_limits_says_what_hello_would`).
+
 Faster:
 
 - **The engine can run agent SQL on more than one thread** (#56). Use `--threads N` or

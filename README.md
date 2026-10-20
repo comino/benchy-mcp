@@ -381,6 +381,26 @@ build. You can also verify its GitHub build attestation:
 gh attestation verify benchy-mcp-linux-x86_64.tar.gz --repo comino/benchy-mcp
 ```
 
+Beside each bundle, a release has its SBOM, `benchy-mcp-<platform>.cdx.json` (CycloneDX): every
+crate compiled for that platform, with its Cargo.lock checksum, and DuckDB's library with the
+SHA-256 of the file shipped and of the release file it came from. It is attested too:
+`gh attestation verify benchy-mcp-linux-x86_64.tar.gz --repo comino/benchy-mcp --predicate-type
+https://cyclonedx.org/bom`.
+
+**Pinning a release.** `compat.json`, one per release and listed in `SHA256SUMS`, says what a
+pin bump changes: the benchy and DuckDB versions, the host protocol versions it speaks, its
+platforms, the oldest glibc its Linux bundles need, and the Landlock ABI the full sandbox needs:
+
+```json
+{"benchy": "0.2.0", "duckdb": "1.5.5", "host_protocols": [1, 2, 3, 4, 5, 6, 7],
+ "platforms": ["linux-x86_64", "linux-aarch64", "macos-arm64", "macos-x86_64"],
+ "full_sandbox_min_landlock_abi": 4, "min_glibc": "2.35"}
+```
+
+Check it in CI before you deploy. `benchy-mcp --version --json` prints the same object, less
+`min_glibc`, from the binary you were handed; [docs/HOST-PROTOCOL.md](docs/HOST-PROTOCOL.md#versions)
+says what each field means.
+
 [`packaging/package.sh`](packaging/package.sh) builds a bundle locally;
 [packaging/README.md](packaging/README.md) is the README inside it.
 
@@ -570,7 +590,11 @@ OPTIONS
   --require-memory-ceilings  refuse to start unless the engine's and the loaders'
                       memory ceilings are enforced (Linux)
   --probe             with `doctor`: measure containment instead of reporting it
-  --json              with `doctor`: measure it, and say so as JSON: a verdict and each mechanism
+  --json              with `doctor`: measure it, and say so as JSON: a verdict and each mechanism;
+                      with `--version`: the versions, host protocols, platforms and Landlock
+                      ABI a host checks a pin against, as a release's compat.json has them
+  --print-limits      with `host`: print what `hello` would report for these flags, as JSON,
+                      and start nothing
   -h, --help          this
   -V, --version       benchy's version and the DuckDB library's
 ```

@@ -294,6 +294,104 @@ fn hello_says_what_the_session_is() {
     assert!(r["sandbox"].is_string(), "{r}");
 }
 
+#[test]
+fn hello_says_how_long_a_load_and_the_hard_grace_may_take() {
+    // A host that sets its own timeouts around benchy's copied these from benchy's source, where
+    // a pin bump could change them unseen: the load timeout, and the grace past the deadline
+    // before the engine is killed, which the caps do not say.
+    let mut h = Host::spawn(&[]);
+    let r = h.call("hello", json!({"protocol": [1]}));
+    assert_eq!(
+        r["timeouts"],
+        json!({"load_timeout_secs": 300, "hard_grace_secs": 10}),
+        "{r}"
+    );
+    let mut h = Host::spawn(&["--load-timeout", "40", "--hard-grace", "3"]);
+    let r = h.call("hello", json!({"protocol": [1, 2, 3, 4, 5, 6, 7]}));
+    assert_eq!(
+        r["timeouts"],
+        json!({"load_timeout_secs": 40, "hard_grace_secs": 3}),
+        "{r}"
+    );
+    // Beside the caps, not in them: a host may hand the caps back in a `query`, and a field
+    // there that `query` does not take would be refused.
+    assert_eq!(
+        r["caps"].as_object().map(|c| c.len()),
+        Some(4),
+        "the four caps a query takes: {r}"
+    );
+}
+
+#[test]
+fn print_limits_says_what_hello_would() {
+    // For a host that checks, before it starts a session, what a flag set gives: the same caps,
+    // limits and timeouts `hello` reports to a session agreeing on the newest protocol, from the
+    // same flags and config, and nothing started.
+    let flags = [
+        "--max-rows",
+        "50",
+        "--deadline",
+        "7",
+        "--attach-rows",
+        "1000",
+        "--memory",
+        "512MB",
+        "--threads",
+        "1",
+        "--load-timeout",
+        "40",
+        "--hard-grace",
+        "3",
+    ];
+    let out = Command::new(common::BIN)
+        .arg("host")
+        .args(common::PLATFORM)
+        .args(flags)
+        .arg("--print-limits")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    let printed: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON alone ({e}):\n{text}"));
+    let mut h = Host::spawn(&flags);
+    let greeted = h.call("hello", json!({"protocol": (1..=20).collect::<Vec<u64>>()}));
+    for field in ["protocol", "caps", "limits", "timeouts", "unenforced"] {
+        assert_eq!(
+            printed[field], greeted[field],
+            "{field}: {printed} {greeted}"
+        );
+    }
+    assert_eq!(printed["caps"]["max_rows"], 50, "{printed}");
+    assert_eq!(printed["limits"]["attach_rows"], 1000, "{printed}");
+    assert_eq!(printed["timeouts"]["load_timeout_secs"], 40, "{printed}");
+
+    // What a session would refuse to start with, it refuses here, as at start.
+    let refused = Command::new(common::BIN)
+        .arg("host")
+        .args(common::PLATFORM)
+        .args([
+            "--memory",
+            "1GB",
+            "--memory-ceiling",
+            "512MB",
+            "--print-limits",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    // And it is a question about a host's session: the MCP server has none of these limits.
+    let mcp = Command::new(common::BIN)
+        .args(["--print-limits"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!mcp.status.success());
+}
+
 // Linux only: the memory ceiling is read from /proc, and elsewhere it is not enforced
 // (`a_memory_ceiling_that_cannot_be_enforced_is_not_reported`).
 #[test]

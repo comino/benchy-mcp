@@ -64,12 +64,40 @@ jobs:
           path: |
             dist/benchy-mcp-${{ matrix.platform }}.tar.gz
             dist/benchy-mcp-${{ matrix.platform }}.tar.gz.sha256
+            dist/benchy-mcp-${{ matrix.platform }}.cdx.json
+          if-no-files-found: error
+
+  # compat.json, written once from every bundle: what this machine's binary says of itself
+  # (`--version --json`), and the oldest glibc any Linux bundle needs, read from the ELF files'
+  # version needs, which no binary can say of itself. Refused unless the bundles are exactly the
+  # platforms the binary names. In a job of its own, so that the release job runs nothing built.
+  compat:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: benchy-mcp-*
+          merge-multiple: true
+          path: dist
+      - run: |
+          mkdir compat
+          python3 packaging/compat.py write dist > compat/compat.json
+          cat compat/compat.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchy-compat
+          retention-days: 7
+          path: compat/compat.json
           if-no-files-found: error
 
   # Each bundle on a runner that never built anything: no target/, no Rust, no DuckDB elsewhere.
   # Linux on the oldest and the newest Ubuntu; macOS on a newer release than it was built on.
+  # Each also checks its binary against compat.json, which only one platform's binary wrote.
   smoke:
-    needs: build
+    needs: [build, compat]
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +116,11 @@ jobs:
         with:
           name: benchy-mcp-${{ matrix.platform }}
           path: ${{ runner.temp }}/dist
-      - run: packaging/smoke.sh "$RUNNER_TEMP/dist" ${{ matrix.platform }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchy-compat
+          path: ${{ runner.temp }}/compat
+      - run: packaging/smoke.sh "$RUNNER_TEMP/dist" ${{ matrix.platform }} "$RUNNER_TEMP/compat/compat.json"
 
   containers:
     needs: build
@@ -146,7 +178,7 @@ jobs:
 
   # Only this job can publish or sign. The release environment can optionally require reviewers.
   release:
-    needs: [checks, smoke, containers, container-source]
+    needs: [checks, compat, smoke, containers, container-source]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: release
@@ -161,6 +193,10 @@ jobs:
         with:
           pattern: benchy-mcp-*
           merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchy-compat
           path: dist
       - name: Put install.sh beside the bundles
         run: cp install.sh dist/
@@ -204,11 +240,34 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/install.sh
+            dist/compat.json
+            dist/*.cdx.json
+      # Each bundle's SBOM, attested of that bundle: `gh attestation verify <bundle> --repo
+      # <owner>/benchy-mcp --predicate-type https://cyclonedx.org/bom` (README). actions/attest, as
+      # actions/attest-sbom is deprecated and now only wraps it. One step a bundle: an SBOM
+      # attestation takes one SBOM, and each bundle's crates and library are its platform's.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/benchy-mcp-linux-x86_64.tar.gz
+          sbom-path: dist/benchy-mcp-linux-x86_64.cdx.json
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/benchy-mcp-linux-aarch64.tar.gz
+          sbom-path: dist/benchy-mcp-linux-aarch64.cdx.json
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/benchy-mcp-macos-arm64.tar.gz
+          sbom-path: dist/benchy-mcp-macos-arm64.cdx.json
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/benchy-mcp-macos-x86_64.tar.gz
+          sbom-path: dist/benchy-mcp-macos-x86_64.cdx.json
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          (cd dist && cat ./*.sha256 > SHA256SUMS && sha256sum install.sh >> SHA256SUMS)
+          (cd dist && cat ./*.tar.gz.sha256 > SHA256SUMS &&
+            sha256sum install.sh compat.json benchy-mcp-*.cdx.json >> SHA256SUMS)
           # The release notes are this version's section of CHANGELOG.md.
           awk -v v="${GITHUB_REF_NAME#v}" '
             /^## / { on = index($0, "[" v "]") > 0; next }

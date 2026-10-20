@@ -134,7 +134,8 @@ A security bug here is a way across a boundary the project claims to hold
 - **Credential exposure.** A source credential or an exec connector's environment reaching the
   engine, the agent, a result, an error message or a log (REQ-5, REQ-15).
 - **The release itself.** A bundle, image or install path that ships something other than what
-  the release workflow built, such as a DuckDB library that is not DuckDB's release file.
+  the release workflow built, such as a DuckDB library that is not DuckDB's release file; or a
+  bundle's SBOM, or the release's `compat.json`, that does not say what it ships.
 
 Not security bugs, though still worth an ordinary issue: anything on native macOS, which has no
 OS sandbox and serves only with `--allow-unsandboxed`; what an exec connector does, since it runs

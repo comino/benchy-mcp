@@ -72,7 +72,11 @@ OPTIONS
   --require-memory-ceilings  refuse to start unless the engine's and the loaders'
                       memory ceilings are enforced (Linux)
   --probe             with `doctor`: measure containment instead of reporting it
-  --json              with `doctor`: measure it, and say so as JSON: a verdict and each mechanism
+  --json              with `doctor`: measure it, and say so as JSON: a verdict and each mechanism;
+                      with `--version`: the versions, host protocols, platforms and Landlock
+                      ABI a host checks a pin against, as a release's compat.json has them
+  --print-limits      with `host`: print what `hello` would report for these flags, as JSON,
+                      and start nothing
   -h, --help          this
   -V, --version       benchy's version and the DuckDB library's
 
@@ -147,6 +151,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
+        if args.iter().any(|a| a == "--json") {
+            println!("{}", version_json());
+            return ExitCode::SUCCESS;
+        }
         println!("benchy-mcp {}", env!("CARGO_PKG_VERSION"));
         println!("DuckDB {}", duckdb_library().0);
         return ExitCode::SUCCESS;
@@ -207,6 +215,7 @@ fn main() -> ExitCode {
         require_memory_ceilings,
         limits,
         stream_channel,
+        print_limits,
     } = match parse_options(if host { &args[1..] } else { &args }) {
         Ok(o) => o,
         Err(e) => return fail(&e),
@@ -241,6 +250,13 @@ fn main() -> ExitCode {
             Ok(l) => l,
             Err(e) => return fail(&e),
         };
+        if print_limits {
+            println!(
+                "{}",
+                benchy_mcp::host::effective(&caps, &limits, load_timeout)
+            );
+            return ExitCode::SUCCESS;
+        }
         return serve_host(
             caps,
             load_timeout,
@@ -253,6 +269,11 @@ fn main() -> ExitCode {
     }
     if stream_channel.is_some() {
         return fail("--stream-channel is for `host`: a host writes the streams into it");
+    }
+    if print_limits {
+        return fail(
+            "--print-limits is for `host`: it prints what `hello` reports to a host's session",
+        );
     }
     if limits.iter().any(Option::is_some) {
         return fail(
@@ -512,6 +533,8 @@ struct Options {
     limits: benchy_mcp::config::Stated,
     /// `--stream-channel`, where given: the descriptor a host's stream channel is on.
     stream_channel: Option<i32>,
+    /// `--print-limits`: with `host`, say what `hello` would report, and start nothing.
+    print_limits: bool,
 }
 
 /// A host's session's limits: the defaults, or what the operator set, on the command line
@@ -648,6 +671,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut require_memory_ceilings = false;
     let mut limits: benchy_mcp::config::Stated = [None; 4];
     let mut stream_channel = None;
+    let mut print_limits = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -682,6 +706,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
             "--allow-unsandboxed" => allow_unsandboxed = true,
             "--require-full-sandbox" => require_full_sandbox = true,
             "--require-memory-ceilings" => require_memory_ceilings = true,
+            "--print-limits" => print_limits = true,
             "--stream-channel" => match it.next().and_then(|s| s.parse::<i32>().ok()) {
                 Some(fd) if fd >= 3 => stream_channel = Some(fd),
                 _ => {
@@ -758,6 +783,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         require_memory_ceilings,
         limits,
         stream_channel,
+        print_limits,
     })
 }
 
@@ -916,6 +942,7 @@ fn serve_host(
             limits,
             dir: session.0.clone(),
             channel: has_channel,
+            load_timeout,
         },
         prover,
     );
@@ -998,6 +1025,32 @@ fn doctor(probe: bool, json: bool) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// The platforms a release has a bundle for, as each bundle's name says them. release.yml builds
+/// one for each, and packaging/compat.py refuses a release whose bundles are not exactly these, so
+/// the list a host pins against cannot drift from what was shipped.
+const PLATFORMS: [&str; 4] = [
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-arm64",
+    "macos-x86_64",
+];
+
+/// `--version --json`: what a host checks a binary, or a release's compat.json, against before it
+/// deploys (docs/HOST-PROTOCOL.md). Each field is asked of where it is decided — the protocol
+/// versions `hello` agrees to, the library this process loaded, the ABI the sandbox needs for its
+/// full posture — so that it cannot go stale beside them (`version_json_says_what_a_pin_bump_checks`).
+/// No `min_glibc`: that is the built binaries' to say, measured by packaging/compat.py.
+fn version_json() -> serde_json::Value {
+    let duckdb = duckdb_library().0;
+    serde_json::json!({
+        "benchy": env!("CARGO_PKG_VERSION"),
+        "duckdb": duckdb.strip_prefix('v').unwrap_or(&duckdb),
+        "host_protocols": benchy_mcp::host::PROTOCOLS,
+        "platforms": PLATFORMS,
+        "full_sandbox_min_landlock_abi": benchy_mcp::sandbox::NETWORK_ABI,
+    })
 }
 
 /// The DuckDB library this process runs: its version, and the file the dynamic loader took it
