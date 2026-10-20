@@ -48,6 +48,11 @@ OPTIONS
                       attaches nothing (default 1GB); or [loader] memory_ceiling in a config.
                       A host may lower it for its session (protocol 6), never raise it.
                       Linux only, as --memory-ceiling.
+  --threads N         threads the engine runs agent SQL on      (default 1); or [engine]
+                      threads in a config. One keeps a runaway to one core of a shared
+                      machine; more make a grouped aggregate several times quicker on one
+                      that is not. A host may lower it for its session (protocol 7), never
+                      raise it.
   --load-timeout N    seconds one source may take to load       (default 300)
   --attach-rows N     with `host`: rows one attachment may hold  (default 10000000)
   --attach-bytes N    with `host`: bytes one attachment may be   (default 268435456)
@@ -195,6 +200,7 @@ fn main() -> ExitCode {
         caps,
         ceiling,
         loader_ceiling,
+        threads,
         load_timeout,
         allow_unsandboxed,
         require_full_sandbox,
@@ -229,6 +235,7 @@ fn main() -> ExitCode {
             &caps.memory_limit,
             ceiling,
             loader_ceiling,
+            threads,
             config.as_deref(),
         ) {
             Ok(l) => l,
@@ -296,12 +303,21 @@ fn main() -> ExitCode {
             Ok(c) => c,
             Err(e) => return fail(&e),
         };
+    let threads = match engine_threads(
+        threads,
+        sources.as_ref().and_then(|s| s.threads),
+        config.as_deref(),
+    ) {
+        Ok(t) => t,
+        Err(e) => return fail(&e),
+    };
     let limits = benchy_mcp::admission::HostLimits {
         session_rows: b.max_rows,
         session_bytes: b.max_bytes,
         memory: memory.budget,
         memory_ceiling: memory.ceiling,
         loader_memory_ceiling,
+        threads,
         ..Default::default()
     };
     let mut plan = Vec::new();
@@ -484,6 +500,8 @@ struct Options {
     ceiling: Option<String>,
     /// `--loader-memory-ceiling`, where given.
     loader_ceiling: Option<String>,
+    /// `--threads`, where given.
+    threads: Option<u64>,
     load_timeout: std::time::Duration,
     allow_unsandboxed: bool,
     /// `--require-full-sandbox`: start only where Landlock confines the engine fully, TCP included.
@@ -506,6 +524,7 @@ fn host_limits(
     budget: &str,
     ceiling: Option<String>,
     loader_ceiling: Option<String>,
+    threads: Option<u64>,
     config: Option<&Path>,
 ) -> Result<
     (
@@ -517,11 +536,13 @@ fn host_limits(
     let mut stated = given;
     let mut ceiling_in_config = None;
     let mut loader_in_config = None;
+    let mut threads_in_config = None;
     let mut helpers = Vec::new();
     if let Some(c) = config {
         let sources = benchy_mcp::config::load(c)?;
         ceiling_in_config = sources.memory_ceiling.clone();
         loader_in_config = sources.loader_memory_ceiling.clone();
+        threads_in_config = sources.threads;
         if !sources.files.is_empty() || !sources.exec.is_empty() || !sources.builtin.is_empty() {
             return Err(format!(
                 "{}: `host` takes no sources: the host attaches them. Its config holds [attach], \
@@ -545,6 +566,7 @@ fn host_limits(
         memory: memory.budget,
         memory_ceiling: memory.ceiling,
         loader_memory_ceiling: loader_memory(loader_ceiling, loader_in_config, config)?,
+        threads: engine_threads(threads, threads_in_config, config)?,
         ..Default::default()
     };
     let [attach_rows, attach_bytes, session_rows, session_bytes] = stated;
@@ -595,6 +617,23 @@ fn loader_memory(
     benchy_mcp::supervisor::loader_memory_ceiling(given.or(in_config).as_deref())
 }
 
+/// REQ-7: the threads agent SQL runs on: `--threads` or the config's `[engine] threads`, never
+/// both, and 1 where neither says.
+fn engine_threads(
+    given: Option<u64>,
+    in_config: Option<u64>,
+    config: Option<&Path>,
+) -> Result<u64, String> {
+    if given.is_some() && in_config.is_some() {
+        return Err(format!(
+            "{}: the engine's threads are set both there and on the command line; set them in one \
+             place",
+            config.map_or("the config".into(), |c| c.display().to_string())
+        ));
+    }
+    Ok(given.or(in_config).unwrap_or(1))
+}
+
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut dir: Option<PathBuf> = None;
     let mut config: Option<PathBuf> = None;
@@ -602,6 +641,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut caps = Caps::default();
     let mut ceiling: Option<String> = None;
     let mut loader_ceiling: Option<String> = None;
+    let mut threads: Option<u64> = None;
     let mut load_timeout = std::time::Duration::from_secs(300);
     let mut allow_unsandboxed = false;
     let mut require_full_sandbox = false;
@@ -693,6 +733,10 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 Some(v) => loader_ceiling = Some(v.clone()),
                 None => return Err("--loader-memory-ceiling needs a size like 1GB".into()),
             },
+            "--threads" => match it.next().and_then(|s| s.parse::<u64>().ok()) {
+                Some(n) if n > 0 => threads = Some(n),
+                _ => return Err("--threads needs a number, at least 1".into()),
+            },
             other if other.starts_with('-') => return Err(format!("unknown option `{other}`")),
             other => dir = Some(PathBuf::from(other)),
         }
@@ -707,6 +751,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         caps,
         ceiling,
         loader_ceiling,
+        threads,
         load_timeout,
         allow_unsandboxed,
         require_full_sandbox,

@@ -107,13 +107,15 @@ The first three are the whole string; the last begins with `unavailable: `.
 | 4 | `tool_names` in `hello` ([Tool names](#tool-names-in-version-4)) | `tool_names`, and the session ends |
 | 5 | `"stream": "channel"` in `attach`, the next stream on the session's stream channel ([Through a stream channel](#through-a-stream-channel-in-version-5)) | `"channel"`, as a value `stream` does not take |
 | 6 | `loader_memory_ceiling` in `hello`'s `limits`, reported and lowered (**Memory** below) | `limits.loader_memory_ceiling`, and the session ends; it is not reported |
+| 7 | `threads` in `hello`'s `limits`, reported and lowered (**Threads** below) | `limits.threads`, and the session ends; it is not reported |
 
 Replies only grow: a field a reply gained in a later version (`results` beside a query's text,
 `sql` on a page, `unenforced` beside the limits, `sandbox_posture` in `hello`) is sent whatever
 version was agreed, and a host that does not know it ignores it. The one exception is a field of
 `limits`: a host may send `limits` back as it got it, and a field there that its version does not
 take would end its session, so `limits.loader_memory_ceiling` (and
-`unenforced.loader_memory_ceiling`) is reported only to a session that agrees on 6.
+`unenforced.loader_memory_ceiling`) is reported only to a session that agrees on 6, and
+`limits.threads` only to one that agrees on 7.
 
 **The sandbox.** `sandbox` is prose for a person, and its wording may change between releases.
 A host that decides on it reads `sandbox_posture`, how Landlock confines the session's engine,
@@ -148,9 +150,10 @@ defaults above: on the command line, `--attach-rows`, `--attach-bytes`, `--sessi
 `[attach]` (`rows`, `bytes`) and `[budget]` (`rows`, `bytes`), `[engine]` and `[helpers]` if any
 ([Helpers](#helpers)), and no sources. A limit set in both places, or set to 0, stops the start.
 `attachments` is 64 and no operator setting changes it; `memory` and `memory_ceiling` are set as
-**Memory** below says, and `loader_memory_ceiling` too. A host may then lower any of six for its
-session in `hello`: `attach_rows`, `attach_bytes`, `attachments`, `session_rows`,
-`session_bytes` and `memory_ceiling`, and from version 6 a seventh, `loader_memory_ceiling`. It
+**Memory** below says, and `loader_memory_ceiling` too, and `threads` as **Threads** says. A host
+may then lower any of six for its session in `hello`: `attach_rows`, `attach_bytes`,
+`attachments`, `session_rows`, `session_bytes` and `memory_ceiling`, from version 6 a seventh,
+`loader_memory_ceiling`, and from version 7 an eighth, `threads`. It
 never raises one, as it lowers the caps in a `query`, and `memory` is not
 its to lower. `hello` answers with the session's:
 
@@ -212,6 +215,22 @@ A host running many sessions lowers it in `hello`, `"limits": {"loader_memory_ce
 300000000}`; it is reported from version 6, and lowering it before 6 is `E_REQUEST`. Off Linux it
 is not enforced: `"loader_memory_ceiling": null`, with `unenforced.loader_memory_ceiling` saying
 why. The loaders of one attach run side by side, up to four at once, each under the ceiling.
+
+**Threads** (version 7). `threads` is how many threads the engine runs agent SQL on:
+`--threads N` or `[engine] threads = N` in the config, never both, and 1 by default, so a
+runaway query takes one core of a shared machine. On a machine with cores to spare, the
+operator gives each session more. A grouped aggregate over 10,000,000 rows then runs several
+times quicker (docs/PERFORMANCE.md, *Engine threads*). A host running many sessions on that
+machine lowers it in `hello`, `"limits": {"threads": 2}`. It is reported from version 7,
+lowering it before 7 is `E_REQUEST`, and so is raising it or setting it to 0. The engine has
+already opened on the operator's number when `hello` arrives, and its threads are locked as it
+opens. So a host that lowers them has that engine replaced before its first call by one on its
+own number, with the helpers and no table. The replacement costs one engine start, paid by the
+first call. DuckDB's memory budget, `memory`, is one budget whatever the threads, and
+`memory_ceiling` bounds the engine as before. More threads hold more at once inside that
+budget (*Engine threads* has the measurement), so a host that lowers `memory_ceiling` close to
+`memory` leaves less room on more threads. The threads are started after the engine is
+confined, and each is confined as the engine is (`sandbox_posture`).
 
 ### Tool names, in version 4
 

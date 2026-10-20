@@ -740,6 +740,7 @@ impl Supervisor {
         let req = Request::Open {
             workspace: workspace.display().to_string(),
             memory_limit: self.spec.memory_limit.clone(),
+            threads: self.spec.limits.threads as usize,
             allow_unsandboxed: self.spec.allow_unsandboxed,
             first_result_id: self.next_result_id,
             result_prefix: self.result_prefix.clone(),
@@ -1158,10 +1159,20 @@ impl Supervisor {
 
     /// A host's `hello` lowered the session's limits. Only before anything is attached, so the
     /// budget is still whole and is set anew.
+    ///
+    /// The engine's threads are set as it opens and locked there (`lockdown::lock`), and it has
+    /// opened by now, so an engine opened on more threads than the host asked for is stopped,
+    /// and the next call rebuilds it on the host's, with the helpers it had and no table: only
+    /// where the host lowers them, and only once, before its first call
+    /// (`a_host_lowers_the_engines_threads_and_cannot_raise_them`).
     pub fn lower_limits(&mut self, limits: crate::admission::HostLimits) {
         debug_assert!(self.attachments.is_empty());
+        let threads_changed = limits.threads != self.spec.limits.threads;
         self.spec.limits = limits;
         self.budget = crate::admission::Budget::new(limits.session_rows, limits.session_bytes);
+        if threads_changed {
+            self.stop_engine();
+        }
     }
 
     /// A host's `hello` named the agent's tools: every text from now on uses its names.

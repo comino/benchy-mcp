@@ -84,6 +84,21 @@ Changed behaviour:
 
 Faster:
 
+- **The engine can run agent SQL on more than one thread** (#56). Use `--threads N` or
+  `[engine] threads = N`; the default is still 1, so on a shared machine a runaway takes one
+  core. A host may lower the operator's number in `hello`, from host protocol 7
+  (`limits.threads`), and never raise it. An engine already open on more threads is then
+  rebuilt on the host's before its first call. On four cores, a per-meter hourly mean over
+  10,000,000 rows took 0.77 → 0.25 s, and a per-meter percentile 0.65 → 0.21 s. That cost
+  12–19% more instructions and about 70 MiB more peak memory. The engine is sealed in a new
+  order: everything but the lock, on one thread, then the confinement, then `SET threads = N`
+  and `lock_configuration`. DuckDB starts the workers at that `SET`, from a confined thread,
+  so they are confined too. A test puts a C function on the bench to prove it from each
+  worker. The agent still cannot change the threads: the lock refuses `SET threads`, and the
+  seal proves that before it serves. Host protocol 7 adds the field; a host on 6 sees nothing
+  new.
+  (`the_engines_threads_are_started_after_it_is_confined`,
+  `a_host_lowers_the_engines_threads_and_cannot_raise_them`)
 - **A table sorted by series, then time, is no longer profiled twice** (#54). Its first batches
   look like one series whose times do not repeat, and the watch chose the one series there, so
   the pass and the key's distinct counts were read from the table again after the write, on

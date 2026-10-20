@@ -18,6 +18,9 @@ pub enum Request {
         /// it again.
         workspace: String,
         memory_limit: String,
+        /// REQ-7: the threads agent SQL runs on, `--threads`, as a host may have lowered it.
+        #[serde(default = "one_thread")]
+        threads: usize,
         /// Serve even where Landlock cannot confine the engine. The operator's explicit choice.
         #[serde(default)]
         allow_unsandboxed: bool,
@@ -83,6 +86,10 @@ pub enum Request {
 }
 
 fn one() -> u64 {
+    1
+}
+
+fn one_thread() -> usize {
     1
 }
 

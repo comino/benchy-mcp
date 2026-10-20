@@ -138,6 +138,7 @@ pub fn run() -> ! {
             Request::Open {
                 workspace,
                 memory_limit,
+                threads,
                 allow_unsandboxed,
                 first_result_id,
                 result_prefix,
@@ -147,17 +148,15 @@ pub fn run() -> ! {
                 // workspace, a loader's staging — so that is what goes if the server dies.
                 holding(dir.parent().unwrap_or(dir));
                 match crate::trace::span("open_sealed", || {
-                    Workspace::open_sealed(dir, &memory_limit)
+                    seal(dir, &memory_limit, threads, allow_unsandboxed, || {
+                        if let Some(w) = watch.take() {
+                            w.stop();
+                        }
+                    })
                 })
-                .map_err(|e| e.to_string())
-                .and_then(|ws| {
-                    if let Some(w) = watch.take() {
-                        w.stop();
-                    }
-                    let posture =
-                        crate::trace::span("confine", || confine(&ws, dir, allow_unsandboxed))?;
+                .map(|(ws, posture)| {
                     watch = Some(Watch::start(server));
-                    Ok((ws, posture))
+                    (ws, posture)
                 }) {
                     Ok((mut ws, posture)) => {
                         ws.set_first_result_id(first_result_id);
@@ -333,23 +332,38 @@ pub fn run() -> ! {
     }
 }
 
+/// The engine's bench: sealed, confined, and only then given its `threads` for agent SQL, in that
+/// order (`Workspace::open_confined`). `alone_now` stops whatever thread of the caller's own is
+/// running, just before the confinement asks to be alone. Public so that
+/// `tests/threads.rs` seals exactly as the engine does.
+pub fn seal(
+    workspace: &Path,
+    memory_limit: &str,
+    threads: usize,
+    allow_unsandboxed: bool,
+    alone_now: impl FnOnce(),
+) -> Result<(Workspace, crate::sandbox::Posture), String> {
+    Workspace::open_confined(workspace, memory_limit, threads, || {
+        alone_now();
+        crate::trace::span("confine", || confine(workspace, allow_unsandboxed))
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// REQ-3, in the process that actually runs the SQL. The workspace sits in the server's session
 /// directory, which is where this engine may still delete.
 ///
 /// Landlock confines the calling thread and the threads it starts afterwards, never a thread
-/// already running, so this must be the only thread. The seal stopped DuckDB's workers
-/// (`threads = 1`) and the caller stopped the watch. The engine loads nothing and runs no
+/// already running, so this must be the only thread. The seal has sent DuckDB's workers away
+/// (`threads = 1`, `lockdown::prepare`) and not yet started the ones agent SQL runs on
+/// (`lockdown::lock`), and the caller stopped the watch. The engine loads nothing and runs no
 /// connector, so nothing else should be running; if something is, it would be an unconfined
 /// thread in the process that runs agent SQL, and the engine refuses to serve rather than pretend.
-fn confine(
-    ws: &Workspace,
-    workspace: &Path,
-    allow_unsandboxed: bool,
-) -> Result<crate::sandbox::Posture, String> {
+fn confine(workspace: &Path, allow_unsandboxed: bool) -> Result<crate::sandbox::Posture, String> {
     crate::sandbox::alone(Duration::from_secs(2))
         .map_err(|e| format!("the engine cannot be confined: {e}"))?;
     let session = workspace.parent().unwrap_or(workspace);
-    let posture = crate::sandbox::restrict_to(ws.dir(), session);
+    let posture = crate::sandbox::restrict_to(workspace, session);
     crate::sandbox::admit(&posture, allow_unsandboxed, "engine")?;
     Ok(posture)
 }

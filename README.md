@@ -546,6 +546,11 @@ OPTIONS
                       attaches nothing (default 1GB); or [loader] memory_ceiling in a config.
                       A host may lower it for its session (protocol 6), never raise it.
                       Linux only, as --memory-ceiling.
+  --threads N         threads the engine runs agent SQL on      (default 1); or [engine]
+                      threads in a config. One keeps a runaway to one core of a shared
+                      machine; more make a grouped aggregate several times quicker on one
+                      that is not. A host may lower it for its session (protocol 7), never
+                      raise it.
   --load-timeout N    seconds one source may take to load       (default 300)
   --attach-rows N     with `host`: rows one attachment may hold  (default 10000000)
   --attach-bytes N    with `host`: bytes one attachment may be   (default 268435456)

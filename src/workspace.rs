@@ -933,7 +933,8 @@ impl Bench {
         // here, and the only path that does not reach this point is a startup failure, after
         // which the process exits. REQ-1 makes that true by construction — one bench, one
         // process.
-        ws.verify_locked()?;
+        ws.verify_closed()?;
+        ws.verify_locked(1)?;
         ws.verify_utc()?;
         ws.verify_readonly()?;
         Ok(ws)
@@ -945,13 +946,40 @@ impl Workspace {
         &self.loaded
     }
 
-    /// A bench that starts sealed and empty. Tables arrive later, each by [`Workspace::attach`],
-    /// from `dir` — the one directory DuckDB may open after the lock, emptied again by every
-    /// attach, because an allowed directory is open to every file reader.
+    /// The agent's connection, raw, past the statement allowlist: for `tests/threads.rs`, which
+    /// puts a function of its own on it to see which threads run agent SQL and what they can
+    /// reach. Nothing in the engine calls it; agent SQL reaches the bench only through
+    /// [`Workspace::work`].
+    #[doc(hidden)]
+    pub fn agent_connection(&self) -> ffi::duckdb_connection {
+        self.agent
+    }
+
+    /// A bench that starts sealed and empty, on one thread, in a process that confines itself
+    /// some other way or not at all: the tests. The engine's is [`Workspace::open_confined`].
     pub fn open_sealed(dir: &Path, memory_limit: &str) -> Result<Workspace, WorkError> {
+        Self::open_confined(dir, memory_limit, 1, || Ok(())).map(|(ws, ())| ws)
+    }
+
+    /// A bench that starts sealed and empty, its agent SQL on `threads` threads. Tables arrive
+    /// later, each by [`Workspace::attach`], from `dir` — the one directory DuckDB may open after
+    /// the lock, emptied again by every attach, because an allowed directory is open to every
+    /// file reader.
+    ///
+    /// `confine` is called between the two steps of the lock (`lockdown::prepare` and
+    /// `lockdown::lock`), on this thread, with DuckDB's workers sent away: the engine confines
+    /// itself there, so the workers `lock` starts for agent SQL are started by a confined thread
+    /// and are confined too (REQ-7 `the_engines_threads_are_started_after_it_is_confined`). What
+    /// it returns is handed back beside the bench.
+    pub fn open_confined<T>(
+        dir: &Path,
+        memory_limit: &str,
+        threads: usize,
+        confine: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(Workspace, T), WorkError> {
         let (db, agent, ingest) = fresh_engine()?;
         unsafe { raw_exec(agent, "SET search_path = 'memory.main'") }.map_err(WorkError::Open)?;
-        lockdown::apply_allowing(&ingest, memory_limit, Some(dir))
+        lockdown::prepare(&ingest, memory_limit, Some(dir))
             .map_err(|e| WorkError::Open(e.to_string()))?;
         let ws = Workspace {
             db,
@@ -973,9 +1001,13 @@ impl Workspace {
             attached: Vec::new(),
             next_alias: 1,
         };
-        ws.verify_locked()?;
+        // Before the confinement, so the refusal proven is DuckDB's own and not Landlock's.
+        ws.verify_closed()?;
+        let confined = confine().map_err(WorkError::Open)?;
+        lockdown::lock(&ws.ingest, threads).map_err(|e| WorkError::Open(e.to_string()))?;
+        ws.verify_locked(threads)?;
         ws.verify_utc()?;
-        Ok(ws)
+        Ok((ws, confined))
     }
 
     /// Put table `name` from the DuckDB file `file` — which holds it under that name — on the
@@ -1398,7 +1430,27 @@ impl Workspace {
 
     /// The boundary must be in force on the connection the agent actually uses. A silently
     /// unlocked engine would be a leak discovered later; this makes it a startup failure.
-    fn verify_locked(&self) -> Result<(), WorkError> {
+    ///
+    /// That it does its job, not merely that it is locked: proven before the process confines
+    /// itself, so that the refusal is DuckDB's. Under Landlock the read would be refused all the
+    /// same, and an engine whose own boundary had failed would pass.
+    fn verify_closed(&self) -> Result<(), WorkError> {
+        if self
+            .raw_exec_unchecked("SELECT * FROM read_text('/etc/hostname')")
+            .is_ok()
+        {
+            return Err(WorkError::Open(
+                "the agent connection can still read files after lockdown".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// That the lock holds on the agent's connection, and that agent SQL runs on the `threads`
+    /// asked for. External access cannot be turned back on even before the lock (DuckDB 1.5.5),
+    /// so that alone would not show a lock missing: `threads` can be set until the lock and not
+    /// after it, which shows it, and is the setting a runaway would raise first.
+    fn verify_locked(&self, threads: usize) -> Result<(), WorkError> {
         if self
             .raw_exec_unchecked("SET enable_external_access = true")
             .is_ok()
@@ -1407,14 +1459,28 @@ impl Workspace {
                 "the agent connection accepted re-enabling external access after lockdown".into(),
             ));
         }
-        // and prove the boundary is actually doing its job, not merely locked
-        if self
-            .raw_exec_unchecked("SELECT * FROM read_text('/etc/hostname')")
-            .is_ok()
-        {
-            return Err(WorkError::Open(
-                "the agent connection can still read files after lockdown".into(),
-            ));
+        for undo in [
+            format!("SET threads = {}", threads + 1),
+            format!("SET GLOBAL threads = {}", threads + 1),
+            "RESET threads".to_string(),
+        ] {
+            if self.raw_exec_unchecked(&undo).is_ok() {
+                return Err(WorkError::Open(format!(
+                    "the agent connection accepted `{undo}` after lockdown: the configuration is \
+                     not locked"
+                )));
+            }
+        }
+        let on = self
+            .agent_rows(c"SELECT current_setting('threads')::VARCHAR")
+            .ok()
+            .and_then(|rows| rows.into_iter().next())
+            .map(|row| row.1);
+        if on.as_deref() != Some(threads.to_string().as_str()) {
+            return Err(WorkError::Open(format!(
+                "agent SQL runs on {} thread(s), not the {threads} asked for",
+                on.as_deref().unwrap_or("an unknown number of")
+            )));
         }
         Ok(())
     }
