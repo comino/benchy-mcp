@@ -47,7 +47,7 @@ readings (840960 rows)
   at the same moment in every series:
     kw is 0 in every series at 2014-03-30 01:00:00+00 to 01:45:00+00 (4 times) — 2014-03-30, the last Sunday of March, when clocks in the EU go forward an hour
     kw summed over the series is 2× the same time a day before and after at 2014-10-26 01:00:00+00 to 01:45:00+00 (4 times) — 2014-10-26, the last Sunday of October, when clocks in the EU go back an hour
-  series with something to note (a run of 0 or null lasting 1 day or more, a gap, a repeated time, a late start or early end):
+  series with something to note (a run of 0 or null lasting 1 day or more, or of one value as long and 10× the series' average run; a gap, a repeated time, a late start or early end):
     'MT_223': kw is 0 in every row
     'MT_347': kw is 0 from the start (2014-01-01 00:00:00+00) to 2014-02-28 09:15:00+00 (58 days 9 hours), then 0 from 2014-08-06 16:15:00+00 to 2014-08-12 15:15:00+00 (5 days 23 hours), then … then 0 from 2014-12-18 13:00:00+00 to the end (2014-12-31 23:45:00+00) (13 days 11 hours), 5 runs in all
     'MT_109': kw is 0 from the start (2014-01-01 00:00:00+00) to 2014-02-18 00:00:00+00 (48 days)
@@ -88,7 +88,7 @@ meters (8 rows)
   series key meter (looks like it): 2 series ('lab', 'office')
   1 of 2 series has a row every 15 minutes from its first to its last, none missing or repeated
   power_kw: 1 to 8, never null
-  series with something to note (a run of 0 or null lasting 1 day or more, a gap, a repeated time, a late start or early end):
+  series with something to note (a run of 0 or null lasting 1 day or more, or of one value as long and 10× the series' average run; a gap, a repeated time, a late start or early end):
     'office': power_kw is 1 in every row; 1 gap, 1 row missing in all; the longest 15 minutes (no rows after 2026-01-01 00:15:00+00 until 2026-01-01 00:45:00+00); 1 row repeats a time already present
     the one other series: none of these
 ```
@@ -574,7 +574,7 @@ OPTIONS
 
 | Tool | |
 |---|---|
-| `describe` | every table, its row count and its columns, and the shape of its data: the time column, its range and cadence, the series key, and which series are dead, start late, stop, pause, skip or repeat rows; then the operator's helpers, each with its signature and comment |
+| `describe` | every table, its row count and its columns, and the shape of its data: the time column, its range and cadence, the series key and the step each series keeps, and which series are dead, start late, stop, pause, skip or repeat rows, or hold one value far longer than they otherwise do; then the operator's helpers, each with its signature and comment |
 | `query` | DuckDB SQL, several statements per call, each returning its own result. If one fails, nothing after it runs; the ones before it keep their effects, and their results come back after the error |
 | `get_result` | read a result again, or further on, by id and row offset; the last 32 are kept |
 | `dialect` | the DuckDB syntax reference, on demand; errors already name their fix |

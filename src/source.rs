@@ -3206,9 +3206,13 @@ mod tests {
                 (
                     "kw",
                     "float64",
-                    Arc::new(Float64Array::from_iter_values(
-                        (0..n).map(|i| if i < per { 0.0 } else { (i % 97) as f64 }),
-                    )),
+                    Arc::new(Float64Array::from_iter_values((0..n).map(|i| {
+                        if i < per {
+                            0.0
+                        } else {
+                            (i % 97) as f64
+                        }
+                    }))),
                 ),
             ],
             16_384,
@@ -3256,9 +3260,13 @@ mod tests {
                 (
                     "mode",
                     "string",
-                    Arc::new(StringArray::from_iter_values(
-                        (0..n).map(|i| if i < 40_000 { "day" } else { "night" }),
-                    )),
+                    Arc::new(StringArray::from_iter_values((0..n).map(|i| {
+                        if i < 40_000 {
+                            "day"
+                        } else {
+                            "night"
+                        }
+                    }))),
                 ),
                 ("kw", "float64", kw(n)),
             ],
@@ -3303,7 +3311,11 @@ mod tests {
                 (
                     "ts",
                     "timestamptz",
-                    ts_us((0..n).map(|i| Some(t0 + ((i * 7_919) % n) as i64 * M)).collect()),
+                    ts_us(
+                        (0..n)
+                            .map(|i| Some(t0 + ((i * 7_919) % n) as i64 * M))
+                            .collect(),
+                    ),
                 ),
                 (
                     "reading",
@@ -3326,7 +3338,11 @@ mod tests {
                 (
                     "ts",
                     "timestamptz",
-                    ts_us((0..n).map(|i| Some(t0 + ((i * 7_919) % n) as i64 * M)).collect()),
+                    ts_us(
+                        (0..n)
+                            .map(|i| Some(t0 + ((i * 7_919) % n) as i64 * M))
+                            .collect(),
+                    ),
                 ),
                 (
                     "site",
@@ -3339,8 +3355,36 @@ mod tests {
         );
         assert_eq!(both(bench, &h, &no), (true, true), "one site, no order");
         let counted = |t: &LoadedTable| t.seen.as_ref().unwrap().candidate_distinct().is_some();
-        assert!(!counted(&h), "one site in no order was kept as if it could be cut");
-        assert!(counted(&c), "one site in order was not kept as if it could be cut");
+        assert!(
+            !counted(&h),
+            "one site in no order was kept as if it could be cut"
+        );
+        assert!(
+            counted(&c),
+            "one site in order was not kept as if it could be cut"
+        );
+
+        // A key that never changes for more rows than the tallies wait: the one series.
+        let n = 1_100_000usize;
+        let i = stream(
+            bench,
+            "i",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us((0..n).map(|i| Some(t0 + i as i64 * M)).collect()),
+                ),
+                (
+                    "site",
+                    "string",
+                    Arc::new(StringArray::from_iter_values((0..n).map(|_| "plant"))),
+                ),
+                ("kw", "float64", kw(n)),
+            ],
+            65_536,
+        );
+        assert!(!counted(&i), "waited past its bound");
 
         // Times alone, which repeat only after many batches.
         let f = stream(
@@ -3378,6 +3422,79 @@ mod tests {
         let mut kept = t.clone();
         kept.seen = watched(bench.connection(), &t.name, &t.columns);
         assert_eq!(both(bench, &kept, &no), (true, true), "the file");
+    }
+
+    #[test]
+    fn a_stream_sorted_by_series_says_what_its_rows_in_time_order_say() {
+        // #54 beside #50 and #51: three meters reading every 1, 2 and 3 minutes, the first and
+        // the second holding one value for two days, sent a meter at a time and every meter at
+        // each minute. The first meter's rows, the ones added while the key held one value,
+        // are tallied for its step and its runs as any other's: the two say the same, each
+        // what reading its table says, and the values held are noted.
+        let tb = TestBench::new("orders");
+        let bench = tb.bench();
+        let no = crate::profile::Shape::default();
+        const M: i64 = 60_000_000;
+        let t0 = 1_767_225_600_000_000i64;
+        let day = 1_440i64;
+        let mut rows: Vec<(i64, i64, f64)> = Vec::new();
+        for (m, every) in [(0i64, 1i64), (1, 2), (2, 3)] {
+            for k in 0..(25 * day / every) {
+                let minute = k * every;
+                let held = match m {
+                    0 => (3 * day..5 * day).contains(&minute),
+                    1 => (10 * day..12 * day).contains(&minute),
+                    _ => false,
+                };
+                let kw = if held {
+                    21.5
+                } else {
+                    ((k * 7 + m) % 13 + 1) as f64
+                };
+                rows.push((minute, m, kw));
+            }
+        }
+        let send = |name: &str, rows: &[(i64, i64, f64)]| {
+            stream(
+                bench,
+                name,
+                vec![
+                    (
+                        "ts",
+                        "timestamptz",
+                        ts_us(rows.iter().map(|r| Some(t0 + r.0 * M)).collect()),
+                    ),
+                    (
+                        "meter",
+                        "string",
+                        Arc::new(StringArray::from_iter_values(
+                            rows.iter().map(|r| format!("m{}", r.1)),
+                        )),
+                    ),
+                    (
+                        "kw",
+                        "float64",
+                        Arc::new(Float64Array::from_iter_values(rows.iter().map(|r| r.2))),
+                    ),
+                ],
+                16_384,
+            )
+        };
+        let by_meter = send("by_meter", &rows);
+        rows.sort_by_key(|r| (r.0, r.1));
+        let by_time = send("by_time", &rows);
+        assert_eq!(both(bench, &by_meter, &no), (true, true), "by meter");
+        assert_eq!(both(bench, &by_time, &no), (true, true), "by time");
+        let said = |t: &LoadedTable| {
+            crate::profile::compute(bench.connection(), &t.name, &t.columns, &no, t.seen.clone())
+                .unwrap()
+        };
+        let (a, b) = (said(&by_meter), said(&by_time));
+        assert_eq!(a, b);
+        let text = a.notes.join("\n");
+        for held in ["kw is 21.5 from 2026-01-04", "kw is 21.5 from 2026-01-11"] {
+            assert!(text.contains(held), "{held}: {text}");
+        }
     }
 
     #[test]

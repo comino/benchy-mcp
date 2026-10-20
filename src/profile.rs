@@ -56,7 +56,8 @@ pub struct Profile {
     pub events: Vec<String>,
     /// What the per-series notes are about.
     pub notes_header: String,
-    /// One line per series with something to note, most notable first.
+    /// One line per series with something to note, or per series whose notes are alike, most
+    /// notable first.
     pub notes: Vec<String>,
     /// Series with notes beyond those kept.
     pub more_notes: u64,
@@ -127,40 +128,52 @@ impl Profile {
     /// silently: what does not fit is counted in a last line that says so. `None` when not even
     /// that line fits — the caller then says the shape is not shown.
     pub fn render(&self, room: usize) -> Option<String> {
-        let mut items: Vec<String> = self.lines.iter().map(|l| format!("  {l}\n")).collect();
+        render_all(&[self], room).pop().flatten()
+    }
+
+    /// The rendered lines: the table's own — its time column, cadence, key, columns and the
+    /// moments every series shares — and then its notes about single series.
+    fn items(&self) -> (Vec<String>, Vec<String>) {
+        let mut own: Vec<String> = self.lines.iter().map(|l| format!("  {l}\n")).collect();
         if !self.events.is_empty() {
-            items.push("  at the same moment in every series:\n".into());
-            items.extend(self.events.iter().map(|e| format!("    {e}\n")));
+            own.push("  at the same moment in every series:\n".into());
+            own.extend(self.events.iter().map(|e| format!("    {e}\n")));
         }
+        let mut notes = Vec::new();
         if !self.notes.is_empty() {
-            items.push(format!("  {}\n", self.notes_header));
-            items.extend(self.notes.iter().map(|n| format!("    {n}\n")));
+            notes.push(format!("  {}\n", self.notes_header));
+            notes.extend(self.notes.iter().map(|n| format!("    {n}\n")));
             if self.more_notes > 0 {
-                items.push(format!(
+                notes.push(format!(
                     "    … and {} more series with notes like these\n",
                     self.more_notes
                 ));
             }
             if self.quiet == 1 {
-                items.push("    the one other series: none of these\n".into());
+                notes.push("    the one other series: none of these\n".into());
             } else if self.quiet > 0 {
-                items.push(format!(
+                notes.push(format!(
                     "    the other {} series: none of these\n",
                     self.quiet
                 ));
             }
         }
+        (own, notes)
+    }
+
+    /// `items` in `room` bytes: all of them, or the first that fit and a line saying how many
+    /// more there are, or `None` when not even that line fits.
+    fn fit(items: &[String], room: usize) -> Option<String> {
         let size = |s: &str| crate::result::wire_len(s);
         let total: usize = items.iter().map(|i| size(i)).sum();
         if total <= room {
             return Some(items.concat());
         }
-        // The longest the closing line can be, with a host's longer name for `describe`.
-        let mark = 90 + crate::tools::longer("describe");
+        let mark = mark();
         let mut out = String::new();
         let mut used = 0;
         let mut shown = 0;
-        for it in &items {
+        for it in items {
             if used + size(it) + mark > room {
                 break;
             }
@@ -178,6 +191,43 @@ impl Profile {
         ));
         Some(out)
     }
+}
+
+/// The longest the line saying what is not shown can be, with a host's longer name for
+/// `describe`.
+fn mark() -> usize {
+    90 + crate::tools::longer("describe")
+}
+
+/// REQ-14 `every_tables_shape_comes_before_any_tables_notes`: the profiles of several tables in
+/// `room` bytes in all, each as [`Profile::render`] says it. Every table's own lines are given
+/// their room first, in table order, and the notes about single series what is left, in table
+/// order: rendered one table after another, the first table's notes about its series took the
+/// whole budget, and a two-row table of sites beside it lost its shape (#50).
+pub fn render_all(profiles: &[&Profile], room: usize) -> Vec<Option<String>> {
+    let size = |s: &[String]| s.iter().map(|i| crate::result::wire_len(i)).sum::<usize>();
+    let parts: Vec<(Vec<String>, Vec<String>)> = profiles.iter().map(|p| p.items()).collect();
+    let mut left = room;
+    let held: Vec<usize> = parts
+        .iter()
+        .map(|(own, notes)| {
+            let want = size(own) + if notes.is_empty() { 0 } else { mark() };
+            let got = want.min(left);
+            left -= got;
+            got
+        })
+        .collect();
+    parts
+        .into_iter()
+        .zip(held)
+        .map(|((mut items, notes), held)| {
+            items.extend(notes);
+            let room = held + left;
+            let r = Profile::fit(&items, room);
+            left = room.saturating_sub(r.as_deref().map_or(0, crate::result::wire_len));
+            r
+        })
+        .collect()
 }
 
 /// A stored line, made safe to render: nothing in it can break the line or hide text, and it is
@@ -502,6 +552,10 @@ struct Series {
     top: i64,
     bottom: i64,
     measures: Vec<SeriesMeasure>,
+    /// The step the series is judged at: its own ([`judge`], [`gaps`]), not the table's. Read as
+    /// one, a table of series every 5, 10 and 15 minutes had every complete 10- and 15-minute
+    /// series reported broken: "8735 gaps, 17470 rows missing" (#50).
+    step: i64,
     /// Filled in by the checks below.
     notes: Vec<(u64, String)>,
 }
@@ -512,6 +566,15 @@ struct SeriesMeasure {
     zeros: i64,
     min: Option<f64>,
     max: Option<f64>,
+    /// Of the runs of one value ([`HotMeasure::run`]), as the rows came: how many, the rows with
+    /// a time and a value they are made of, and the longest of those not 0, by time and by rows.
+    /// Each run a value holds without a gap lies within one of these, so they say which series
+    /// could have one long enough to note, and only those are read again ([`stuck`]). Whether
+    /// they came in time order is the series' `ordered`; when not, they say nothing.
+    runs: i64,
+    valued: i64,
+    long_span: i64,
+    long_rows: i64,
 }
 
 impl Series {
@@ -1082,15 +1145,61 @@ fn profile(
             .is_none_or(|(b, a)| (b - a) / st < 3_000_000_000)
     });
 
+    // Each series at its own step, first as its times' common divisor says ([`judge`]); which
+    // are on it, with nothing missing or repeated; and where the rest break it, at the step most
+    // of their rows keep ([`gaps`]).
+    if let Some(st) = step {
+        for s in series.iter_mut() {
+            judge(s, st, origin);
+        }
+    }
+    let mut regular: Vec<bool> = series
+        .iter()
+        .map(|s| step.is_some() && s.regular(s.step, origin))
+        .collect();
+    if step.is_some() {
+        crate::trace::span("profile.settle", || {
+            settle(&cx, &series, &mut regular, origin)
+        });
+        if !unkeyed {
+            crate::trace::span("profile.gaps", || {
+                gaps(&cx, &mut series, &regular, keyed, clock)
+            });
+        }
+    }
+    // The steps series keep, and how many keep each: of the series with two times or more,
+    // which alone have one. A series of one row is said to keep the most common.
+    let steps = cadence(&series, |i| series[i].timed >= 2);
+    // Ties go to the shorter step.
+    let common = step.map(|st| {
+        steps
+            .iter()
+            .rev()
+            .max_by_key(|(_, n)| *n)
+            .map_or(st, |(s, _)| *s)
+    });
+    if let Some(c) = common {
+        for s in series.iter_mut().filter(|s| s.timed < 2) {
+            s.step = c;
+        }
+    }
+    let mixed = keyed && steps.len() > 1;
+
     // The time column.
     let mut l = format!("time column {}{}", shown(&time), guess(time_stated));
     if let (Some(a), Some(b)) = (first, last) {
         l.push_str(&format!(": {} to {}", clock.at(a), clock.at(b)));
     }
-    match step {
-        Some(s) if keyed => l.push_str(&format!("; most series have a row every {}", span(s))),
-        Some(s) => l.push_str(&format!("; most rows are {} apart", span(s))),
-        None => {}
+    match (step, common) {
+        (Some(_), Some(c)) if keyed && !mixed => {
+            l.push_str(&format!("; most series have a row every {}", span(c)))
+        }
+        (Some(_), Some(_)) if keyed => l.push_str(&format!(
+            "; series have a row every {}",
+            steps_list(&steps, true)
+        )),
+        (Some(s), _) => l.push_str(&format!("; most rows are {} apart", span(s))),
+        _ => {}
     }
     if timed < total {
         l.push_str(&format!(
@@ -1109,16 +1218,6 @@ fn profile(
             .push(format!("other time columns: {}", others.join(", ")));
     }
 
-    // Which series are on the step, with nothing missing or repeated.
-    let mut regular: Vec<bool> = series
-        .iter()
-        .map(|s| step.is_some_and(|st| s.regular(st, origin)))
-        .collect();
-    if let Some(st) = step {
-        crate::trace::span("profile.settle", || {
-            settle(&cx, &series, &mut regular, st, origin)
-        });
-    }
     let n_regular = regular.iter().filter(|r| **r).count();
     let full_range = |s: &Series| s.first == first && s.last == last;
     if keyed {
@@ -1164,41 +1263,48 @@ fn profile(
             l.push_str(&format!(" ({} … {})", key_shown(a), key_shown(b)));
         }
         p.lines.push(l);
-        if let Some(st) = step {
+        if let (Some(_), Some(c)) = (step, common) {
             let whole = series
                 .iter()
                 .zip(&regular)
                 .filter(|(s, r)| **r && full_range(s))
                 .count();
+            // REQ-14 `each_series_is_judged_at_its_own_step`: the regular series by the step
+            // each keeps; one step is said as before, several as how many keep each.
+            let kept = cadence(&series, |i| regular[i]);
+            let one = n_regular == 1;
+            let (has, its) = if one {
+                ("has", "its")
+            } else {
+                ("have", "their")
+            };
+            let (every, each) = match kept.as_slice() {
+                [] => (format!("every {}", span(c)), String::new()),
+                [(st, _)] => (format!("every {}", span(*st)), String::new()),
+                _ => (
+                    format!("at {its} own step"),
+                    format!(" ({})", steps_list(&kept, false)),
+                ),
+            };
             let mut l = if let Some(to) = &examined_to {
                 let to = key_shown(to);
                 format!(
-                    "{n_regular} of the first {} series by key, to {to}, {} a row every {} from \
-                     {} first to {} last, none missing or repeated; the series after {to} were \
-                     not examined one by one and have no notes below",
+                    "{n_regular} of the first {} series by key, to {to}, {has} a row {every} \
+                     from {its} first to {its} last, none missing or repeated{each}; the series \
+                     after {to} were not examined one by one and have no notes below",
                     series.len(),
-                    if n_regular == 1 { "has" } else { "have" },
-                    span(st),
-                    if n_regular == 1 { "its" } else { "their" },
-                    if n_regular == 1 { "its" } else { "their" },
                 )
             } else if n_regular == series.len() {
+                let every = every.replace("their own", "its own");
                 format!(
-                    "every series has a row every {} from its first to its last, none missing \
-                     or repeated",
-                    span(st)
+                    "every series has a row {every} from its first to its last, none missing \
+                     or repeated{each}"
                 )
             } else {
-                let (has, their) = if n_regular == 1 {
-                    ("has", "its")
-                } else {
-                    ("have", "their")
-                };
                 format!(
-                    "{n_regular} of {} series {has} a row every {} from {their} first to {their} \
-                     last, none missing or repeated",
+                    "{n_regular} of {} series {has} a row {every} from {its} first to {its} \
+                     last, none missing or repeated{each}",
                     series.len(),
-                    span(st)
                 )
             };
             if whole == series.len() && !too_many {
@@ -1243,7 +1349,21 @@ fn profile(
     // Per series: what the GROUP BY alone shows, then what the bounded windows find.
     let threshold = step.map(|s| (8 * s).max(DAY_MS));
     for s in series.iter_mut() {
-        note_extent(s, first, last, step, clock, keyed);
+        let own = step.map(|_| s.step);
+        note_extent(s, first, last, own, clock, keyed);
+        if let (true, Some(c)) = (mixed, common) {
+            if s.timed >= 2 && s.step != c {
+                // Weighed 0: said first in its line, and its line after every other note.
+                s.notes.push((
+                    0,
+                    format!(
+                        "a row every {}, where the most common step is {}",
+                        span(s.step),
+                        span(c)
+                    ),
+                ));
+            }
+        }
         for (j, m) in measures.iter().enumerate() {
             let sm = &s.measures[j];
             let name = shown(&m.name);
@@ -1262,25 +1382,35 @@ fn profile(
         }
     }
     if let Some(st) = step {
-        if !unkeyed {
-            crate::trace::span("profile.gaps", || {
-                gaps(&cx, &mut series, &regular, st, clock)
-            });
-        }
         if let Some(th) = threshold {
             crate::trace::span("profile.runs", || {
                 for (j, m) in measures.iter().enumerate() {
                     let rows = flat.as_ref().map(|f| f[j].as_slice());
-                    runs(&cx, &mut series, j, &m.name, (st, th), clock, rows);
+                    runs(&cx, &mut series, j, &m.name, th, clock, rows);
+                    if keyed {
+                        stuck(&cx, &mut series, j, &m.name, th, clock);
+                    }
                 }
             });
-            p.notes_header =
+            p.notes_header = if keyed {
                 format!(
-                "{} something to note (a run of 0 or null lasting {} or more, a gap, a repeated \
-                 time, a late start or early end):",
-                if keyed { "series with" } else { "the series has" },
-                span(th)
-            );
+                    "series with something to note (a run of 0 or null lasting {} or more, or \
+                     of one value as long and {STUCK_TIMES}× the series' average run; a gap, a \
+                     repeated time, a late start or early end{}):",
+                    span(th),
+                    if mixed {
+                        "; a step other than the most common"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                format!(
+                    "the series has something to note (a run of 0 or null lasting {} or more, a \
+                     gap, a repeated time, a late start or early end):",
+                    span(th)
+                )
+            };
         }
         if keyed && series.len() >= 3 && st <= DAY_MS && DAY_MS % st == 0 {
             p.events = crate::trace::span("profile.moments", || match &times {
@@ -1290,29 +1420,79 @@ fn profile(
         }
     }
 
-    // Most notable first: a dead series, then by how long its notes last.
-    let mut noted: Vec<&Series> = series.iter().filter(|s| !s.notes.is_empty()).collect();
-    noted.sort_by(|a, b| {
-        let w = |s: &Series| s.notes.iter().map(|n| n.0).max().unwrap_or(0);
-        w(b).cmp(&w(a)).then_with(|| a.key.cmp(&b.key))
+    // Each noted series' line, the step first, then most lasting first; series whose lines are
+    // alike are said once, by their keys.
+    let texts: Vec<Option<(u64, String)>> = series
+        .iter()
+        .map(|s| {
+            if s.notes.is_empty() {
+                return None;
+            }
+            let mut notes = s.notes.clone();
+            notes.sort_by_key(|n| (n.0 != 0, std::cmp::Reverse(n.0)));
+            let weight = notes.iter().map(|n| n.0).max().unwrap_or(0);
+            let text = notes
+                .into_iter()
+                .map(|n| n.1)
+                .collect::<Vec<_>>()
+                .join("; ");
+            Some((weight, text))
+        })
+        .collect();
+    let mut alike: Vec<(u64, String, Vec<usize>)> = Vec::new();
+    {
+        let mut at: std::collections::HashMap<&str, usize> = Default::default();
+        for (i, t) in texts.iter().enumerate() {
+            let Some((w, text)) = t else { continue };
+            match at.get(text.as_str()) {
+                Some(g) => {
+                    let g = &mut alike[*g];
+                    g.0 = g.0.max(*w);
+                    g.2.push(i);
+                }
+                None => {
+                    at.insert(text, alike.len());
+                    alike.push((*w, text.clone(), vec![i]));
+                }
+            }
+        }
+    }
+    // Most notable first: a dead series, then by how long its notes last; then by key.
+    for g in alike.iter_mut() {
+        g.2.sort_by(|a, b| key_order(&series[*a].key, &series[*b].key));
+    }
+    alike.sort_by(|a, b| {
+        let first = |g: &(u64, String, Vec<usize>)| {
+            g.2.iter()
+                .map(|i| series[*i].key.as_str())
+                .min()
+                .unwrap_or("")
+        };
+        b.0.cmp(&a.0).then_with(|| first(a).cmp(first(b)))
     });
-    p.quiet = (series.len() - noted.len()) as u64;
+    let noted: usize = alike.iter().map(|g| g.2.len()).sum();
+    p.quiet = (series.len() - noted) as u64;
     if !keyed {
         p.quiet = 0;
     }
-    p.more_notes = noted.len().saturating_sub(NOTES_KEPT) as u64;
-    for s in noted.into_iter().take(NOTES_KEPT) {
-        let mut notes = s.notes.clone();
-        notes.sort_by_key(|a| std::cmp::Reverse(a.0));
-        let text = notes
-            .into_iter()
-            .map(|n| n.1)
-            .collect::<Vec<_>>()
-            .join("; ");
-        p.notes.push(line(if keyed {
-            format!("{}: {text}", key_shown(&s.key))
-        } else {
+    p.more_notes = alike
+        .iter()
+        .skip(NOTES_KEPT)
+        .map(|g| g.2.len() as u64)
+        .sum();
+    for (_, text, of) in alike.into_iter().take(NOTES_KEPT) {
+        p.notes.push(line(if !keyed {
             text
+        } else if let [one] = of.as_slice() {
+            format!("{}: {text}", key_shown(&series[*one].key))
+        } else {
+            let keys: Vec<&str> = of.iter().map(|i| series[*i].key.as_str()).collect();
+            let room = LINE_MAX.saturating_sub(text.len() + 24).max(VALUE_MAX + 16);
+            format!(
+                "{} ({} series): {text}",
+                keys_said(&keys, &integer_key, &key_shown, room),
+                of.len()
+            )
         }));
     }
     if p.notes.is_empty() {
@@ -1322,6 +1502,113 @@ fn profile(
         *l = line(std::mem::take(l));
     }
     Some(p)
+}
+
+/// The steps of the series `pick` takes, each with how many keep it, in order of step.
+fn cadence(series: &[Series], pick: impl Fn(usize) -> bool) -> Vec<(i64, usize)> {
+    let mut by: std::collections::BTreeMap<i64, usize> = Default::default();
+    for (i, s) in series.iter().enumerate() {
+        if pick(i) {
+            *by.entry(s.step).or_default() += 1;
+        }
+    }
+    by.into_iter().collect()
+}
+
+/// How much longer than the series' runs of one value are on average a run must be, as well as
+/// a day or more, to be noted as a value held ([`stuck`]). On the public meter data's 370
+/// meters over four years, all 74 day-long runs of one non-zero value, frozen readings in six
+/// meters, are ten times their meter's average or more; at twenty times 16 were, at fifty 5
+/// (docs/PERFORMANCE.md).
+const STUCK_TIMES: i64 = 10;
+
+/// Steps and how many series keep each, as `5 minutes (52 series), 10 minutes (49) or 15
+/// minutes (48)` (`counted`) or `52 every 5 minutes, 49 every 10 minutes`; at most four, the
+/// most kept, in order of step, and how many keep the others.
+fn steps_list(steps: &[(i64, usize)], counted: bool) -> String {
+    let mut most: Vec<(i64, usize)> = steps.to_vec();
+    most.sort_by_key(|(st, n)| (std::cmp::Reverse(*n), *st));
+    let rest: usize = most.iter().skip(4).map(|(_, n)| *n).sum();
+    most.truncate(4);
+    most.sort_by_key(|(st, _)| *st);
+    let mut items: Vec<String> = most
+        .iter()
+        .enumerate()
+        .map(|(i, (st, n))| match (counted, i) {
+            (true, 0) => format!("{} ({})", span(*st), count(*n as u64, "series", "series")),
+            (true, _) => format!("{} ({n})", span(*st)),
+            (false, _) => format!("{n} every {}", span(*st)),
+        })
+        .collect();
+    if rest > 0 {
+        items.push(if counted {
+            format!("other steps ({rest})")
+        } else {
+            format!("{rest} at other steps")
+        });
+    }
+    match (counted, items.split_last()) {
+        (true, Some((last, before))) if !before.is_empty() => {
+            format!("{} or {last}", before.join(", "))
+        }
+        _ => items.join(", "),
+    }
+}
+
+/// The keys of series whose notes are alike, in key order, as `key_shown` says each, within
+/// `room` bytes: an integer key's consecutive values as a range, `1090–1099`, and what does not
+/// fit left out between whole items, as [`elide`] does.
+fn keys_said(
+    keys: &[&str],
+    integer_key: &[bool],
+    key_shown: &dyn Fn(&str) -> String,
+    room: usize,
+) -> String {
+    let mut items: Vec<String> = Vec::new();
+    if let ([true], Some(ints)) = (
+        integer_key,
+        keys.iter()
+            .map(|k| k.parse::<i128>().ok())
+            .collect::<Option<Vec<_>>>(),
+    ) {
+        let mut i = 0;
+        while i < ints.len() {
+            let mut e = i;
+            while e + 1 < ints.len() && ints[e + 1] == ints[e] + 1 {
+                e += 1;
+            }
+            items.push(if e == i {
+                ints[i].to_string()
+            } else {
+                format!("{}–{}", ints[i], ints[e])
+            });
+            i = e + 1;
+        }
+    } else {
+        items = keys.iter().map(|k| key_shown(k)).collect();
+    }
+    elide(&items, ", ", ", … ", room).unwrap_or_else(|| format!("{}, …", items[0]))
+}
+
+/// The step series `s` is first judged at, from `st`, the step most of the table's first slice
+/// keeps: the greatest common divisor of its times' distances when that is longer, since then
+/// every time is on it, or when shorter and the series is on it with nothing missing; else
+/// `st`, which a series off every step of its own, its times jittered, is judged at as before.
+/// Where it breaks its step, [`gaps`] judges it again at the distance most of its rows keep.
+fn judge(s: &mut Series, st: i64, origin: i64) {
+    s.step = st;
+    let g = i64::try_from(s.gcd).unwrap_or(0);
+    if s.timed >= 2 && g > 0 && g != st && s.t0.is_some() {
+        if g > st {
+            s.step = g;
+        } else {
+            s.place(g, origin);
+            if s.fits(g, origin) {
+                s.step = g;
+            }
+        }
+    }
+    s.place(s.step, origin);
 }
 
 /// Each numeric column's range, nulls and zeros.
@@ -1796,6 +2083,33 @@ struct HotMeasure {
     zeros: i64,
     min: f64,
     max: f64,
+    /// The run of one value the last row with a time is in ([`HotMeasure::run`]): the value's
+    /// bits ([`same`]), or [`NO_RUN`] after a null or before any row; its first and latest
+    /// time, and its rows. Then [`SeriesMeasure`]'s counts of every run.
+    run_v: u64,
+    run_a: i64,
+    run_b: i64,
+    run_n: i64,
+    runs: i64,
+    valued: i64,
+    long_span: i64,
+    long_rows: i64,
+}
+
+/// No run: a null ended the last, or there has been no row.
+const NO_RUN: u64 = 0x7ff8_0000_dead_0001;
+
+/// The bits a value is compared by for a run: DuckDB's `=`, under which NaN is NaN and -0.0 is
+/// 0.0. Never [`NO_RUN`]: every NaN is one NaN here.
+#[inline(always)]
+fn same(v: f64) -> u64 {
+    if v == 0.0 {
+        0
+    } else if v.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        v.to_bits()
+    }
 }
 
 impl HotMeasure {
@@ -1804,7 +2118,52 @@ impl HotMeasure {
         zeros: 0,
         min: f64::NAN,
         max: f64::NEG_INFINITY,
+        run_v: NO_RUN,
+        run_a: 0,
+        run_b: 0,
+        run_n: 0,
+        runs: 0,
+        valued: 0,
+        long_span: 0,
+        long_rows: 0,
     };
+
+    /// A row at time `t` whose value's bits are `v`, or `None` for a null: it continues the run
+    /// of the row before, or ends it and begins one. Most readings change from row to row, so
+    /// most rows end a run, and a run of one row is not kept as the longest: it cannot be one
+    /// [`stuck`] notes. About 24 instructions a row at exec_series-10m, whose every row differs
+    /// from its series' last: +1.3% of the session (docs/PERFORMANCE.md).
+    #[inline(always)]
+    fn run(&mut self, t: i64, v: Option<u64>) {
+        match v {
+            Some(v) if v == self.run_v => {
+                self.run_n += 1;
+                self.run_b = t;
+                self.valued += 1;
+            }
+            _ => {
+                self.end_run();
+                match v {
+                    Some(v) => {
+                        (self.run_v, self.run_a, self.run_b, self.run_n) = (v, t, t, 1);
+                        self.runs += 1;
+                        self.valued += 1;
+                    }
+                    None => (self.run_v, self.run_n) = (NO_RUN, 0),
+                }
+            }
+        }
+    }
+
+    /// The run so far is over: kept as the longest if it is, unless it is of 0, which is a run
+    /// of 0's to note ([`runs`]), not a stuck value.
+    #[inline(always)]
+    fn end_run(&mut self) {
+        if self.run_n > 1 && self.run_v != 0 {
+            self.long_span = self.long_span.max((self.run_b - self.run_a).abs());
+            self.long_rows = self.long_rows.max(self.run_n);
+        }
+    }
 }
 
 /// A key as a tally finds a row's series by it: its length and its first sixteen bytes as two
@@ -2103,6 +2462,9 @@ impl Tally {
                 let m = &mut measures[*x as usize * nm + j];
                 let v = *v;
                 let null = !valid(d.nulls, i);
+                if let Some(ts) = time.filter(|ts| ts.valid(i)) {
+                    m.run(ts.v[i], (!null).then(|| same(v)));
+                }
                 if null || v == 0.0 {
                     if null {
                         m.nulls += 1;
@@ -2133,15 +2495,7 @@ impl Tally {
         if self.flat_rows > self.flat_max {
             self.flat = None;
         }
-        if let Some(ts) = time {
-            self.add_times(rows, ts, values);
-        }
-    }
-
-    /// Rows `rows`' times and values, into the totals per time.
-    #[inline(always)]
-    fn add_times(&mut self, rows: std::ops::Range<usize>, ts: Stamps, values: &[Doubles]) {
-        let Some(tm) = self.times.as_mut() else {
+        let (Some(tm), Some(ts)) = (self.times.as_mut(), time) else {
             return;
         };
         for (i, t) in rows.clone().zip(&ts.v[rows]) {
@@ -2169,50 +2523,33 @@ impl Tally {
         }
     }
 
-    /// #54: `n` rows of a tally that waits to begin ([`Watch::begin`]): their totals per time
-    /// alone, which nothing else keeps.
-    fn wait(&mut self, n: usize, time: Option<Stamps>, values: &[Doubles]) {
-        if let Some(ts) = time {
-            self.add_times(0..n, ts, values);
-        }
-    }
-
-    /// #54: begin a tally that waited, with its one series keyed `key` (words `w`) as `one`
-    /// kept it of every row so far ([`Series::note`]): `rows` rows, `timed` of them with a time
-    /// from `first` to `last`, and its measures and rows of 0 or null. A row adds the same to
-    /// either, so the series is the one the tally would have kept
-    /// (`a_stream_sorted_by_series_is_tallied_by_its_key`).
-    fn begin(
+    /// #54: `n` rows that are all one series', keyed `key` with words `w`, as [`holds`] found
+    /// them: added as [`Tally::add`] adds them ([`Tally::take`]), without finding each row's
+    /// series by its key.
+    fn wait(
         &mut self,
+        n: usize,
         (key, w): (&str, Words),
-        rows: i64,
-        (timed, first, last): (i64, Option<i64>, Option<i64>),
-        one: &Series,
-        measures: &[HotMeasure],
-        flat: Option<Vec<Vec<(u32, i64, bool)>>>,
+        time: Option<Stamps>,
+        values: &[Doubles],
     ) {
-        let Found::At(x) = self.find(key, w) else {
-            self.alive = false;
-            return;
+        let x = match self.last {
+            Some(x) => x,
+            None => match self.find(key, w) {
+                Found::At(x) => x,
+                _ => {
+                    self.alive = false;
+                    return;
+                }
+            },
         };
-        let h = &mut self.hot[x];
-        h.rows = rows;
-        if timed > 0 {
-            h.timed = timed;
-            h.first = first.unwrap_or(i64::MAX);
-            h.last = last.unwrap_or(i64::MIN);
-            h.t0 = one.t0.unwrap_or(0);
-            h.gcd = one.gcd;
-            h.sum_d = one.sum_d;
-            h.sum_d2 = one.sum_d2;
-            h.rising = one.rising;
-            h.falling = one.falling;
-        }
-        let nm = self.nm;
-        self.measures[x * nm..(x + 1) * nm].copy_from_slice(measures);
-        self.flat_rows = flat.as_ref().map_or(0, |f| f.iter().map(Vec::len).sum());
-        self.flat = flat.filter(|_| self.flat_rows <= self.flat_max);
         self.last = Some(x);
+        self.hot[x].rows += n as i64;
+        let mut xs = std::mem::take(&mut self.xs);
+        xs.clear();
+        xs.resize(n, x as u32);
+        self.take(0, &xs, time, values);
+        self.xs = xs;
     }
 
     /// The series keyed `key`, by lookup, or begun.
@@ -2336,11 +2673,17 @@ impl Tally {
                 .iter()
                 .map(|m| {
                     let some = m.nulls < h.rows;
+                    let mut m = *m;
+                    m.end_run();
                     SeriesMeasure {
                         nulls: m.nulls,
                         zeros: m.zeros,
                         min: some.then_some(m.min),
                         max: some.then_some(m.max),
+                        runs: m.runs,
+                        valued: m.valued,
+                        long_span: m.long_span,
+                        long_rows: m.long_rows,
                     }
                 })
                 .collect();
@@ -2595,6 +2938,12 @@ const WATCH_FLAT_MAX: usize = 500_000;
 /// Keys guessed at most: a tally is kept for each candidate column only when there are this
 /// few, since each costs a lookup a row.
 const WATCH_KEYS_MAX: usize = 2;
+/// #54: rows the keyed tallies wait for a candidate's value to change ([`Order`]), at most.
+/// Waiting, a tally adds each row to its one series as it adds any row, which cost a
+/// 10,000,000-row Parquet table of one series beside a constant text column 1.9 G instructions
+/// (+8.5%) and 300 ms of the watch's CPU when it waited to the end; a stream sorted by series
+/// whose first series is longer than this has its pass read from the table, as before #54.
+const WATCH_WAIT_MAX: i64 = 1_000_000;
 
 /// #54: how a candidate's series and the times have followed one another, row after row, while
 /// the watch has not chosen between the one series and the keyed tallies ([`Watch::add`]). Rows
@@ -2619,7 +2968,7 @@ struct Order {
     ahead: i64,
 }
 
-/// The one value a candidate has held while its tally waits ([`Watch::begin`]).
+/// The one value a candidate has held, while every candidate has held one ([`Tally::wait`]).
 #[derive(Clone)]
 enum Wait {
     /// No row yet.
@@ -2644,13 +2993,13 @@ enum Sorted {
 impl Order {
     /// The rows of a batch: each one's series, `xs`, and its time.
     #[inline(always)]
-    fn see(&mut self, xs: impl Iterator<Item = u32>, time: Stamps) {
+    fn see(&mut self, xs: &[u32], time: Stamps) {
         let mut o = *self;
-        for (i, (x, t)) in xs.zip(time.v).enumerate() {
+        for (i, (x, t)) in xs.iter().zip(time.v).enumerate() {
             if !time.valid(i) {
                 continue;
             }
-            let t = *t;
+            let (x, t) = (*x, *t);
             o.rows += 1;
             if let Some((bx, bt)) = o.before {
                 if x == bx {
@@ -2747,8 +3096,8 @@ pub struct Watch {
     /// #54: per tally in `keyed`, how its series and the times have followed one another, while
     /// both `one` and `keyed` are kept; `None` once one of them is chosen.
     order: Option<Vec<Order>>,
-    /// #54: per tally in `keyed`, the one value its candidate has held, while the tallies wait
-    /// to begin ([`Watch::begin`]); `None` once they have.
+    /// #54: per tally in `keyed`, the one value its candidate has held, while every candidate
+    /// has held one ([`Tally::wait`]); `None` once one has not.
     waits: Option<Vec<Wait>>,
     /// Whether the first batch's times repeat: then a time is hashed only when it is not the
     /// row before's ([`Watch::times`]).
@@ -2982,53 +3331,6 @@ impl Watch {
         self.ok = false;
     }
 
-    /// #54: begin the tallies that waited, each with the one series `one` and the scan's
-    /// aggregates kept of the rows so far, `rows` (rows, timed, first, last), before any later
-    /// row is added to those: the measures from the scan's, each column's own, and the rows of 0
-    /// or null from `one`'s where it examines the same columns. With none so far, each begins
-    /// empty.
-    fn begin(&mut self, (rows, timed, first, last): (i64, i64, Option<i64>, Option<i64>)) {
-        let Some(waits) = self.waits.take() else {
-            return;
-        };
-        if rows == 0 {
-            return;
-        }
-        let Some(one) = self.one.as_ref() else {
-            self.keyed.clear();
-            return;
-        };
-        let at = |c: usize| self.numeric.iter().position(|n| *n == c).expect("numeric");
-        let one_cols = &self.numeric[..self.one_nm];
-        let null = key_words(NULL_PART.as_bytes());
-        for ((_, examined, tally), w) in self.keyed.iter_mut().zip(&waits) {
-            let key = match w {
-                Wait::Text(s) => (s.as_str(), key_words(s.as_bytes())),
-                Wait::Int(x) => ("", int_words(*x)),
-                Wait::Null | Wait::Unset => (NULL_PART, null),
-            };
-            let measures: Vec<HotMeasure> = examined
-                .iter()
-                .map(|e| {
-                    let m = &self.numbers[at(*e)];
-                    HotMeasure {
-                        nulls: m.nulls,
-                        zeros: m.zeros,
-                        min: m.min.unwrap_or(f64::NAN),
-                        max: m.max.unwrap_or(f64::NEG_INFINITY),
-                    }
-                })
-                .collect();
-            let flat = self.one_flat.as_ref().and_then(|f| {
-                examined
-                    .iter()
-                    .map(|e| Some(f[one_cols.iter().position(|c| c == e)?].clone()))
-                    .collect::<Option<Vec<_>>>()
-            });
-            tally.begin(key, rows, (timed, first, last), one, &measures, flat);
-        }
-    }
-
     /// `n` rows, in the order they went into the table: `cols[i]` is column `i`
     /// ([`Held::of`]), for every column [`Watch::needs`].
     pub fn add(&mut self, n: usize, cols: &[Option<Held>]) {
@@ -3044,8 +3346,6 @@ impl Watch {
             self.ok = false;
             return;
         }
-        // What the batches before this one came to, should a waiting tally be begun from them.
-        let before = (self.total, self.timed, self.first, self.last);
         self.total += n as i64;
         // The time, in epoch milliseconds as `epoch_ms` says it: truncated toward zero. A row
         // without one keeps a 0 in `ms`, never read: `tnulls` says it has none.
@@ -3135,23 +3435,26 @@ impl Watch {
                 self.candidate_hll = None;
             }
         }
-        // #54: while every candidate holds the one value it began with, its tally would hold
-        // one series, the one `one` keeps, and is not run: only its totals per time are kept,
-        // which `one` does not keep. At the first batch where one changes, every tally begins
-        // from what `one` and the scan's aggregates kept of the batches before
-        // ([`Watch::begin`]), before this batch is added to them. Run all along, the waiting
-        // tally cost a 10,000,000-row Parquet table of one series beside a constant text column
-        // 2.2 G instructions (+9.9%) and 300 ms of the watch's CPU.
+        // #54: while every candidate holds the one value it began with, its tally holds one
+        // series, and a batch that holds it too is added to that series without finding each
+        // row's series by its key ([`Tally::wait`]). From the first batch where one changes, the
+        // tallies find each row's as before. Past [`WATCH_WAIT_MAX`] rows of one value, the one
+        // series is chosen.
         let mut waiting = false;
-        if self.waits.is_some() {
-            let waits = self.waits.as_mut().expect("waiting");
+        if let Some(waits) = self.waits.as_mut() {
             waiting = self
                 .keyed
                 .iter()
                 .zip(waits.iter_mut())
                 .all(|((c, _, _), w)| holds(cols[*c].as_ref().expect("needed"), n, w));
+            if waiting && self.total > WATCH_WAIT_MAX {
+                waiting = false;
+                self.keyed.clear();
+                self.candidate_hll = None;
+                self.order = None;
+            }
             if !waiting {
-                self.begin(before);
+                self.waits = None;
             }
         }
         // Each numeric column as a double: the cast is monotone, so the range of the doubles is
@@ -3288,7 +3591,12 @@ impl Watch {
                         Wait::Null | Wait::Unset => {}
                     }
                 }
-                tally.wait(n, stamps, &m);
+                let key = match w {
+                    Wait::Text(s) => (s.as_str(), key_words(s.as_bytes())),
+                    Wait::Int(x) => ("", int_words(*x)),
+                    Wait::Null | Wait::Unset => (NULL_PART, null),
+                };
+                tally.wait(n, key, stamps, &m);
                 from[k] = n;
                 continue;
             }
@@ -3378,14 +3686,10 @@ impl Watch {
         if let (Some(order), Some(st)) = (self.order.as_mut(), stamps) {
             let (mut series, mut more) = (false, false);
             for ((_, _, tally), o) in self.keyed.iter().zip(order.iter_mut()) {
-                if waiting {
-                    // Every row is the one series'.
-                    o.see(std::iter::repeat(0), st);
-                } else if tally.alive && tally.xs.len() == n {
-                    o.see(tally.xs.iter().copied(), st);
-                } else {
+                if !tally.alive || tally.xs.len() != n {
                     continue;
                 }
+                o.see(&tally.xs, st);
                 match o.sorted() {
                     Sorted::Series => series = true,
                     Sorted::Waiting => more = true,
@@ -3461,13 +3765,10 @@ impl Watch {
     }
 
     /// What was seen, or `None` if it cannot stand for the table.
-    pub fn finish(mut self) -> Option<Seen> {
+    pub fn finish(self) -> Option<Seen> {
         if !self.ok {
             return None;
         }
-        // Tallies that waited to the end hold one series each, begun here so that each says
-        // what it would have, should the profile ask for its cut.
-        self.begin((self.total, self.timed, self.first, self.last));
         let name = |c: usize| self.columns[c].0.clone();
         let flat = self.one_flat;
         let one = self.one.map(|mut s| {
@@ -3699,6 +4000,7 @@ fn one_series(cx: &Ctx, measures: &[&Col], step: Option<i64>, origin: i64) -> Op
                         zeros: r.get(b + 1)?,
                         min: r.get(b + 2)?,
                         max: r.get(b + 3)?,
+                        ..SeriesMeasure::default()
                     });
                 }
                 Ok(s)
@@ -3894,9 +4196,9 @@ fn note_extent(
 /// come in order as it is read, oldest or newest first, asks nothing here. The meter data
 /// shuffled row by row paid 334 ms of CPU for it, against 257 ms for the rest of its profile;
 /// `SELECT DISTINCT k, t` counted per key took 382 ms.
-fn settle(cx: &Ctx, series: &[Series], regular: &mut [bool], step: i64, origin: i64) {
+fn settle(cx: &Ctx, series: &[Series], regular: &mut [bool], origin: i64) {
     let unsure: std::collections::HashMap<&str, usize> = (0..series.len())
-        .filter(|i| !regular[*i] && series[*i].fits(step, origin))
+        .filter(|i| !regular[*i] && series[*i].fits(series[*i].step, origin))
         .map(|i| (series[i].key.as_str(), i))
         .collect();
     if unsure.is_empty() {
@@ -3929,9 +4231,30 @@ fn settle(cx: &Ctx, series: &[Series], regular: &mut [bool], step: i64, origin: 
     }
 }
 
+/// Each of `series`' keys and its step, as rows of a `VALUES` list a query joins on, `(k, st)`.
+fn key_steps(series: &[Series], which: &[usize]) -> String {
+    which
+        .iter()
+        .map(|i| {
+            format!(
+                "({}, {}::BIGINT)",
+                literal(&series[*i].key),
+                series[*i].step
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Where irregular series break their step: gaps, repeated timestamps, rows off the step. A
 /// bounded window over those series alone; the rest were proven regular without one.
-fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clock) {
+///
+/// With `own`, each is judged at the distance most of its rows keep, when at least half do,
+/// rather than the step [`judge`] gave it: a 15-minute series one of whose times is a second
+/// late has a divisor of one second, and judged at the table's 5 minutes had "gaps" every row
+/// (#50). Ties go to the shorter distance. The distances are the window's own, counted per
+/// series by one more `GROUP BY` over the rows it already reads.
+fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], own: bool, clock: Clock) {
     let mut pick: Vec<usize> = (0..series.len())
         .filter(|i| !regular[*i] && series[*i].timed >= 2)
         .collect();
@@ -3942,12 +4265,13 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
     pick.sort_by_key(|i| {
         let s = &series[*i];
         let expected = match (s.first, s.last) {
-            (Some(a), Some(b)) => (b - a) / step + 1,
+            (Some(a), Some(b)) => (b - a) / s.step + 1,
             _ => 0,
         };
         std::cmp::Reverse((expected - s.timed).abs())
     });
     let mut keys = Vec::new();
+    let mut kept = Vec::new();
     let mut n = 0u64;
     let mut skipped = Vec::new();
     for i in &pick {
@@ -3958,41 +4282,57 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
         }
         n += rows;
         keys.push(literal(&series[*i].key));
+        kept.push(*i);
     }
     if !keys.is_empty() {
+        let judged = if own {
+            "m AS (SELECT k, arg_max(d, (n, -d)) AS md, max(n) AS mn, sum(n) AS dn \
+               FROM (SELECT k, t - p AS d, count(*) AS n FROM r WHERE t > p GROUP BY ALL) \
+               GROUP BY k), \
+             j AS (SELECT c.k, CASE WHEN m.mn * 2 >= m.dn THEN m.md ELSE c.st END AS st \
+               FROM c LEFT JOIN m ON m.k = c.k)"
+        } else {
+            "j AS (SELECT k, st FROM c)"
+        };
         // Counted per series by DuckDB, not listed row by row: a list cut at a limit counted
         // only the anomalies before the cut, as if exact, and left the series after it
         // without notes (`anomalies_past_any_limit_are_counted_exactly`). The longest gap is
-        // the earliest of the longest, as the list in time order found it.
+        // the earliest of the longest, as the list in time order found it. Every series asked
+        // about is answered, with its step, anomalies or not.
         let sql = format!(
-            "SELECT k, count(*) FILTER (d = 0)::BIGINT, \
-               count(*) FILTER (g)::BIGINT, coalesce(sum(d // {step} - 1) FILTER (g), 0)::BIGINT, \
-               count(*) FILTER (d <> 0 AND NOT g)::BIGINT, \
-               arg_max(p, (d, -p)) FILTER (g), max(d) FILTER (g) \
-             FROM (SELECT k, p, t - p AS d, t - p > {step} AND (t - p) % {step} = 0 AS g \
-               FROM (SELECT {k} AS k, {t} AS t, lag({t}) OVER (PARTITION BY {k} ORDER BY {t}) \
-                 AS p FROM {f} WHERE {k} IN ({keys}) AND {t} IS NOT NULL) \
-               WHERE p IS NOT NULL AND t - p <> {step}) \
-             GROUP BY k",
+            "WITH r AS MATERIALIZED (SELECT k, t, lag(t) OVER (PARTITION BY k ORDER BY t) AS p \
+               FROM (SELECT {k} AS k, {t} AS t FROM {f} WHERE {k} IN ({keys}) \
+               AND {t} IS NOT NULL)), \
+             c AS (SELECT * FROM (VALUES {steps}) v(k, st)), {judged}, \
+             a AS (SELECT r.k, p, t - p AS d, t - p > j.st AND (t - p) % j.st = 0 AS g \
+               FROM r JOIN j ON j.k = r.k WHERE p IS NOT NULL AND t - p <> j.st) \
+             SELECT j.k, j.st, count(a.k) FILTER (a.d = 0)::BIGINT, \
+               count(a.k) FILTER (a.g)::BIGINT, \
+               coalesce(sum(a.d // j.st - 1) FILTER (a.g), 0)::BIGINT, \
+               count(a.k) FILTER (a.d <> 0 AND NOT a.g)::BIGINT, \
+               arg_max(a.p, (a.d, -a.p)) FILTER (a.g), max(a.d) FILTER (a.g) \
+             FROM j LEFT JOIN a ON a.k = j.k GROUP BY j.k, j.st",
             k = cx.k,
             t = cx.t,
             f = cx.from,
-            keys = keys.join(", ")
+            keys = keys.join(", "),
+            steps = key_steps(series, &kept),
         );
         let found = rows(cx.conn, &sql, |r| {
             Ok((
                 r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
                 [
-                    r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
+                    r.get::<_, i64>(5)?,
                 ],
-                (r.get::<_, Option<i64>>(5)?, r.get::<_, Option<i64>>(6)?),
+                (r.get::<_, Option<i64>>(6)?, r.get::<_, Option<i64>>(7)?),
             ))
         })
         .unwrap_or_default();
-        for (key, [dups, gaps, missing, off], longest) in found {
+        for (key, step, [dups, gaps, missing, off], longest) in found {
             let (dups, gaps, off) = (dups as u64, gaps as u64, off as u64);
             let longest = match longest {
                 (Some(p), Some(d)) => (p, p + d),
@@ -4001,6 +4341,10 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
             let Some(s) = series.iter_mut().find(|s| s.key == key) else {
                 continue;
             };
+            if step <= 0 {
+                continue;
+            }
+            s.step = step;
             if off * 2 > s.timed as u64 {
                 s.notes
                     .push((u64::MAX - 2, format!("rows are not {} apart", span(step))));
@@ -4039,6 +4383,7 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
     }
     // Said, not dropped: these series are irregular, and only where is unknown.
     for i in skipped {
+        let step = series[i].step;
         series[i].notes.push((
             1,
             format!(
@@ -4050,21 +4395,24 @@ fn gaps(cx: &Ctx, series: &mut [Series], regular: &[bool], step: i64, clock: Clo
 }
 
 /// Runs of 0 or null in measure `j` lasting at least `threshold`: a bounded window over only the
-/// rows that are 0 or null, in the series that have enough of them for such a run.
+/// rows that are 0 or null, in the series that have enough of them for such a run. Each series'
+/// rows are one run while they are at most its own step apart: at the table's, a 15-minute
+/// series' two days of 0 among 5-minute ones were 192 runs of one row, none of them noted.
 fn runs(
     cx: &Ctx,
     series: &mut [Series],
     j: usize,
     name: &str,
-    (step, threshold): (i64, i64),
+    threshold: i64,
     clock: Clock,
     flat: Option<&[(u32, i64, bool)]>,
 ) {
-    let need = (threshold / step).max(1);
     let mut keys = Vec::new();
+    let mut which = Vec::new();
     let mut picked = vec![false; series.len()];
     let mut n = 0u64;
     for (i, s) in series.iter().enumerate() {
+        let need = (threshold / s.step.max(1)).max(1);
         let m = &s.measures[j];
         let flat = m.zeros + m.nulls;
         if flat < need || m.zeros == s.rows || m.nulls == s.rows {
@@ -4075,16 +4423,21 @@ fn runs(
         }
         n += flat as u64;
         keys.push(literal(&s.key));
+        which.push(i);
         picked[i] = true;
     }
     if keys.is_empty() {
         return;
     }
     let found = match flat {
-        Some(rows) => runs_of(rows, &picked, series, step, threshold),
-        None => runs_sql(cx, &keys, name, step, threshold),
+        Some(rows) => runs_of(rows, &picked, series, threshold),
+        None => runs_sql(cx, &keys, &key_steps(series, &which), name, threshold),
     };
-    word_runs(series, &found, name, step, clock);
+    let found: Vec<(String, String, i64, i64)> = found
+        .into_iter()
+        .map(|(k, z, a, e)| (k, if z { "null" } else { "0" }.to_string(), a, e))
+        .collect();
+    word_runs(series, &found, name, clock);
 }
 
 /// [`runs`] from the rows the pass kept — each 0 or null of this measure with a time, by series
@@ -4096,7 +4449,6 @@ fn runs_of(
     rows: &[(u32, i64, bool)],
     picked: &[bool],
     series: &[Series],
-    step: i64,
     threshold: i64,
 ) -> Vec<(String, bool, i64, i64)> {
     let mut these: Vec<(u32, i64, bool)> = rows
@@ -4107,6 +4459,7 @@ fn runs_of(
     these.sort_unstable();
     let mut found = Vec::new();
     for one in these.chunk_by(|a, b| a.0 == b.0) {
+        let step = series[one[0].0 as usize].step;
         // Each row's break, then each row's group: the breaks so far, peers included.
         let mut groups: Vec<(bool, i64, i64)> = Vec::with_capacity(one.len());
         let mut breaks = 0i64;
@@ -4147,26 +4500,28 @@ fn runs_of(
     found
 }
 
-/// [`runs`] by query, when the pass kept no rows for it.
+/// [`runs`] by query, when the pass kept no rows for it. `steps` is each series' key and step
+/// ([`key_steps`]).
 fn runs_sql(
     cx: &Ctx,
     keys: &[String],
+    steps: &str,
     name: &str,
-    step: i64,
     threshold: i64,
 ) -> Vec<(String, bool, i64, i64)> {
     #[cfg(test)]
     RUNS_READ.with(|r| r.set(r.get() + 1));
     let q = quote(name);
     let sql = format!(
-        "WITH f AS (SELECT {k} AS k, {t} AS t, ({q} IS NULL) AS z FROM {from} \
+        "WITH c AS (SELECT * FROM (VALUES {steps}) v(k, st)), \
+         f AS (SELECT {k} AS k, {t} AS t, ({q} IS NULL) AS z FROM {from} \
            WHERE {k} IN ({keys}) AND {t} IS NOT NULL AND ({q} IS NULL OR {q} = 0)), \
-         b AS (SELECT k, t, z, CASE WHEN lag(t) OVER w IS NULL OR t - lag(t) OVER w > {step} \
-                OR z <> lag(z) OVER w THEN 1 ELSE 0 END AS brk FROM f \
-                WINDOW w AS (PARTITION BY k ORDER BY t)), \
-         g AS (SELECT k, t, z, sum(brk) OVER (PARTITION BY k ORDER BY t) AS g FROM b) \
-         SELECT k, z, min(t) AS a, max(t) AS e FROM g GROUP BY k, z, g \
-         HAVING max(t) - min(t) + {step} >= {threshold} ORDER BY k, a LIMIT 20001",
+         b AS (SELECT f.k, t, z, c.st, CASE WHEN lag(t) OVER w IS NULL \
+                OR t - lag(t) OVER w > c.st OR z <> lag(z) OVER w THEN 1 ELSE 0 END AS brk \
+                FROM f JOIN c ON c.k = f.k WINDOW w AS (PARTITION BY f.k ORDER BY t)), \
+         g AS (SELECT k, t, z, st, sum(brk) OVER (PARTITION BY k ORDER BY t) AS g FROM b) \
+         SELECT k, z, min(t) AS a, max(t) AS e FROM g GROUP BY k, z, g, st \
+         HAVING max(t) - min(t) + st >= {threshold} ORDER BY k, a LIMIT 20001",
         k = cx.k,
         t = cx.t,
         from = cx.from,
@@ -4183,12 +4538,120 @@ fn runs_sql(
     .unwrap_or_default()
 }
 
-/// What [`runs`] found, ordered by series and start, as each series' note.
+/// REQ-14 `a_stuck_value_inside_a_series_is_noted` (#51): runs in measure `j` of one value, not
+/// 0 or null, that last at least `threshold` — rows at most the series' own step apart, as for a
+/// run of 0 ([`runs`]) — and hold [`STUCK_TIMES`] times as many rows as the series' runs of one
+/// value do on average. A stuck sensor, a frozen gateway or a forward-filled export reads one
+/// value where the series otherwise changes; a mode, a setpoint or a fault code holds each of
+/// its values for days, and its runs are all long, so none is ten times its average.
+///
+/// The pass kept, for a series whose times came in order, how many runs it has and its longest,
+/// by time and by rows, over runs that a gap does not break ([`HotMeasure::run`]): a run noted
+/// here lies within one of those, so a series whose longest are too short has none
+/// ([`could_hold`]), and is not read. The rest, and every series whose times came in no order,
+/// are read by a bounded window ([`stuck_sql`]).
+fn stuck(cx: &Ctx, series: &mut [Series], j: usize, name: &str, threshold: i64, clock: Clock) {
+    let mut keys = Vec::new();
+    let mut which = Vec::new();
+    let mut skipped = Vec::new();
+    let mut n = 0u64;
+    for (i, s) in series.iter().enumerate() {
+        if !could_hold(s, j, threshold) {
+            continue;
+        }
+        let rows = s.timed as u64;
+        if n + rows > WINDOW_ROWS || keys.len() >= 2000 {
+            skipped.push(i);
+            continue;
+        }
+        n += rows;
+        keys.push(literal(&s.key));
+        which.push(i);
+    }
+    if !keys.is_empty() {
+        let found = stuck_sql(cx, &keys, &key_steps(series, &which), name, threshold);
+        word_runs(series, &found, name, clock);
+    }
+    // Said, not dropped: whether these hold a value too long is not known.
+    for i in skipped {
+        series[i].notes.push((
+            1,
+            format!(
+                "whether {} holds one value too long: not examined (too many rows)",
+                ident(name)
+            ),
+        ));
+    }
+}
+
+/// Whether series `s` could hold a value of measure `j` long enough for [`stuck`] to note:
+/// what the pass kept says so when its times came in order, and when they did not, only its
+/// extent can say it could not. A value throughout, or none, is said already or not there.
+fn could_hold(s: &Series, j: usize, threshold: i64) -> bool {
+    let m = &s.measures[j];
+    if s.timed < 2 || m.nulls == s.rows || m.zeros == s.rows || m.min == m.max {
+        return false;
+    }
+    if s.ordered {
+        m.long_span + s.step >= threshold
+            && m.long_rows.saturating_mul(m.runs) >= STUCK_TIMES.saturating_mul(m.valued)
+    } else {
+        matches!((s.first, s.last), (Some(a), Some(b)) if b - a + s.step >= threshold)
+    }
+}
+
+/// The runs [`stuck`] notes, of the series keyed `keys` whose steps are `steps`
+/// ([`key_steps`]): each one's key, value, first and last time. In time order and then by value,
+/// so the same rows give the same runs in any order; a row the same as the one before it in both
+/// is either. `chg` is a row that begins a run of one value, counted for the average; a run that
+/// a gap does not break, which the notes are about, begins at one, at a null, or past a gap.
+fn stuck_sql(
+    cx: &Ctx,
+    keys: &[String],
+    steps: &str,
+    name: &str,
+    threshold: i64,
+) -> Vec<(String, String, i64, i64)> {
+    let q = quote(name);
+    let sql = format!(
+        "WITH c AS (SELECT * FROM (VALUES {steps}) v(k, st)), \
+         f AS (SELECT {k} AS k, {t} AS t, CAST({q} AS DOUBLE) AS v FROM {from} \
+           WHERE {k} IN ({keys}) AND {t} IS NOT NULL), \
+         b AS (SELECT f.k, t, v, c.st, \
+             v IS NOT NULL AND (lag(v) OVER w IS NULL OR lag(v) OVER w <> v) AS chg, \
+             t - lag(t) OVER w AS d \
+           FROM f JOIN c ON c.k = f.k WINDOW w AS (PARTITION BY f.k ORDER BY t, v)), \
+         g AS (SELECT k, t, v, st, chg, sum(CASE WHEN v IS NULL OR chg OR d > st THEN 1 \
+             ELSE 0 END) OVER (PARTITION BY k ORDER BY t, v ROWS UNBOUNDED PRECEDING) AS g \
+           FROM b), \
+         n AS (SELECT k, count(*) FILTER (chg) AS runs, count(v) AS valued FROM g GROUP BY k) \
+         SELECT g.k, any_value(g.v), min(g.t) AS a, max(g.t) AS e FROM g JOIN n ON n.k = g.k \
+         WHERE g.v IS NOT NULL AND g.v <> 0 GROUP BY g.k, g.g, g.st, n.runs, n.valued \
+         HAVING max(g.t) - min(g.t) + g.st >= {threshold} \
+           AND count(*) * n.runs >= {STUCK_TIMES} * n.valued \
+         ORDER BY g.k, a LIMIT 20001",
+        k = cx.k,
+        t = cx.t,
+        from = cx.from,
+        keys = keys.join(", "),
+    );
+    rows(cx.conn, &sql, |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            num(r.get::<_, f64>(1)?),
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })
+    .unwrap_or_default()
+}
+
+/// What [`runs`] or [`stuck`] found — each run's series, what it is of (`0`, `null`, a value),
+/// first and last time — ordered by series and start, as each series' note.
 fn word_runs(
     series: &mut [Series],
-    found: &[(String, bool, i64, i64)],
+    found: &[(String, String, i64, i64)],
     name: &str,
-    step: i64,
     clock: Clock,
 ) {
     let shown = ident(name);
@@ -4199,18 +4662,16 @@ fn word_runs(
             i += 1;
             continue;
         };
+        let step = s.step;
         let mut parts = Vec::new();
         let mut weight = 0u64;
-        let (mut runs_null, mut runs_zero) = (0, 0);
+        let mut total = 0;
         while i < found.len() && found[i].0 == key {
-            let (_, z, a, e) = found[i];
+            let (_, what, a, e) = &found[i];
+            let (a, e) = (*a, *e);
             let len = e - a + step;
             weight += len as u64;
-            if z {
-                runs_null += 1;
-            } else {
-                runs_zero += 1;
-            }
+            total += 1;
             if parts.len() < RUNS_LISTED {
                 let from = if Some(a) == s.first {
                     format!("from the start ({})", clock.at(a))
@@ -4222,18 +4683,13 @@ fn word_runs(
                 } else {
                     format!("to {}", clock.at(e))
                 };
-                parts.push(format!(
-                    "{} {from} {to} ({})",
-                    if z { "null" } else { "0" },
-                    span(len)
-                ));
+                parts.push(format!("{what} {from} {to} ({})", span(len)));
             }
             i += 1;
         }
         // As many runs as fit a line, the first ones and the last, with what is left out in
         // between said rather than cut through (`a_long_line_is_elided_between_items_never_\
         // inside_one`). The key goes in front of this note, so it is given its room.
-        let total = runs_null + runs_zero;
         let room = LINE_MAX.saturating_sub(VALUE_MAX + 40 + shown.len());
         let listed =
             elide(&parts, ", then ", ", then … then ", room).unwrap_or_else(|| parts[0].clone());
@@ -4524,11 +4980,96 @@ mod tests {
         assert_eq!(from_pass, shared_moments(&cx, &[&col], step, clock));
 
         let flat = p.flat.expect("kept");
-        let keys: Vec<String> = p.series.iter().map(|s| literal(&s.key)).collect();
-        let picked = vec![true; p.series.len()];
-        let from_pass = runs_of(&flat[0], &picked, &p.series, step, DAY_MS);
+        let mut series = p.series;
+        for s in series.iter_mut() {
+            judge(s, step, origin);
+        }
+        let keys: Vec<String> = series.iter().map(|s| literal(&s.key)).collect();
+        let all: Vec<usize> = (0..series.len()).collect();
+        let picked = vec![true; series.len()];
+        let from_pass = runs_of(&flat[0], &picked, &series, DAY_MS);
         assert!(from_pass.len() >= 4, "{from_pass:?}");
-        assert_eq!(from_pass, runs_sql(&cx, &keys, "kw", step, DAY_MS));
+        assert_eq!(
+            from_pass,
+            runs_sql(&cx, &keys, &key_steps(&series, &all), "kw", DAY_MS)
+        );
+    }
+
+    #[test]
+    fn the_pass_misses_no_value_held() {
+        // REQ-14: a series the pass says cannot hold a value long enough is not read again
+        // (`could_hold`), so what the pass counts must be what the query counts, and every
+        // series the query finds a run in must be one the pass would have read. Forty series of
+        // readings at one decimal, so neighbours are often equal, with runs of one value of
+        // every length, nulls, NaN, 0 and gaps, in time order.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE h AS SELECT TIMESTAMP '2026-01-01' + to_minutes(15 * i) AS ts,
+               's' || s AS k,
+               CASE WHEN i % 997 = 5 THEN NULL
+                    WHEN i % 1013 = 7 THEN 'NaN'::DOUBLE
+                    WHEN (i + s * 131) % 700 < s * 37 % 300 THEN 21.5 + s % 3
+                    WHEN i % 50 = 0 THEN 0
+                    ELSE round(sin(i / 7.0 + s) * 3, 1) END AS v
+             FROM range(5000) r(i), range(40) q(s)
+             WHERE NOT (s % 5 = 0 AND i % 300 BETWEEN 100 AND 110)
+             ORDER BY i, s",
+        )
+        .unwrap();
+        let cx = Ctx {
+            conn: &conn,
+            from: "\"h\"".into(),
+            t: "epoch_ms(\"ts\")".into(),
+            k: "coalesce(CAST(\"k\" AS VARCHAR), chr(30))".into(),
+        };
+        let col = Col {
+            name: "v".into(),
+            min: None,
+            max: None,
+            nulls: 0,
+            zeros: 0,
+        };
+        let origin: i64 = conn
+            .query_row("SELECT min(epoch_ms(ts)) FROM h", [], |r| r.get(0))
+            .unwrap();
+        let step = 900_000;
+        let mut series = pass(&cx, &[&col], Some(step), origin, true, false)
+            .unwrap()
+            .series;
+        assert_eq!(series.len(), 40);
+        for s in series.iter_mut() {
+            judge(s, step, origin);
+            assert!(s.ordered, "{}", s.key);
+        }
+        let counted: std::collections::HashMap<String, (i64, i64)> = rows(
+            &conn,
+            "SELECT k, count(*) FILTER (chg), count(v) FROM (SELECT k, v, v IS NOT NULL AND \
+               (lag(v) OVER w IS NULL OR lag(v) OVER w <> v) AS chg FROM h \
+               WINDOW w AS (PARTITION BY k ORDER BY ts, v)) GROUP BY k",
+            |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))),
+        )
+        .unwrap()
+        .into_iter()
+        .collect();
+        for s in &series {
+            let m = &s.measures[0];
+            assert_eq!(counted[&s.key], (m.runs, m.valued), "{}", s.key);
+        }
+        let keys: Vec<String> = series.iter().map(|s| literal(&s.key)).collect();
+        let all: Vec<usize> = (0..series.len()).collect();
+        let found = stuck_sql(&cx, &keys, &key_steps(&series, &all), "v", DAY_MS);
+        let held: std::collections::HashSet<&str> = found.iter().map(|f| f.0.as_str()).collect();
+        for s in &series {
+            if held.contains(s.key.as_str()) {
+                assert!(could_hold(s, 0, DAY_MS), "{} holds a value", s.key);
+            }
+        }
+        let could = series.iter().filter(|s| could_hold(s, 0, DAY_MS)).count();
+        assert!(
+            !held.is_empty() && could < series.len(),
+            "{} of {could}",
+            held.len()
+        );
     }
 
     #[test]

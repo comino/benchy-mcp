@@ -596,6 +596,10 @@ kill. So is one loader's: each is read the same way while it loads, with the con
 
 - `a_runaway_batch_loses_the_batch_not_the_bench` — a runaway is interrupted at its deadline and
   the agent's tables survive.
+- `a_request_the_engine_does_not_read_is_held_to_the_hard_deadline` — the hard deadline covers
+  writing the request too. A 512 KiB query to a stopped engine, more than its stdin pipe holds,
+  had no reply after 90 s past a 1 s deadline; it is answered `E_REBUILT` at the hard deadline,
+  and the bench serves again.
 - `planner_blowup_killed` — a query that takes seconds just to plan is stopped by killing the
   engine; the bench is rebuilt and the lost scratch is stated.
 - `an_engine_past_its_memory_ceiling_is_killed_even_while_planning` — a query whose planning
@@ -951,6 +955,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   not "I have gone": a host that writes everything and then reads is answered in full.
 - `a_host_that_has_gone_is_not_worked_for` — one that has closed its end of the replies too gets
   nothing more run: the first reply that cannot be written ends the session.
+- `a_reply_the_reader_cannot_write_ends_the_session` — so does one the reader writes itself, not
+  the call loop: a `hello`, a `ping`, a second `hello`'s refusal. These were written and the
+  failure dropped, so a host that had gone kept its session, engine and warden running for as
+  long as its stdin stayed open.
 - `a_request_larger_than_a_request_can_be_ends_the_session` — a megabyte, when every frame is
   parsed and a request is SQL or a path.
 - `hello_says_what_the_session_is` — the version agreed, the newest both speak, the engine, the
@@ -999,7 +1007,9 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_descriptor_is_taken_only_by_a_streamed_attach` — a descriptor on any other request, a stream
   without one, more than one a stream, a stream beside a path, `stream` not `true`: refused as
   `E_REQUEST`, every descriptor closed before the answer; a descriptor that is not a pipe, a
-  socket or a file is `E_DATA`; protocol 2 has no `stream`.
+  socket or a file is `E_DATA`; protocol 2 has no `stream`. Closed is proven by the writer being
+  told nobody reads, so no other test of the binary starts a process meanwhile: one not yet
+  exec'd held a copy of the read end, and the write went through now and then.
 - `a_stream_needs_a_socket_to_come_over` — on pipes no descriptor can come, and a streamed attach
   is refused saying so.
 - `a_host_streams_tables_back_to_back_over_one_channel` — in protocol 5, a session started with
@@ -1035,6 +1045,12 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   and `"channel"` not before protocol 5.
 - `a_channel_and_a_descriptor_serve_one_session` — both streamed forms in one session and in one
   request.
+- `a_channel_and_a_descriptor_load_in_request_order_on_one_cpu` — where a session has one CPU,
+  so one loader at a time (a pod with `cpu: 1`), the tables of one request load in the order of
+  the list: a channel table, a descriptor's of over a megabyte and a channel table, written in that order
+  by one writer, all load. Every channel table first, the last waited for a stream its writer,
+  blocked on the descriptor's full pipe, could not write until the load timeout closed the
+  channel.
 - `a_channel_reader_stops_at_each_streams_end_marker` — the channel's reader follows the Arrow
   messages as they pass and reads nothing past a stream's marker, whatever size its reads are.
 - `a_refused_stream_is_drained_to_its_marker_within_a_bound` — the rest of a refused stream is read
@@ -1113,8 +1129,9 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 
 Every step benchy saved an agent in the eval was a step of discovery (eval/REPORT.md). So one
 `describe` says what an analyst would look for first in a table of time series: which column is
-time, its range and cadence, which column tells the series apart, and which series are dead,
-start late, stop, pause, skip rows or repeat them — and which moments every series shares, such
+time, its range and cadence, which column tells the series apart and the step each series keeps,
+and which series are dead, start late, stop, pause, skip rows or repeat them, or hold one value
+far longer than they otherwise do — and which moments every series shares, such
 as the hour a clock change zeroes or doubles. What is a heuristic says "looks like"; an operator
 can state the time column and the series key per source instead (`time_column`, `series`), and a
 host per attachment. Units are never guessed.
@@ -1123,7 +1140,8 @@ The profile is computed **once, by the loader**, and kept in the table's comment
 only renders text and a rebuilt engine does not profile again. It is built from one scan of
 aggregates, then one pass over the rows that DuckDB streams to the loader, which adds up each
 series — its count, extent, phase and two checksums of its timestamps, and whether its times came
-in order, rising or falling — each time, and the rows that are 0 or null. The checksums alone
+in order, rising or falling, and its runs of one value — each time, and the rows that are 0 or
+null. The checksums alone
 prove nothing: three gaps hidden by three repeats can leave them as they were. A series that fits
 them is proven regular, without ordering it, only when its times came in order, so none repeats;
 one that fits but came in no order is settled by an exact count of its distinct times, and
@@ -1179,6 +1197,34 @@ statement, and the agent made them.
 - `describe_names_gaps_and_repeated_times` — rows missing and rows repeated, where, including a
   series whose gap is hidden by as many repeats: its row count is right, and only the checksums
   of its timestamps give it away.
+- `each_series_is_judged_at_its_own_step` — 149 series at 5, 10 and 15 minutes, each complete
+  but for what is planted: each is judged at its own step, the greatest common divisor of its
+  times' distances when that is longer than the table's, or shorter with the series complete on
+  it; a series that breaks its step is judged at the distance at least half its rows keep, so a
+  15-minute series one of whose rows is a second late has two rows off the step, not a gap every
+  row. The time column's line says how many series keep each step, the line on regular series
+  how many of them do, and a series off the most common step says its own. Its runs of 0 and its
+  late start or early end are judged at its step too. Notes alike in several series are said
+  once, by their keys (`1090–1099 (10 series): …`). Read at one step, every complete 10- and
+  15-minute series was reported broken ("8735 gaps, 17470 rows missing", #50).
+- `every_tables_shape_comes_before_any_tables_notes` — a table with more notes than the budget
+  holds, beside a two-row table: every table's own lines get their room before any table's
+  notes about single series, so the second table's shape is shown and the first's notes stop
+  short and say so.
+- `a_stuck_value_inside_a_series_is_noted` — a value held a day or more, rows at most the
+  series' step apart, and ten times as many rows as the series' runs of one value have on
+  average, is noted like a run of 0 (`temp is 21.5 from … to … (21 days)`, #51). A gap breaks
+  it. A column that holds each of its values for days everywhere, as a mode or a status code
+  does, is not noted: none of its runs is ten times its average. In time order, newest first by
+  series, and in no order, the same. Measured on the public meter data's 370 meters over four
+  years (docs/PERFORMANCE.md): six meters hold one non-zero value for a day or more, 74 runs,
+  every one of them ten times its meter's average; rounded to 10 kW, a low-resolution reading,
+  48 meters have 1,084 such runs and the rule keeps 789 in 44, and rounded to 50 kW 173 meters
+  have 5,888 and it keeps 2,461 in 147. A table without a series key is not examined for it.
+- `the_pass_misses_no_value_held` — the runs of one value the loader's one pass counts are the
+  ones the query counts, and every series the query finds a value held in is one the pass would
+  have it read: a series whose times came in order is read again only if its longest run could
+  be one to note.
 - `three_gaps_hidden_by_three_repeats_are_found` — series whose count, sum and sum of squares of
   step indices are those of a regular series (`{0,1,1,4,5,5,6,6,8,9}`; 2,000 steps missing
   1002, 1003 and 1007 and repeating 1001, 1005 and 1006; `0..20` without 1, 2, 4 and 7 and with
@@ -1229,10 +1275,15 @@ statement, and the agent made them.
   first batches hold one series and no repeated time, are tallied by their key, not read back
   (#54): text and integer keys, each series oldest or newest first, a series that starts late,
   and a Parquet file watched a DuckDB vector at a time. Until a candidate's value changes both
-  tallies are kept, so a table that is one series, a key that never changes, and times alone
-  keep the one series; a label that changes as time goes on is one series too. A key that goes
-  back in time between another's times, none repeated, is a guess the table belies: that pass
-  is read. Each gives the profile reading the table gives, byte for byte.
+  tallies are kept, its one series added to without a lookup a row, so a table that is one
+  series, a key that never changes (stated as the key, too), and times alone keep the one
+  series; a label that changes as time goes on is one series, and so is one in no order beside
+  a key that never changes, chosen at once. A key that goes back in time between another's
+  times, none repeated, is a guess the table belies: that pass is read. Each gives the profile
+  reading the table gives, byte for byte, and the key's distinct count is DuckDB's.
+- `a_stream_sorted_by_series_says_what_its_rows_in_time_order_say` — three meters every 1, 2
+  and 3 minutes, two holding one value for two days, sent a meter at a time and every meter at
+  each minute: the same profile, each series at its own step and both values held noted.
 - `a_files_profile_is_kept_from_one_scan_and_is_the_profile_of_the_table` — a Parquet, CSV and
   NDJSON file of seven meters, with a dead one, a late start, a stop into nulls, a pause, an hour
   all 0, NaN, an integer and a date: the scan's aggregates and the pass are kept from one Arrow

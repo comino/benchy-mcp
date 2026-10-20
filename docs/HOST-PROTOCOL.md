@@ -441,8 +441,10 @@ benchy.stdio[3].write(arrowStream);           // as it is fetched
   benchy makes it blocking (an event loop's pipes often are not) and close-on-exec.
 - **One stream at a time, in request order.** Requests run one at a time, and a `tables` list
   reads its channel tables in the order of the list, each loader starting once the one before has
-  read its stream to the end; the tables that come by file or descriptor load beside them. The
-  host writes on a thread of its own (or without blocking) and reads the replies: a pipe holds
+  read its stream to the end; the tables that come by file or descriptor load beside them. Where
+  the session has one CPU (a pod with `cpu: 1`), one loader runs at a time, and the tables load
+  in the order of the list, channel and descriptor tables alike
+  (`a_channel_and_a_descriptor_load_in_request_order_on_one_cpu`). The host writes on a thread of its own (or without blocking) and reads the replies: a pipe holds
   64 KiB. It may write ahead of the requests, or after sending them: either way a stream is only
   ever the table's it was written for, or the channel closes (below), so writing ahead can lose
   the channel, never put one table's rows under another's name. The pipe stays open between
@@ -694,7 +696,8 @@ yet, and fixed for the session:
 - **End.** EOF on stdin — closing the pipe, or shutting down the socket's writing side — means no
   more requests: every request already sent is answered, in order,
   and then the session ends. A host that has closed its end of the replies too is not worked for
-  further — the first reply that cannot be written ends the session. SIGTERM, SIGINT or SIGHUP end
+  further — the first reply that cannot be written ends the session, `hello`'s and `ping`'s
+  included (`a_reply_the_reader_cannot_write_ends_the_session`). SIGTERM, SIGINT or SIGHUP end
   it at once: the engine is killed, the call running gets no reply, and the session directory
   goes. If the process is killed outright, the session's warden removes the directory, and the
   engine and every loader notice they have been re-parented and stop (REQ-1).

@@ -236,9 +236,10 @@ fn a_stated_shape_wins_over_the_heuristic() {
         &heuristic,
         "series key site (looks like it): 2 series ('north', 'south')",
     );
+    // both sites' notes are alike, and are said once
     has(
         &heuristic,
-        "'north': 200 rows repeat a time already present",
+        "'north', 'south' (2 series): 200 rows repeat a time already present",
     );
     let stated = sealed(
         &dir,
@@ -413,7 +414,8 @@ fn an_integer_series_key_is_listed_in_number_order() {
 
 #[test]
 fn the_shape_is_summarised_never_cut_silently() {
-    // 300 series, each with a two-day pause: far more notes than any budget holds.
+    // 300 series, each with a two-day pause: far more notes than any budget holds. Past `s199`
+    // the pause is of nulls, so no two series' notes are alike and said once.
     let mut csv = String::from("ts,meter,kw\n");
     for i in 0..(10 * 24) {
         let t = START + i * 3600;
@@ -422,17 +424,22 @@ fn the_shape_is_summarised_never_cut_silently() {
             csv.push_str(&format!(
                 "{},s{s:03},{}\n",
                 stamp(t),
-                if paused { 0 } else { 1 + s }
+                match (paused, s < 200) {
+                    (true, true) => "0".to_string(),
+                    (true, false) => String::new(),
+                    _ => (1 + s).to_string(),
+                }
             ));
         }
     }
     let dir = dir_with("many.csv", &csv);
     let ws = sealed(&dir, &[]);
-    // 4,600 bytes: every time is shown as an instant, `+00` and all (REQ-15), so forty notes
-    // take that much more room than they did as zone-less times at 4,096.
-    let d = ws.describe(4600);
+    // 4,700 bytes: every time is shown as an instant, `+00` and all (REQ-15), so forty notes
+    // take that much more room than they did as zone-less times at 4,096; and the line saying
+    // what is noted says a value held too long is (#51): 58 bytes more than at 4,600.
+    let d = ws.describe(4700);
     assert!(
-        benchy_mcp::result::wire_len(&d) <= 4600,
+        benchy_mcp::result::wire_len(&d) <= 4700,
         "within its budget: {} bytes",
         d.len()
     );
@@ -950,4 +957,197 @@ fn three_gaps_hidden_by_three_repeats_are_found() {
     let got = sealed(&dir, &[]).describe(4096);
     assert!(!got.contains("none missing or repeated"), "{got}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A bench whose tables `sql` makes, each recorded as loaded: its columns and rows read back.
+fn recorded(sql: &str, tables: &[&str]) -> Workspace {
+    let mut bench = common::bench();
+    bench.connection().execute_batch(sql).unwrap();
+    for t in tables {
+        let columns: Vec<(String, String)> = {
+            let mut st = bench
+                .connection()
+                .prepare(&format!(
+                    "SELECT column_name, data_type FROM information_schema.columns \
+                     WHERE table_name = '{t}' ORDER BY ordinal_position"
+                ))
+                .unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        let rows: i64 = bench
+            .connection()
+            .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+            .unwrap();
+        bench
+            .record(benchy_mcp::LoadedTable {
+                name: t.to_string(),
+                rows: rows as u64,
+                columns,
+                source: "test".into(),
+                profile: None,
+                seen: None,
+            })
+            .unwrap();
+    }
+    bench.seal("1GB").unwrap()
+}
+
+/// #50's shape, smaller: 149 sensors over ten days, 52 reading every 5 minutes, 49 every 10 and
+/// 48 every 15, each complete but for what is planted — a late start, an early stop, a 4-day
+/// gap, two days of 0 in a 15-minute series, a 15-minute series one of whose rows is a second
+/// late, and ten dead sensors — beside a two-row table of sites. Read as one cadence, every complete 10- and 15-minute series was a broken 5-minute
+/// one ("1014: 8735 gaps, 17470 rows missing"), and those notes crowded out the rest.
+const MIXED: &str = "CREATE TABLE readings AS
+    WITH s AS (SELECT 1001 + i AS sensor,
+                 CASE WHEN i < 52 THEN 5 WHEN i < 101 THEN 10 ELSE 15 END AS every
+               FROM range(149) r(i)),
+    m AS (SELECT sensor, every, unnest(range(0, 14400, every)) AS m FROM s)
+    SELECT TIMESTAMP '2026-01-01' + to_minutes(m)
+        + to_seconds(CASE WHEN sensor = 1140 AND m = 7200 THEN 1 ELSE 0 END) AS ts, sensor,
+      CASE WHEN sensor BETWEEN 1090 AND 1099 THEN 0
+           WHEN sensor = 1130 AND m >= 1440 AND m < 4320 THEN 0
+           ELSE round(20 + 5 * sin(m / 97.0 + sensor), 3) END AS temp
+    FROM m
+    WHERE NOT (sensor = 1010 AND m < 2880)
+      AND NOT (sensor = 1060 AND m >= 11520)
+      AND NOT (sensor = 1120 AND m >= 4320 AND m < 10080)
+    ORDER BY m, sensor;
+    CREATE TABLE sites AS SELECT * FROM (VALUES (1001, 'north'), (1002, 'south')) v(sensor, site);";
+
+#[test]
+fn each_series_is_judged_at_its_own_step() {
+    let d = recorded(MIXED, &["readings", "sites"]).describe(4096);
+    eprintln!("{d}");
+    has(
+        &d,
+        "; series have a row every 5 minutes (52 series), 10 minutes (49) or 15 minutes (48)",
+    );
+    has(
+        &d,
+        "147 of 149 series have a row at their own step from their first to their last, none \
+         missing or repeated (52 every 5 minutes, 49 every 10 minutes, 46 every 15 minutes)",
+    );
+    // the one gap, at its series' own step: four days of 15 minutes
+    noted(
+        &d,
+        "1120",
+        "1 gap, 384 rows missing in all; the longest 4 days (no rows after 2026-01-03 23:45:00 \
+         until 2026-01-08 00:00:00)",
+    );
+    assert_eq!(d.matches("missing in all").count(), 1, "{d}");
+    // a second late: judged at the distance most of its rows keep, not at the table's step
+    noted(
+        &d,
+        "1140",
+        "a row every 15 minutes, where the most common step is 5 minutes; 2 rows are off the \
+         step",
+    );
+    // a run of 0 in a 15-minute series is one run, not 192 rows each broken from the last
+    noted(
+        &d,
+        "1130",
+        "temp is 0 from 2026-01-02 00:00:00 to 2026-01-03 23:45:00 (2 days)",
+    );
+    noted(
+        &d,
+        "1010",
+        "first row 2026-01-03 00:00:00, 2 days after the earliest",
+    );
+    noted(&d, "1060", "last row 2026-01-08 23:50:00");
+    // a slower series is still said to be slower, and alike notes are said once
+    has(
+        &d,
+        "1053–1059, 1061–1089, 1100–1101 (38 series): a row every 10 minutes, where the most \
+         common step is 5 minutes\n",
+    );
+    has(
+        &d,
+        "1102–1119, 1121–1129, 1131–1139, 1141–1149 (45 series): a row every 15 minutes, \
+         where the most common step is 5 minutes\n",
+    );
+    has(
+        &d,
+        "1090–1099 (10 series): a row every 10 minutes, where the most common step is 5 \
+         minutes; temp is 0 in every row\n",
+    );
+    // and the other table's shape is there
+    has(
+        &d,
+        "sites (2 rows)\n  sensor integer, site varchar\n  sensor: 1001 to 1002",
+    );
+    has(&d, "  site: 2 distinct\n");
+    assert!(!d.contains("not shown"), "{d}");
+}
+
+#[test]
+fn every_tables_shape_comes_before_any_tables_notes() {
+    // 300 series, each with its own two-day pause: more notes than the budget holds, in the
+    // first table. The second table's shape still shows, and the first's notes stop short.
+    let sql = "CREATE TABLE many AS SELECT TIMESTAMP '2026-01-01' + to_hours(i) AS ts,
+        's' || lpad(s::VARCHAR, 3, '0') AS meter,
+        CASE WHEN i >= s * 7 % 200 AND i < s * 7 % 200 + 48 THEN 0 ELSE 1 + s END AS kw
+      FROM range(240) r(i), range(300) q(s);
+      CREATE TABLE sites AS SELECT * FROM (VALUES
+          ('s001', 'north', 2.5, 1, 12, 1998, 52.52, 13.40, 230, 3),
+          ('s002', 'south', 4.0, 3, 40, 2011, 48.14, 11.58, 400, 1))
+        v(meter, site, area, floor, rooms, built, lat, lon, volts, phases);";
+    let d = recorded(sql, &["many", "sites"]).describe(4096);
+    eprintln!("{d}");
+    assert!(benchy_mcp::result::wire_len(&d) <= 4096, "{}", d.len());
+    has(
+        &d,
+        "series key meter (looks like it): 300 series ('s000' … 's299')",
+    );
+    has(
+        &d,
+        "more line(s) about this table not shown: over the describe budget",
+    );
+    has(&d, "  site: 2 distinct\n");
+    has(&d, "  area: 2.5 to 4, never null\n");
+    has(&d, "  phases: 1 to 3, never null\n");
+    assert!(!d.contains("is not shown"), "{d}");
+}
+
+/// A month and a half of 15-minute readings in five rooms, with what a stuck sensor and a
+/// step-like column look like: `r1` reads exactly 21.5 for 21 days, `r2` reads 21.5 for 30 hours
+/// with a 6-hour gap in them, and `status` holds each value for about five days, as a mode or a
+/// fault code does. `order` sorts the rows.
+fn stuck_sql(order: &str) -> String {
+    format!(
+        "CREATE TABLE air AS SELECT * FROM (
+           SELECT TIMESTAMP '2026-01-01' + to_minutes(15 * i) AS ts, 'r' || s AS room,
+             CASE WHEN s = 1 AND i >= 960 AND i < 960 + 21 * 96 THEN 21.5
+                  WHEN s = 2 AND i >= 3800 AND i < 3800 + 120 THEN 21.5
+                  ELSE round(20 + 3 * sin(i / 13.0 + s), 3) END AS temp,
+             (i // 500 + s) % 4 + 1 AS status
+           FROM range(45 * 96) r(i), range(1, 6) q(s)
+           WHERE NOT (s = 2 AND i >= 3848 AND i < 3872))
+         ORDER BY {order}"
+    )
+}
+
+#[test]
+fn a_stuck_value_inside_a_series_is_noted() {
+    let mut seen = Vec::new();
+    for order in ["ts, room", "room, ts DESC", "hash(ts, room)"] {
+        let d = recorded(&stuck_sql(order), &["air"]).describe(4096);
+        eprintln!("{d}");
+        noted(
+            &d,
+            "'r1'",
+            "temp is 21.5 from 2026-01-11 00:00:00 to 2026-01-31 23:45:00 (21 days)",
+        );
+        // a gap breaks a run, as it breaks a run of 0: two 12-hour runs, neither noted
+        noted(&d, "'r2'", "1 gap, 24 rows missing in all");
+        assert!(!d.contains("'r2': temp is 21.5"), "{d}");
+        // a column that holds each value for days, everywhere, is not stuck
+        assert!(!d.contains("status is"), "{d}");
+        has(&d, "the other 3 series: none of these");
+        seen.push(d);
+    }
+    assert_eq!(seen[0], seen[1]);
+    assert_eq!(seen[0], seen[2]);
 }

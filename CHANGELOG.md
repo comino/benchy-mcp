@@ -8,6 +8,29 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 Changed behaviour:
 
+- **`describe` judges each series at its own step** (#50). On a table of series every 5, 10
+  and 15 minutes, every complete 10- and 15-minute series was read at the table's 5 minutes and
+  reported broken ("1014: 8735 gaps, 17470 rows missing"). A series is now judged at the step
+  its times keep — the common divisor of their distances, or, where it breaks that, the distance
+  at least half its rows keep — and its gaps, runs of 0 and late start or early end at that step.
+  The time column's line says how many series keep each step (`series have a row every 5 minutes
+  (52 series), 10 minutes (49) or 15 minutes (48)`), the line on regular series how many of each
+  are regular, and a series off the most common step says its own. One cadence reads as before.
+  (`each_series_is_judged_at_its_own_step`)
+- **Alike notes are said once** (#50): series whose notes are the same are one line, by their
+  keys, an integer key's consecutive values as a range (`1090–1099 (10 series): kw is 0 in every
+  row`). And every table's own lines — time column, key, cadence, columns — get the `describe`
+  budget before any table's notes about single series, so a small table beside one with many
+  notes keeps its shape (`every_tables_shape_comes_before_any_tables_notes`).
+- **A value held too long is noted** (#51): `'r1': temp is 21.5 from … to … (21 days)`, for a
+  run of one value, not 0 or null, lasting a day or more by the same rule as a run of 0 (a gap
+  breaks it) and holding ten times as many rows as the series' runs of one value do on average,
+  so a status code or a setpoint that holds each value for days is not noted. Only tables with a
+  series key are examined. No configuration. The loader's pass counts the runs as it goes, and
+  reads a series again only when its longest run could be one to note
+  (`a_stuck_value_inside_a_series_is_noted`, `the_pass_misses_no_value_held`). The line that
+  lists what is noted is 58 bytes longer.
+
 - **A helper macro may not read a table** (#58). DuckDB expands a macro inside the caller's
   query, where a CTE of the caller's named like a table the macro reads stands in for it; 0.2.0
   guarded that by reading every batch for such a CTE. Now a helper macro whose body reads a
@@ -49,6 +72,42 @@ Changed behaviour:
   runs; `query_table('name')` still works. The engine's own workings (`duckdb_logs`,
   `duckdb_memory`, `duckdb_extensions`, `duckdb_secrets` and the like) and DuckDB's test
   functions are refused too.
+
+Faster:
+
+- **A table sorted by series, then time, is no longer profiled twice** (#54). Its first batches
+  look like one series whose times do not repeat, and the watch chose the one series there, so
+  the pass and the key's distinct counts were read from the table again after the write, on
+  one thread. Now the keyed tallies wait, beside the one series, for the first candidate value
+  that changes, up to 1,000,000 rows, and a series that begins back in time is taken for a cut
+  into series. 10,000,000 rows of 500 meters from Parquet in that order: 27.46 → 23.16 G
+  instructions, the profile's CPU 1,189 → 112 ms, the first `describe` 3.5 → 2.6 s; in time
+  order nothing changes. A table of one series beside a constant text column pays +1.3% for
+  the wait. `bench/ingest.py` gains `parquet_bytime` and `parquet_bymeter`, the same table in
+  either order.
+
+Fixed:
+
+- **A failed `hello` or `ping` reply ends the session** (#17). The reader answers these itself
+  and ignored a failed write, so a host that had closed its end of the replies kept its
+  session, engine and warden running for as long as its stdin stayed open. A second `hello`'s
+  refusal counts too (`a_reply_the_reader_cannot_write_ends_the_session`).
+- **The hard deadline covers writing a request to the engine** (#10). A request larger than the
+  engine's stdin pipe holds (64 KiB on Linux) was written before the deadline started, so an
+  engine that did not read it, stopped or wedged, left a 512 KiB query without a reply after
+  90 s past a 1 s deadline. The request is now written on the thread that reads the reply, and
+  the engine is killed and rebuilt at the hard deadline as for any other request
+  (`a_request_the_engine_does_not_read_is_held_to_the_hard_deadline`).
+- **A request mixing channel and descriptor tables no longer stalls on one CPU** (#11). With one
+  loader at a time (a pod with `cpu: 1`), every channel table ran before the descriptor tables
+  after the first, so `[channel a, descriptor b, channel c]`, written in that order, waited for
+  `c` while the writer was blocked on `b`'s full pipe, until the load timeout (300 s by
+  default) failed `c` and closed the channel. The tables now load in the order of the list
+  (`a_channel_and_a_descriptor_load_in_request_order_on_one_cpu`).
+- `a_descriptor_is_taken_only_by_a_streamed_attach` no longer fails now and then (#48). The
+  server closed the refused request's descriptor as it should. The read end that stayed open
+  was a copy in a process another test of the same binary was starting, not yet exec'd. The
+  check now runs while no test of that binary starts a process.
 
 ## [0.2.0] — 2026-10-17
 
