@@ -32,11 +32,13 @@ struct File {
 }
 
 /// The engine's own bounds: `memory_ceiling`, as `--memory-ceiling` sets it, the most resident
-/// memory the engine may hold (`supervisor::Memory`). For a server and a host alike.
+/// memory the engine may hold (`supervisor::Memory`); and `threads`, as `--threads` sets it, the
+/// threads agent SQL runs on (REQ-7). For a server and a host alike.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EngineTable {
     memory_ceiling: Option<String>,
+    threads: Option<u64>,
 }
 
 /// Every loader's own bound: `memory_ceiling`, as `--loader-memory-ceiling` sets it, the most
@@ -210,6 +212,8 @@ pub struct Sources {
     pub limits: Stated,
     /// `[engine] memory_ceiling`, where stated; checked against `--memory` once that is known.
     pub memory_ceiling: Option<String>,
+    /// `[engine] threads`, where stated: at least 1.
+    pub threads: Option<u64>,
     /// `[loader] memory_ceiling`, where stated.
     pub loader_memory_ceiling: Option<String>,
     /// REQ-18: the operator's helpers, in the order given; empty when there are none.
@@ -240,6 +244,13 @@ pub fn parse(text: &str, path: &Path) -> Result<Sources, String> {
     let mut out = Sources::default();
     if let Some(e) = parsed.engine {
         out.memory_ceiling = e.memory_ceiling;
+        if e.threads == Some(0) {
+            return Err(format!(
+                "{}: [engine] threads must be at least 1",
+                path.display()
+            ));
+        }
+        out.threads = e.threads;
     }
     if let Some(l) = parsed.loader {
         out.loader_memory_ceiling = l.memory_ceiling;

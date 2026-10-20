@@ -351,6 +351,52 @@ in 44, rounded to 50 kW 5,888 in 173 and it keeps 2,461 in 147. What it leaves o
 whose runs are all long, as a mode or a status code's are: in the test's, each value held
 about five days, none is ten times the average.
 
+## Engine threads (#56)
+
+Agent SQL ran on one thread, always. It still does by default. `--threads N`, or
+`[engine] threads`, gives the engine N, and a host may lower that for its session (REQ-7
+`the_engine_runs_agent_sql_on_the_threads_it_is_given`).
+
+Measured over `benchy-mcp <dir> --threads N` through MCP, on a 4-core aarch64 box (kernel 6.8,
+DuckDB 1.5.5) under load 3.9–6.0 from other work. The table is the agent's own, built in the
+engine: 10,000,000 rows of a minute's `ts`, 500 `meter`s and a `kw`. That way only the query
+is timed, not a load. Each figure is five calls in each of three sessions: wall time as the
+client saw it, and the engine's `perf stat -e instructions:u,task-clock -p` over the calls
+alone, per call. Each cell gives the median session, with the range in brackets.
+`bench_threads.py` and `perf2.sh` were throwaway scripts and are not in the tree.
+
+| Each call | 1 thread | 2 threads | 4 threads |
+|---|---|---|---|
+| hourly mean per meter: `meter, time_bucket(INTERVAL 1 HOUR, ts), avg(kw) … GROUP BY ALL`, wall | 0.766 s (0.753–0.785) | 0.368 s (0.341–0.371) | 0.248 s (0.220–0.543) |
+| its instructions, CPU | 3.82 G, 0.75 s | 3.84 G, 0.73 s | 4.28 G (4.27–4.35), 0.88 s |
+| 95th percentile per meter: `quantile_cont(kw, 0.95) … GROUP BY meter`, wall | 0.649 s (0.565–0.666) | 0.303 s (0.297–0.336) | 0.213 s (0.191–0.305) |
+| its instructions, CPU | 2.61 G, 0.58 s | 2.69 G, 0.59 s | 3.12 G (3.07–3.14), 0.68 s |
+| a streamed `SELECT * … WHERE kw > 1` (2,000 rows kept), wall | 7 ms | 7 ms | 7 ms |
+| the engine's peak, `VmHWM`, after the three (the table alone: 340 MiB) | 452 MiB | 516–523 MiB | 512–530 MiB |
+
+- **Faster where the machine has cores to spare.** The hourly mean took about a third of its
+  one-thread time on four threads, and the percentile about the same. Both scale almost
+  linearly to two threads. The four-thread outliers, 0.543 s and 0.305 s, are runs where the
+  other work on the box took the cores. The reporter measured 4–5× with ten threads on a larger
+  machine.
+- **The parallel work costs instructions.** Four threads cost +12% instructions on the mean and
+  +19% on the percentile, and 17% more CPU. Two threads cost about what one does. On a machine
+  whose cores are all busy, more threads buy nothing and cost that, which is why one is the
+  default.
+- **Memory.** DuckDB's budget, `--memory`, is one budget for the database however many threads
+  share it. More threads hold more at once, though, and some of it outside that budget. The
+  percentile took the engine 70 MiB higher on two or four threads than on one. At 3,000,000
+  rows under `--memory 160MB` it ran on four threads and peaked at 192 MiB, against 165 MiB on
+  one. So the default `--memory-ceiling` (the budget and half again, at least 256 MiB over it)
+  had room on both. A ceiling lowered close to the budget has less room on more threads.
+- **The streamed fetch** (*A query read only as far as it is kept*) holds as little on four
+  threads as on one. A 10,000,000-row `SELECT *` with 2,000 rows kept raised the engine's peak
+  by 3 MiB on one thread and 5–6 MiB on four. Instructions were the same within 0.002 G.
+- **What it costs the seal.** The engine now confines itself between the two steps of the lock.
+  With N threads, `SET threads = N` then starts N − 1 workers. On one thread the seal runs the
+  same statements in a different order, and four more to prove the lock: three refused `SET`s
+  and a `current_setting`. They were not measured on their own.
+
 ## Rows sorted by series, tallied by their key (#54)
 
 A file or stream sorted by series, then time, as most per-device exports are, shows its first

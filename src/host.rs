@@ -45,7 +45,9 @@ use std::sync::{mpsc, Arc, Mutex};
 /// 6 adds `loader_memory_ceiling` to `hello`'s `limits`: the most resident memory one loader may
 /// hold (`supervisor::LOADER_MEMORY_CEILING`), reported, and lowered where a host asks. Reported
 /// only to a session that agrees on 6, as a host may send `limits` back as it got them.
-pub const PROTOCOLS: [u64; 6] = [1, 2, 3, 4, 5, 6];
+/// 7 adds `threads` to `hello`'s `limits`: the threads the engine runs agent SQL on (`--threads`),
+/// reported, and lowered where a host asks; reported only to a session that agrees on 7, as 6's.
+pub const PROTOCOLS: [u64; 7] = [1, 2, 3, 4, 5, 6, 7];
 
 /// What the catalogue may take of one reply.
 const CATALOGUE_BUDGET: usize = 4096;
@@ -262,10 +264,14 @@ fn hello_reply_where(s: &Session, unenforced: Option<&str>) -> Value {
 
 /// What `hello` adds to its reply for a session that agrees on `version`, beside what every
 /// version has: from 6, the loader memory ceiling, `null` where it is not enforced for the reason
-/// `unenforced` gives (`a_host_lowers_the_loader_ceiling_and_cannot_raise_it`).
+/// `unenforced` gives (`a_host_lowers_the_loader_ceiling_and_cannot_raise_it`); from 7, the
+/// engine's threads (`a_host_lowers_the_engines_threads_and_cannot_raise_them`).
 fn for_version(reply: &mut Value, l: &HostLimits, version: u64, unenforced: Option<&str>) {
     if version < 6 {
         return;
+    }
+    if version >= 7 {
+        reply["limits"]["threads"] = l.threads.into();
     }
     reply["limits"]["loader_memory_ceiling"] = match unenforced {
         Some(_) => Value::Null,
@@ -660,6 +666,11 @@ fn read_requests(
                         Err(format!(
                             "`limits.loader_memory_ceiling` came in protocol 6, and this session \
                              speaks {newest}"
+                        ))
+                    }
+                    Value::Object(asked) if *newest < 7 && asked.contains_key("threads") => {
+                        Err(format!(
+                            "`limits.threads` came in protocol 7, and this session speaks {newest}"
                         ))
                     }
                     Value::Object(asked) => limits.lowered(asked),

@@ -522,6 +522,34 @@ Every query batch runs under a wall deadline, DuckDB's memory budget and a ceili
 engine's resident memory (REQ-8), and what comes back is capped. Capacity is measured, not claimed: `examples/capacity.py` produces `docs/CAPACITY.md` up to its
 ClickHouse section, whose table `examples/capacity_clickhouse.py` prints.
 
+Agent SQL runs on one thread unless the operator gives the engine more (`--threads N`, or
+`[engine] threads`), so on a shared machine a runaway takes one core. A host may lower the
+operator's number for its session and never raise it, and the agent cannot change it: the
+configuration is locked after it is set. The threads are started after the engine is confined,
+so each of them is (REQ-3).
+
+- `the_engine_runs_agent_sql_on_the_threads_it_is_given` — one thread by default, and with
+  `--threads 4` four: the engine reports them, holds the workers, and keeps more than one core
+  busy on a grouped aggregate. Measured as the engine's CPU against the query's wall time and
+  not as a speed-up, because the machine is shared: 0.76 s of CPU in 0.80 s on one thread, and
+  1.59 s in 0.72 s on four, with eight runnable tasks on four cores.
+- `the_engines_threads_are_the_operators_to_set_once` — `--threads` or `[engine] threads`, never
+  both, and never 0.
+- `a_host_lowers_the_engines_threads_and_cannot_raise_them` — from host protocol 7, `hello`
+  reports the threads and a host may lower them. The engine opened before `hello` on the
+  operator's number, so it is rebuilt on the host's, with its helpers. Raising them, setting
+  them to 0, or sending them before protocol 7 ends the session.
+- `the_engines_threads_are_started_after_it_is_confined` — Landlock confines only threads
+  started after it, and DuckDB starts its workers when it opens (three beside the opening
+  thread on four cores, DuckDB 1.5.5) and again when `threads` is set. So the engine is sealed
+  in three steps: `threads = 1` and everything else of the lock, then the confinement, alone,
+  then `SET threads = N` and `lock_configuration`. The test seals as the engine does, in a
+  process that is alone, and puts a C function on the bench that tries, on whichever thread
+  runs it, to open a file outside the bench and a TCP connection. On four threads it ran on four
+  (three workers), and every one was refused both. With `threads` set before the confinement,
+  the engine refuses to serve (`4 threads were running`). With the check that the engine is
+  alone also removed, a worker opened the file.
+
 - `a_deadline_of_zero_is_refused_at_startup` — at zero every query would fail at once, and the
   caps a host reads from `hello` could not be handed back.
 - `ceilings_enforced` — the row cap, the byte cap, the memory budget and the deadline are each

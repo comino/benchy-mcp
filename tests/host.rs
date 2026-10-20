@@ -282,11 +282,11 @@ fn the_host_protocol_refuses_what_it_does_not_know() {
 #[test]
 fn hello_says_what_the_session_is() {
     let mut h = Host::spawn(&["--max-rows", "50", "--deadline", "7"]);
-    let r = h.call("hello", json!({"protocol": [7, 1]}));
+    let r = h.call("hello", json!({"protocol": [8, 1]}));
     assert_eq!(r["protocol"], 1, "{r}");
     let mut v3 = Host::spawn(&[]);
-    let r3 = v3.call("hello", json!({"protocol": [1, 2, 3, 4, 5, 6, 7]}));
-    assert_eq!(r3["protocol"], 6, "the newest version both speak: {r3}");
+    let r3 = v3.call("hello", json!({"protocol": [1, 2, 3, 4, 5, 6, 7, 8]}));
+    assert_eq!(r3["protocol"], 7, "the newest version both speak: {r3}");
     assert!(r["engine"].as_str().unwrap().starts_with("DuckDB v"), "{r}");
     assert_eq!(r["caps"]["max_rows"], 50, "{r}");
     assert_eq!(r["caps"]["deadline_secs"], 7, "{r}");
@@ -498,6 +498,85 @@ fn a_host_lowers_the_loader_ceiling_and_cannot_raise_it() {
         assert_eq!(code(&r), "E_REQUEST", "{why}: {r}");
         assert!(h.ended(), "{why}: the session ended");
     }
+}
+
+/// The threads the session's agent SQL runs on, as the engine says.
+fn engine_threads(h: &mut Host) -> String {
+    let r = h.call(
+        "query",
+        json!({"sql": "SELECT current_setting('threads') AS on_threads"}),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let text = r["text"].as_str().unwrap_or("");
+    text.lines()
+        .find_map(|l| l.trim().parse::<u64>().ok().map(|n| n.to_string()))
+        .unwrap_or_else(|| panic!("no number: {r}"))
+}
+
+#[test]
+fn a_host_lowers_the_engines_threads_and_cannot_raise_them() {
+    // REQ-7. The operator gives the engine its threads, `--threads` or `[engine] threads`; from
+    // protocol 7 `hello` reports them, and a host may lower them for its session, never raise
+    // them. Lowered, they are what agent SQL runs on: the engine opened before `hello`, on the
+    // operator's, and is rebuilt on the host's, its helpers with it.
+    let v7 = json!([1, 2, 3, 4, 5, 6, 7]);
+    let mut h = Host::spawn(&[]);
+    let r = h.call("hello", json!({"protocol": v7}));
+    assert_eq!(r["protocol"], 7, "{r}");
+    assert_eq!(r["limits"]["threads"], 1, "the default: {r}");
+    assert_eq!(engine_threads(&mut h), "1");
+    // Before protocol 7 it is not reported: a host may send `limits` back as it got them.
+    let mut h = Host::spawn(&["--threads", "3"]);
+    let r = h.call("hello", json!({"protocol": [1, 2, 3, 4, 5, 6]}));
+    assert!(r["limits"].get("threads").is_none(), "{r}");
+    assert_eq!(engine_threads(&mut h), "3", "the operator's all the same");
+
+    let dir = unique("host-threads");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = helpers_config(&dir, HOST_HELPERS);
+    let text = std::fs::read_to_string(&cfg).unwrap();
+    std::fs::write(&cfg, format!("{text}[engine]\nthreads = 3\n")).unwrap();
+    let mut c = Host::spawn(&["--config", cfg.to_str().unwrap()]);
+    let r = c.call("hello", json!({"protocol": v7}));
+    assert_eq!(r["limits"]["threads"], 3, "from the config: {r}");
+    assert_eq!(engine_threads(&mut c), "3");
+
+    // Lowered by the host, and held to, the helpers still there.
+    let mut h = Host::spawn(&["--config", cfg.to_str().unwrap()]);
+    let r = h.call("hello", json!({"protocol": v7, "limits": {"threads": 2}}));
+    assert_eq!(r["limits"]["threads"], 2, "{r}");
+    assert_eq!(engine_threads(&mut h), "2");
+    let r = h.call("query", json!({"sql": "SELECT twice(21) AS answer"}));
+    assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
+    let readings = arrows(&dir.join("r.arrows"), &readings(10, "r"), true);
+    assert_eq!(attach(&mut h, "readings", &readings)["ok"], true);
+    let r = h.call(
+        "query",
+        json!({"sql": "SELECT count(*) AS n FROM readings"}),
+    );
+    assert!(r["text"].as_str().unwrap_or("").contains("10"), "{r}");
+    // Lowered to what it is, nothing changes.
+    let mut h = Host::spawn(&["--threads", "2"]);
+    let r = h.call("hello", json!({"protocol": v7, "limits": {"threads": 2}}));
+    assert_eq!(r["limits"]["threads"], 2, "{r}");
+    assert_eq!(engine_threads(&mut h), "2");
+
+    // Never raised, nor to nothing, nor given before protocol 7: the session ends, as for any
+    // limit.
+    for (offer, threads, why) in [
+        (v7.clone(), 4, "raised"),
+        (json!([1, 2, 3, 4, 5, 6]), 1, "not in protocol 6"),
+        (v7.clone(), 0, "to nothing"),
+    ] {
+        let mut h = Host::spawn(&["--threads", "3"]);
+        let r = h.call(
+            "hello",
+            json!({"protocol": offer, "limits": {"threads": threads}}),
+        );
+        assert_eq!(code(&r), "E_REQUEST", "{why}: {r}");
+        assert!(h.ended(), "{why}: the session ended");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

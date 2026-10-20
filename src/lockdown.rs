@@ -22,14 +22,23 @@ const NOWHERE: &str = "/benchy-none";
 pub const NOTE_PATH_DISCLOSURE: &str =
     "catalog functions disclose the attached path; keep the path uninteresting";
 
+/// The whole lock at once, on one thread: for what runs no agent SQL in a process of its own (a
+/// loader's helpers job) and for the tests.
 pub fn apply(conn: &Connection, memory_limit: &str) -> duckdb::Result<()> {
-    apply_allowing(conn, memory_limit, None)
+    prepare(conn, memory_limit, None)?;
+    lock(conn, 1)
 }
 
-/// The same lock, with `allowed` still open to DuckDB afterwards — the one directory a sealed
-/// engine attaches from. It has to be named before external access is turned off: DuckDB
-/// refuses to change `allowed_directories` once it is.
-pub fn apply_allowing(
+/// Everything of the lock but its last step, [`lock`], with `allowed` still open to DuckDB
+/// afterwards — the one directory a sealed engine attaches from. It has to be named before
+/// external access is turned off: DuckDB refuses to change `allowed_directories` once it is.
+///
+/// Apart from [`lock`] because of Landlock, which confines the thread that asks and the threads
+/// it starts afterwards, never one already running (`sandbox::alone`). DuckDB starts its workers
+/// as it opens, and `threads = 1` here sends them away: measured on DuckDB 1.5.5, kernel 6.8,
+/// four cores, three workers beside the opening thread, gone within 300 ms of the `SET`. So the
+/// engine is confined alone between the two, and the threads agent SQL runs on are [`lock`]'s.
+pub fn prepare(
     conn: &Connection,
     memory_limit: &str,
     allowed: Option<&std::path::Path>,
@@ -48,8 +57,8 @@ pub fn apply_allowing(
         "SET enable_external_access = false",
         "SET autoinstall_known_extensions = false",
         "SET autoload_known_extensions = false",
-        // REQ-7: DuckDB's own budget, and one thread so a runaway cannot take the machine with
-        // it. Neither bounds planning — see `Caps::memory_limit`.
+        // One thread until the process is confined: see above. What agent SQL runs on is
+        // [`lock`]'s to set.
         "SET threads = 1",
     ] {
         conn.execute_batch(stmt)?;
@@ -85,15 +94,30 @@ pub fn apply_allowing(
         time_zone_refused(icu)?;
     }
 
-    // nothing above can be changed after this
-    conn.execute_batch("SET lock_configuration = true")?;
     debug_assert_eq!(NOWHERE, "/benchy-none");
     Ok(())
 }
 
+/// The lock's last step: the threads agent SQL runs on, and then nothing [`prepare`] set, nor
+/// this, can be changed. Where the process confines itself it comes after: DuckDB starts the
+/// workers `threads` asks for at the `SET`, from the thread that sets it, and Landlock confines
+/// every thread a confined one starts (REQ-7 `the_engines_threads_are_started_after_it_is_confined`;
+/// set before the confinement, the engine refuses to serve, `4 threads were running`).
+///
+/// Measured on DuckDB 1.5.5: `SET threads` is taken with external access off, and refused once
+/// the configuration is locked, as `SET GLOBAL threads`, `RESET threads` and `external_threads`
+/// are, so the agent cannot raise its own (`Workspace::verify_locked` proves it). DuckDB's
+/// memory budget is one for the database whatever the threads; neither bounds planning — see
+/// `Caps::memory_limit`.
+pub fn lock(conn: &Connection, threads: usize) -> duckdb::Result<()> {
+    conn.execute_batch(&format!("SET threads = {threads}"))?;
+    // nothing above can be changed after this
+    conn.execute_batch("SET lock_configuration = true")
+}
+
 /// What a refused `SET TimeZone` means, given how many loaded extensions are ICU. With ICU loaded
 /// it is a real failure, not an absent feature, and a silent pass would make results
-/// host-dependent. Apart from [`apply_allowing`] because the official library always carries ICU
+/// host-dependent. Apart from [`prepare`] because the official library always carries ICU
 /// and always accepts the setting, so there it is never reached
 /// (REQ-10 `a_refused_time_zone_fails_only_where_icu_is_loaded`).
 fn time_zone_refused(icu_loaded: i64) -> duckdb::Result<()> {

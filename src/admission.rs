@@ -119,6 +119,10 @@ pub struct HostLimits {
     /// everything under it: past it the load is stopped and nothing of it attached
     /// (`supervisor::LOADER_MEMORY_CEILING`). A host may lower it from protocol 6.
     pub loader_memory_ceiling: u64,
+    /// REQ-7: the threads the engine runs agent SQL on (`--threads`), 1 unless the operator says
+    /// otherwise. A host may lower it from protocol 7: one that runs many sessions on a machine
+    /// the operator gave each several.
+    pub threads: u64,
 }
 
 impl Default for HostLimits {
@@ -135,14 +139,16 @@ impl Default for HostLimits {
             memory: 1_000_000_000,
             memory_ceiling: 1_500_000_000,
             loader_memory_ceiling: crate::supervisor::LOADER_MEMORY_CEILING,
+            threads: 1,
         }
     }
 }
 
 impl HostLimits {
     /// Each limit by its name in `hello`.
-    pub fn named(&mut self) -> [(&'static str, &mut u64); 7] {
+    pub fn named(&mut self) -> [(&'static str, &mut u64); 8] {
         [
+            ("threads", &mut self.threads),
             ("attach_rows", &mut self.attach_rows),
             ("attach_bytes", &mut self.attach_bytes),
             ("attachments", &mut self.attachments),
@@ -164,8 +170,8 @@ impl HostLimits {
             let Some((_, slot)) = named.iter_mut().find(|(n, _)| n == k) else {
                 return Err(format!(
                     "`limits` has no field `{k}`; it takes attach_rows, attach_bytes, \
-                     attachments, session_rows, session_bytes, memory_ceiling and \
-                     loader_memory_ceiling"
+                     attachments, session_rows, session_bytes, memory_ceiling, \
+                     loader_memory_ceiling and threads"
                 ));
             };
             let Some(n) = v.as_u64() else {

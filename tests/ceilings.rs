@@ -187,3 +187,126 @@ fn a_trivial_query_does_not_pay_for_the_watchdog() {
     println!("watchdog: SELECT 1 beyond a refused statement, lower quartile of 60: {quartile:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A process's CPU time, user and system, from `/proc/<pid>/stat`, in seconds.
+#[cfg(target_os = "linux")]
+fn cpu_secs(pid: u32) -> f64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let f: Vec<&str> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    // utime and stime, fields 14 and 15 of proc(5): the 12th and 13th after the command
+    let ticks = f[11].parse::<u64>().unwrap() + f[12].parse::<u64>().unwrap();
+    ticks as f64 / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn the_engine_runs_agent_sql_on_the_threads_it_is_given() {
+    // REQ-7. One thread unless the operator says otherwise; given four, agent SQL runs on four,
+    // the engine holds the workers for them, and a grouped aggregate keeps more than one core
+    // busy. Judged by the engine's CPU against the query's wall time, not by its speed: the
+    // machine this runs on is shared, so a speed-up cannot be relied on, and a query on one
+    // thread cannot keep more than one core busy whatever else runs.
+    // Over a table, not `range`, which DuckDB 1.5.5 scans on one thread: the same aggregate
+    // straight over `range(60000000)` took 1.9 s of CPU in 2.0 s on four.
+    const AGGREGATE: &str =
+        "SELECT count(*) FROM (SELECT i % 100000 AS k, avg(ln(i + 1) * sqrt(i)) AS m \
+                             FROM big GROUP BY k)";
+    let dir = data_dir();
+    let mut used = Vec::new();
+    for (args, threads) in [(&[][..], 1), (&["--threads", "4"][..], 4)] {
+        let mut s = Server::start(&dir, args);
+        let (err, body, _) = s.query("SELECT current_setting('threads') AS threads");
+        assert!(!err, "{body}");
+        assert!(
+            body.contains(&format!("\n{threads}")),
+            "{threads} thread(s): {body}"
+        );
+        let engine = common::engine_of(s.pid());
+        let tasks = std::fs::read_dir(format!("/proc/{engine}/task"))
+            .unwrap()
+            .count();
+        assert!(
+            tasks >= threads,
+            "{tasks} tasks in the engine, for {threads}"
+        );
+        let (err, body, _) = s.query("CREATE TABLE big AS SELECT range AS i FROM range(30000000)");
+        assert!(!err, "{body}");
+        let before = cpu_secs(engine);
+        let (err, body, wall) = s.query(AGGREGATE);
+        assert!(!err, "{body}");
+        used.push((threads, cpu_secs(engine) - before, wall.as_secs_f64()));
+    }
+    let [(_, cpu1, wall1), (_, cpu4, wall4)] = used[..] else {
+        unreachable!()
+    };
+    assert!(cpu1 <= wall1 * 1.1 + 0.05, "one thread, one core: {used:?}");
+    assert!(
+        cpu4 > wall4 * 1.3,
+        "four threads, more than one core: {used:?}"
+    );
+    println!("threads, engine CPU s, wall s: {used:?}");
+
+    // On four threads a runaway still stops at its deadline, and an engine killed under it is
+    // rebuilt on four.
+    let mut s = Server::start(&dir, &["--threads", "4", "--deadline", "2"]);
+    let (err, body, took) = s.query(RUNAWAY);
+    assert!(err && body.contains("deadline"), "{body}");
+    assert!(
+        took < Duration::from_secs(8),
+        "stopped near its deadline: {took:?}"
+    );
+    let engine = common::engine_of(s.pid());
+    unsafe { libc::kill(engine as i32, libc::SIGKILL) };
+    let (_, body, _) = s.query("SELECT current_setting('threads') AS threads");
+    let (err, again, _) = s.query("SELECT current_setting('threads') AS threads");
+    assert!(
+        !err && again.contains("\n4"),
+        "rebuilt on four: {body} / {again}"
+    );
+    assert_ne!(common::engine_of(s.pid()), engine, "a new engine");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_engines_threads_are_the_operators_to_set_once() {
+    // REQ-7. `--threads` or `[engine] threads`, never both, and never none.
+    let dir = data_dir();
+    let cfg = dir.join("threads.toml");
+    std::fs::write(&cfg, "[engine]\nthreads = 2\n").unwrap();
+    let mut s = Server::start(&dir, &["--config", cfg.to_str().unwrap()]);
+    let (err, body, _) = s.query("SELECT current_setting('threads') AS threads");
+    assert!(!err && body.contains("\n2"), "from the config: {body}");
+    let refused = |args: &[&str], says: &str| {
+        let out = std::process::Command::new(common::BIN)
+            .args(args)
+            .args(common::PLATFORM)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} started: {err}");
+        assert!(err.contains(says), "{args:?}: {err}");
+    };
+    let d = dir.to_str().unwrap();
+    let c = cfg.to_str().unwrap();
+    refused(
+        &[d, "--threads", "0"],
+        "--threads needs a number, at least 1",
+    );
+    refused(
+        &[d, "--threads", "many"],
+        "--threads needs a number, at least 1",
+    );
+    refused(
+        &[d, "--threads", "2", "--config", c],
+        "set them in one place",
+    );
+    std::fs::write(&cfg, "[engine]\nthreads = 0\n").unwrap();
+    refused(&[d, "--config", c], "[engine] threads must be at least 1");
+    let _ = std::fs::remove_dir_all(&dir);
+}
