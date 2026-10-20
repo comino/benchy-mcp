@@ -411,6 +411,11 @@ impl WorkError {
 impl std::fmt::Display for WorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            WorkError::Denied { index, kind, .. } if *kind == TIME_ZONE => write!(
+                f,
+                "statement {index} sets TimeZone, which is fixed; nothing after it ran. {}",
+                crate::hint::UTC
+            ),
             WorkError::Denied {
                 index,
                 kind,
@@ -567,6 +572,22 @@ unsafe fn raw_exec(con: ffi::duckdb_connection, sql: &str) -> Result<(), String>
 }
 
 const ALLOWED: &str = "SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE, DROP, ALTER";
+
+/// Statement `index` (from 1) of the batch `sql`, a `kind` the agent may not run. A `SET` of
+/// `TimeZone` is told the session is UTC and how to reach local periods, not the statements
+/// allowed: the zone is the one setting an agent has a reason of its own to want (#52).
+fn denied(index: usize, kind: &'static str, sql: &str) -> WorkError {
+    let zone = kind == "SET"
+        && crate::hint::statement(sql, index - 1).is_some_and(|s| crate::hint::sets_time_zone(&s));
+    WorkError::Denied {
+        index,
+        kind: if zone { TIME_ZONE } else { kind },
+        allowed: ALLOWED,
+    }
+}
+
+/// The kind a refused `SET TimeZone` is given, so it is told what it needs ([`denied`]).
+const TIME_ZONE: &str = "SET TimeZone";
 
 /// A directory name no other bench or session will pick: random bits and a counter. A clock was
 /// not enough — macOS reads it to the microsecond, so two benches opened together in one process
@@ -1458,13 +1479,7 @@ impl Workspace {
                 let hint = crate::hint::for_parse_error(&m, sql);
                 return Err(WorkError::Parse(m, hint));
             }
-            Verdict::Refuse { index, kind } => {
-                return Err(WorkError::Denied {
-                    index,
-                    kind,
-                    allowed: ALLOWED,
-                })
-            }
+            Verdict::Refuse { index, kind } => return Err(denied(index, kind, sql)),
             Verdict::Allow(_) => {}
         }
         // REQ-7: one watchdog for the whole batch. Proven in probe 2 — an execution-phase
@@ -1611,11 +1626,11 @@ impl Workspace {
                     if let Some(w) = watchdog.take() {
                         finish(&done, w);
                     }
-                    failure = Some(WorkError::Denied {
-                        index: mine as usize + 1,
-                        kind: crate::guard::type_name(kind),
-                        allowed: ALLOWED,
-                    });
+                    failure = Some(denied(
+                        mine as usize + 1,
+                        crate::guard::type_name(kind),
+                        sql,
+                    ));
                     break;
                 }
                 // REQ-9 `an_agent_object_cannot_shadow_a_host_object_or_builtin`. Only a CREATE
@@ -1805,8 +1820,9 @@ impl Workspace {
         }
         // Each result's statement, for a host's `page` (`a_page_says_the_sql_of_its_result`): the
         // agent's own text, never what DuckDB made of it, so a helper it calls is named and not
-        // expanded. Only where the split at the semicolons finds the statements DuckDB found —
-        // a dollar-quoted `;` or `'` would otherwise give a result another statement's SQL.
+        // expanded. Only where the split at the semicolons finds the statements DuckDB found:
+        // the split lexes as DuckDB does (`crate::guard::lex`), and no batch DuckDB parses has
+        // been found where it differs, but one would otherwise give a result another's SQL.
         if !out.is_empty() {
             let written = crate::hint::statements(sql);
             if written.len() as u64 + added == extracted {
@@ -2676,6 +2692,7 @@ unsafe fn collect_legacy(
         note: None,
         cut_values: keep.cut,
         sql: None,
+        cell_cap: cap.max_cell_bytes,
     }
 }
 
@@ -3059,6 +3076,7 @@ unsafe fn collect_arrow(
         note: None,
         cut_values: keep.cut,
         sql: None,
+        cell_cap: cap.max_cell_bytes,
     }))
 }
 

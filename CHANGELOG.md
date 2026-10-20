@@ -8,6 +8,15 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 Changed behaviour:
 
+- **The agent is told times are UTC** (#52). The session is pinned to UTC, and neither the
+  instructions nor a refused `SET TimeZone` said so. Both now say "Times are UTC. For local
+  calendar periods, convert first, e.g. `date_trunc('day', timezone('Europe/Berlin', ts))`.",
+  and a `SET` or `RESET` of `TimeZone` gets that instead of the statements allowed
+  (`the_agent_is_told_times_are_utc_and_how_to_bucket_local_days`). The instructions are 115
+  bytes longer. `dialect` recommends `time_bucket` for buckets below a day only: on a
+  TIMESTAMPTZ column, one engine thread, `time_bucket` of a day took 10.05 s of CPU over
+  1,000,000 rows where `date_trunc('day', …)` took 0.30 s, and a month 20.7 s against 0.31 s;
+  by the hour `time_bucket` is the faster, 0.10 s against 0.29 s.
 - **`describe` judges each series at its own step** (#50). On a table of series every 5, 10
   and 15 minutes, every complete 10- and 15-minute series was read at the table's 5 minutes and
   reported broken ("1014: 8735 gaps, 17470 rows missing"). A series is now judged at the step
@@ -88,6 +97,23 @@ Faster:
 
 Fixed:
 
+- **A page cuts values at its own cell cap** (#18). A host's `page` may lower `max_cell_bytes`
+  for the call, and that cap was applied to the column names alone: `SELECT repeat('x', 200)`
+  paged at 16 came back whole, without TRUNCATED. Each value is now cut to the page's cap, and
+  one cut already when it was kept says how much of the value is missing
+  (`a_page_cuts_values_at_its_own_cell_cap`).
+- **`page`'s `sql` keeps every string literal whole** (#16). Comments were stripped by a scan
+  that knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
+  `SELECT $$a`, and `SELECT $$a/*b*/c$$ AS x` as `SELECT $$a c$$ AS x`. The batch is now split
+  and its comments found by the lexer the table-function check uses, held to DuckDB 1.5.5's:
+  `'…'`, `E'…'`, `$tag$…$tag$`, quoted names, `--` and nested `/* */`. A statement with a `;`
+  in a dollar-quoted string, which was given no `sql`, is given its own
+  (`page_sql_keeps_every_literal_whole`).
+- **The trace's peak memory is in KiB on macOS too** (#55). `maxrss_kb` and
+  `children_maxrss_kb` were `ru_maxrss` as getrusage(2) gives it, which is KiB on Linux and
+  bytes on macOS, where a process at about 513 MB was traced as `546504704`; `bench/ingest.py`
+  read it as KiB. It is now converted there, and the name stays
+  (`peak_memory_is_said_in_kib_on_every_platform`).
 - **A failed `hello` or `ping` reply ends the session** (#17). The reader answers these itself
   and ignored a failed write, so a host that had closed its end of the replies kept its
   session, engine and warden running for as long as its stdin stayed open. A second `hello`'s

@@ -598,11 +598,13 @@ kept is not an error: the page holds no row, and its footer says so and where th
 
 `sql` is the statement the result came from, as the agent wrote it — one statement of its batch,
 comments left out — so a host whose tool returns a result with its SQL keeps no mapping of its
-own. It is the agent's own text and nothing else: a view or macro the statement calls is named,
-never expanded, so no helper's body is in it. It is bounded like the text, cut at `max_bytes` and
-saying so, and benchy keeps at most 64 KiB of it. It is left out where the statement cannot be told
-apart in its batch: where a split at the batch's semicolons does not find the statements DuckDB
-found — a `;` in a dollar-quoted string, say — no result is given another statement's SQL.
+own. Comments and semicolons are found as DuckDB's lexer finds them, so every string literal
+(`'…'`, `E'…'`, `$$…$$`, `$tag$…$tag$`) and quoted name is kept whole: a `--`, `/*` or `;` inside
+one is its text. It is the agent's own text and nothing else: a view or macro the statement calls
+is named, never expanded, so no helper's body is in it. It is bounded like the text, cut at
+`max_bytes` and saying so, and benchy keeps at most 64 KiB of it. It is left out where the
+statement cannot be told apart in its batch: where the split at the batch's semicolons does not
+find the statements DuckDB found, no result is given another statement's SQL.
 
 **Result ids** are opaque strings: read them, never build them. Each starts with a random prefix
 of its session's own, so no two sessions issue the same id, and a host whose conversations

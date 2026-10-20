@@ -209,13 +209,14 @@ fn a_page_says_the_sql_of_its_result() {
         let s = p.to_string();
         assert!(!s.contains("secret"), "no helper's body: {s}");
     }
-    // Where the batch cannot be split as DuckDB splits it — a `;` in a dollar-quoted string — no
-    // result is given another statement's SQL: none is given any.
+    // A `;` in a dollar-quoted string is the string's. The split did not know the form and found
+    // two statements where DuckDB found one, so the SQL was left out; the split is now DuckDB's
+    // (`page_sql_keeps_every_literal_whole`), and the statement is given whole.
     let r = h.query("SELECT $$a;b$$ AS x", json!({}));
     assert_eq!(r["ok"], true, "{r}");
     let p = h.call("page", json!({"result_id": r["result_ids"][0]}));
     assert_eq!(p["ok"], true, "{p}");
-    assert!(p.get("sql").is_none(), "{p}");
+    assert_eq!(p["sql"], "SELECT $$a;b$$ AS x", "{p}");
     // Bounded like the text: a statement longer than the reply may be is cut, and says so.
     let long = format!("SELECT '{}' AS padding", "y".repeat(3000));
     let r = h.query(&long, json!({}));
@@ -227,6 +228,93 @@ fn a_page_says_the_sql_of_its_result() {
         "{sql}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_page_cuts_values_at_its_own_cell_cap() {
+    // #18: caps may lower the session's limits for one call, `page` among them. A page with
+    // `max_cell_bytes` 16 showed all 200 bytes of a value kept at the query's 256, and did not
+    // say TRUNCATED. Now it cuts each value as a query at 16 would have, and a value cut once
+    // already when it was kept says what is missing of the value, not of the cut.
+    let mut h = Host::start(&[]);
+    let r = h.query(
+        "SELECT repeat('x', 200) AS short, repeat('y', 300) AS long, 'ok' AS small",
+        json!({}),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let id = r["result_ids"][0].clone();
+    let whole = text(&r);
+    assert!(whole.contains(&"x".repeat(200)), "{whole}");
+    assert!(whole.contains("[+44 bytes]"), "{whole}");
+
+    let p = h.call(
+        "page",
+        json!({"result_id": id, "caps": {"max_cell_bytes": 16}}),
+    );
+    assert_eq!(p["ok"], true, "{p}");
+    let page = text(&p);
+    let row = page.lines().nth(1).unwrap_or_else(|| panic!("{page}"));
+    assert_eq!(
+        row,
+        format!(
+            "{}… [+184 bytes] | {}… [+284 bytes] | ok",
+            "x".repeat(16),
+            "y".repeat(16)
+        ),
+        "{page}"
+    );
+    assert!(page.contains("TRUNCATED"), "{page}");
+    // The session's cap again: the result as it was kept.
+    let p = h.call("page", json!({"result_id": id}));
+    assert!(text(&p).contains(&"x".repeat(200)), "{p}");
+}
+
+#[test]
+fn page_sql_keeps_every_literal_whole() {
+    // #16: a `--` or `/*` inside a string is the string's. Comments were found by a scan that
+    // knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
+    // `SELECT $$a`, and `$$a/*b*/c$$` as `$$a c$$`: SQL for a replay or an audit log that is not
+    // what ran. Each literal form DuckDB 1.5.5 lexes, and a quoted name, keeps its text; only the
+    // comments around them go.
+    let mut h = Host::start(&[]);
+    for (batch, written) in [
+        ("SELECT $$a/*b*/c$$ AS x", vec!["SELECT $$a/*b*/c$$ AS x"]),
+        (
+            "SELECT $$a -- b$$ AS y, 'q' AS z",
+            vec!["SELECT $$a -- b$$ AS y, 'q' AS z"],
+        ),
+        (
+            "SELECT $t$a;/*b*/ -- c$t$ AS x",
+            vec!["SELECT $t$a;/*b*/ -- c$t$ AS x"],
+        ),
+        (
+            "SELECT E'it\\'s /*b*/ -- c' AS x",
+            vec!["SELECT E'it\\'s /*b*/ -- c' AS x"],
+        ),
+        (
+            "SELECT 'a--b', 'it''s /*c*/' AS x",
+            vec!["SELECT 'a--b', 'it''s /*c*/' AS x"],
+        ),
+        (
+            "SELECT 1 AS \"a--b/*c*/;d\"",
+            vec!["SELECT 1 AS \"a--b/*c*/;d\""],
+        ),
+        // A comment is dropped, a nested one whole, and the batch splits where DuckDB splits it,
+        // a `;` in a dollar-quoted string or after a comment's quote included.
+        (
+            "SELECT 1 /* a /* b */ ' */ AS x; -- it's\nSELECT $$a;b$$ AS y",
+            vec!["SELECT 1   AS x", "SELECT $$a;b$$ AS y"],
+        ),
+    ] {
+        let r = h.query(batch, json!({}));
+        assert_eq!(r["ok"], true, "{batch}: {r}");
+        let ids = r["result_ids"].as_array().unwrap().clone();
+        assert_eq!(ids.len(), written.len(), "{batch}: {r}");
+        for (id, sql) in ids.iter().zip(&written) {
+            let p = h.call("page", json!({"result_id": id}));
+            assert_eq!(p["sql"], *sql, "{batch}: {p}");
+        }
+    }
 }
 
 /// The names a host gives the agent's tools, none of them benchy's own.

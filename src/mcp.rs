@@ -107,8 +107,9 @@ impl ServerHandler for Bench {
              network functions (read_csv, read_parquet, ATTACH, INSTALL) are unavailable and \
              will be refused: the data is already here. Results are capped; a truncated \
              result says so. Call dialect if a query fails on syntax — errors already name \
-             their fix, so read the error first.",
-            self.engine_version
+             their fix, so read the error first. {}",
+            self.engine_version,
+            crate::hint::UTC
         ));
         cfg
     }

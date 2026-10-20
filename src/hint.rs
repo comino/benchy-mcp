@@ -294,51 +294,79 @@ fn is_export(statement: &str) -> bool {
     }
 }
 
+/// Said wherever the agent may assume a zone of its own: the instructions, and a refused
+/// `SET TimeZone`. The lockdown pins every connection to UTC (REQ-10
+/// `the_agent_connection_is_utc_on_a_host_that_is_not`), and nothing said so, so an agent asked
+/// for "per day" bucketed UTC days without a word. The example is run on a loaded TIMESTAMPTZ
+/// column and gives Berlin's days (`the_agent_is_told_times_are_utc_and_how_to_bucket_local_days`).
+pub const UTC: &str = "Times are UTC. For local calendar periods, convert first, e.g. \
+                       `date_trunc('day', timezone('Europe/Berlin', ts))`.";
+
+/// Whether `statement` sets or resets `TimeZone`: `SET [GLOBAL|SESSION|LOCAL] TimeZone …` or
+/// `RESET …`, in any case, the name quoted or not, comments anywhere.
+pub fn sets_time_zone(statement: &str) -> bool {
+    use crate::guard::Part;
+    let mut words = Vec::new();
+    for (part, r) in crate::guard::lex(statement) {
+        let text = &statement[r];
+        match part {
+            Part::Code => words.extend(
+                text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_ascii_lowercase),
+            ),
+            Part::Name => words.push(text.trim_matches('"').to_ascii_lowercase()),
+            Part::Literal => words.push(String::new()),
+            Part::Comment => {}
+        }
+        if words.len() >= 3 {
+            break;
+        }
+    }
+    let mut w = words.iter().map(String::as_str);
+    if !matches!(w.next(), Some("set" | "reset")) {
+        return false;
+    }
+    match w.next() {
+        Some("global" | "session" | "local") => w.next() == Some("timezone"),
+        name => name == Some("timezone"),
+    }
+}
+
 /// The `index`th statement (from 0) of a batch, as written ([`statements`]).
 pub fn statement(sql: &str, index: usize) -> Option<String> {
     statements(sql).into_iter().nth(index)
 }
 
-/// The statements of a batch, as written: split at the `;`s that are not in a string, a quoted
-/// identifier or a comment, with empty statements skipped as DuckDB skips them. Comments are
-/// dropped from what is returned. It is not DuckDB's parser — a dollar-quoted string is not read
-/// as one — so a caller that must be exact checks the count against DuckDB's.
+/// The statements of a batch, as written: split at the `;`s that are not in a string literal, a
+/// quoted name or a comment, as DuckDB 1.5.5's lexer finds those (`crate::guard::lex`), with
+/// empty statements skipped as DuckDB skips them. Comments are dropped from what is returned,
+/// and nothing else: every literal and quoted name is kept whole, so a `--` or `/*` in a
+/// `$$…$$` or `E'…'` string is the string's (`page_sql_keeps_every_literal_whole`). Before,
+/// this read `'…'` and `"…"` alone, and `SELECT $$a -- b$$ AS y, 'q' AS z` became
+/// `SELECT $$a`. It is still not DuckDB's parser, so a caller that must be exact checks the
+/// count against DuckDB's.
 pub fn statements(sql: &str) -> Vec<String> {
+    use crate::guard::Part;
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
-    let mut chars = sql.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' | '"' => {
-                cur.push(c);
-                for d in chars.by_ref() {
-                    cur.push(d);
-                    if d == c {
-                        break; // a doubled quote reads as close-then-open: the same split
-                    }
+    for (part, r) in crate::guard::lex(sql) {
+        let text = &sql[r];
+        match part {
+            Part::Code => {
+                let mut pieces = text.split(';');
+                if let Some(first) = pieces.next() {
+                    cur.push_str(first);
+                }
+                for piece in pieces {
+                    out.push(std::mem::take(&mut cur));
+                    cur.push_str(piece);
                 }
             }
-            '-' if chars.peek() == Some(&'-') => {
-                for d in chars.by_ref() {
-                    if d == '\n' {
-                        cur.push(' ');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut prev = ' ';
-                for d in chars.by_ref() {
-                    if prev == '*' && d == '/' {
-                        break;
-                    }
-                    prev = d;
-                }
-                cur.push(' ');
-            }
-            ';' => out.push(std::mem::take(&mut cur)),
-            _ => cur.push(c),
+            Part::Name | Part::Literal => cur.push_str(text),
+            // `1/*c*/FROM` is `1 FROM`; a `--` comment ends at a line break, which is kept.
+            Part::Comment if text.starts_with("/*") => cur.push(' '),
+            Part::Comment => {}
         }
     }
     out.push(cur);
@@ -461,5 +489,41 @@ mod tests {
         )
         .is_none());
         assert!(for_parse_error("Parser Error: unexpected token", "SELECT 1").is_none());
+    }
+
+    #[test]
+    fn statements_keep_every_literal_whole() {
+        // #16: only comments are dropped. Each literal form as DuckDB 1.5.5 lexes it
+        // (`crate::guard::lex`), and a quoted name, keeps a `--`, a `/*` and a `;` inside it.
+        for sql in [
+            "SELECT $$a/*b*/c$$ AS x",
+            "SELECT $$a -- b$$ AS y, 'q' AS z",
+            "SELECT $t$a;/*b*/ -- c$t$ AS x",
+            "SELECT $é$a--b$é$ AS x",
+            "SELECT E'it\\'s /*b*/ -- c' AS x",
+            "SELECT e'a\\\\' AS w, '--' AS x",
+            "SELECT 'a--b', 'it''s /*c*/;' AS x",
+            "SELECT 'a\\' AS w, '/*' AS x",
+            "SELECT 1 AS \"a--b/*c*/;d\"",
+        ] {
+            assert_eq!(statements(sql), vec![sql.to_string()], "{sql}");
+        }
+        assert_eq!(
+            statements("SELECT 1 /* a /* b */ ' */ AS x; -- it's\nSELECT $$a;b$$ AS y;;"),
+            vec!["SELECT 1   AS x", "SELECT $$a;b$$ AS y"]
+        );
+        assert_eq!(
+            statements("SELECT 1 -- c\nFROM t -- d"),
+            vec!["SELECT 1 \nFROM t"]
+        );
+        // `x$a$` is a name, not a dollar quote, and `xE'` no prefix.
+        assert_eq!(
+            statements("SELECT 1 AS x$a$; SELECT 2 AS z$a$"),
+            vec!["SELECT 1 AS x$a$", "SELECT 2 AS z$a$"]
+        );
+        assert_eq!(
+            statements("SELECT xE'a\\' AS v; SELECT 2"),
+            vec!["SELECT xE'a\\' AS v", "SELECT 2"]
+        );
     }
 }

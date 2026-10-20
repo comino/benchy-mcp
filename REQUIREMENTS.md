@@ -806,6 +806,11 @@ fetched again by id.
 - `a_truncated_result_can_be_paged` — a capped result is read further with `get_result` and an
   offset, without re-running the query; the last page says it is the end. The first 2,000 rows
   (at most 1 MiB) of each of the last 32 results are kept.
+- `a_page_cuts_values_at_its_own_cell_cap` — a page whose call lowers `max_cell_bytes` cuts each
+  value to it, as the query would have, and says TRUNCATED. Values were cut once, when the result
+  was kept, at the query's cap: a host's page at 16 bytes got all 200 bytes of
+  `repeat('x', 200)`. A value cut when it was kept says what is missing of the value, not of the
+  first cut.
 - `a_query_without_a_limit_reads_no_further_than_it_keeps` — a `SELECT` is streamed and read
   only as far as its rows are kept, then stopped. Built whole first, a `SELECT` with no `LIMIT`
   cost the whole result: over 10,000,000 rows 0.63 G instructions and 150 ms a call, and over
@@ -858,6 +863,12 @@ fetched again by id.
   bench: its own, a clone, and one opened after it, as the helpers' build does.
 - `a_zone_other_than_utc_stops_the_engine` — an agent connection the seal finds in another zone,
   or with ICU loaded and no zone to read, is a startup failure, not a host-dependent result.
+- `the_agent_is_told_times_are_utc_and_how_to_bucket_local_days` — the instructions say times
+  are UTC and how to reach local calendar periods, and a `SET` or `RESET` of `TimeZone`, in any
+  spelling, is refused with that rather than the list of statements allowed. Nothing said so
+  before, and agents asked "per day" bucketed in UTC. The example,
+  `date_trunc('day', timezone('Europe/Berlin', ts))`, runs on a loaded TIMESTAMPTZ column and
+  gives Berlin's days, which differ from UTC's.
 
 ## REQ-11 — Teach the dialect where it lands
 
@@ -1068,6 +1079,12 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_page_says_the_sql_of_its_result` — `page` returns the statement its result came from, as the
   agent wrote it, one statement of its batch: never a helper's body, cut at `max_bytes`, and left
   out where the batch cannot be split as DuckDB splits it.
+- `page_sql_keeps_every_literal_whole` — that statement drops comments and nothing else: a `--`,
+  `/*` or `;` inside `'…'`, `E'…'`, `$$…$$`, `$tag$…$tag$` or a quoted name is its text. The
+  split read `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
+  `SELECT $$a`, and `$$a/*b*/c$$` as `$$a c$$`. It now lexes as the table-function check does
+  (`the_literals_the_check_skips_are_duckdbs`), and a `;` in a dollar-quoted string no longer
+  leaves the SQL out.
 - `texts_name_the_tools_as_the_host_names_them` — in protocol 4, `hello`'s `tool_names` renames
   the agent's tools in every text that names one — a result's footer, a hint, `describe` — and
   none names benchy's own; without it, they do.
