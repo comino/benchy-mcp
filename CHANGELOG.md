@@ -88,6 +88,11 @@ Faster:
 
 Fixed:
 
+- **The trace's peak memory is in KiB on macOS too** (#55). `maxrss_kb` and
+  `children_maxrss_kb` were `ru_maxrss` as getrusage(2) gives it, which is KiB on Linux and
+  bytes on macOS, where a process at about 513 MB was traced as `546504704`; `bench/ingest.py`
+  read it as KiB. It is now converted there, and the name stays
+  (`peak_memory_is_said_in_kib_on_every_platform`).
 - **A failed `hello` or `ping` reply ends the session** (#17). The reader answers these itself
   and ignored a failed write, so a host that had closed its end of the replies kept its
   session, engine and warden running for as long as its stdin stayed open. A second `hello`'s

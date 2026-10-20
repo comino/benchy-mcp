@@ -140,7 +140,7 @@ pub fn usage(what: &str) {
         &[
             ("user_us", us(me.ru_utime).to_string()),
             ("sys_us", us(me.ru_stime).to_string()),
-            ("maxrss_kb", me.ru_maxrss.to_string()),
+            ("maxrss_kb", maxrss_kib(me.ru_maxrss).to_string()),
             ("minflt", me.ru_minflt.to_string()),
             ("majflt", me.ru_majflt.to_string()),
             ("inblock", me.ru_inblock.to_string()),
@@ -149,9 +149,24 @@ pub fn usage(what: &str) {
             ("nivcsw", me.ru_nivcsw.to_string()),
             ("children_user_us", us(kids.ru_utime).to_string()),
             ("children_sys_us", us(kids.ru_stime).to_string()),
-            ("children_maxrss_kb", kids.ru_maxrss.to_string()),
+            ("children_maxrss_kb", maxrss_kib(kids.ru_maxrss).to_string()),
         ],
     );
+}
+
+/// `ru_maxrss` in KiB, the unit `maxrss_kb` says and `bench/ingest.py` reads. getrusage(2)
+/// counts it in KiB on Linux and the BSDs and in bytes on macOS, where it was written unconverted
+/// and a process at about 513 MB was traced as `maxrss_kb: 546504704`.
+fn maxrss_kib(raw: libc::c_long) -> u64 {
+    kib(raw.max(0) as u64, cfg!(target_vendor = "apple"))
+}
+
+fn kib(raw: u64, in_bytes: bool) -> u64 {
+    if in_bytes {
+        raw / 1024
+    } else {
+        raw
+    }
 }
 
 fn emit(what: &str, span: Option<(u64, u64)>, fields: &[(&str, String)]) {
@@ -187,6 +202,34 @@ mod tests {
     fn a_span_off_runs_its_work_and_says_nothing() {
         assert!(!on());
         assert_eq!(span("x", || 41 + 1), 42);
+    }
+
+    #[test]
+    fn peak_memory_is_said_in_kib_on_every_platform() {
+        // getrusage(2): `ru_maxrss` is KiB on Linux and bytes on macOS, where a process `ps`
+        // put at about 513 MB was traced as `maxrss_kb: 546504704`.
+        assert_eq!(kib(546_504_704, true), 533_696);
+        assert_eq!(kib(533_696, false), 533_696);
+        // And this platform's unit is the one taken: on Linux the peak agrees with the kernel's
+        // own `VmHWM`, which is in kB whatever `getrusage` counts in.
+        #[cfg(target_os = "linux")]
+        {
+            let _hold = vec![1u8; 64 << 20];
+            let mut r: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut r) };
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            let hwm: u64 = status
+                .lines()
+                .find_map(|l| l.strip_prefix("VmHWM:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+                .unwrap();
+            let traced = maxrss_kib(r.ru_maxrss);
+            assert!(
+                traced.abs_diff(hwm) <= hwm / 10,
+                "{traced} KiB, VmHWM {hwm} kB"
+            );
+            std::hint::black_box(&_hold);
+        }
     }
 
     #[test]
