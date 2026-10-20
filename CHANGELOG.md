@@ -88,6 +88,13 @@ Faster:
 
 Fixed:
 
+- **`page`'s `sql` keeps every string literal whole** (#16). Comments were stripped by a scan
+  that knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
+  `SELECT $$a`, and `SELECT $$a/*b*/c$$ AS x` as `SELECT $$a c$$ AS x`. The batch is now split
+  and its comments found by the lexer the table-function check uses, held to DuckDB 1.5.5's:
+  `'…'`, `E'…'`, `$tag$…$tag$`, quoted names, `--` and nested `/* */`. A statement with a `;`
+  in a dollar-quoted string, which was given no `sql`, is given its own
+  (`page_sql_keeps_every_literal_whole`).
 - **The trace's peak memory is in KiB on macOS too** (#55). `maxrss_kb` and
   `children_maxrss_kb` were `ru_maxrss` as getrusage(2) gives it, which is KiB on Linux and
   bytes on macOS, where a process at about 513 MB was traced as `546504704`; `bench/ingest.py`

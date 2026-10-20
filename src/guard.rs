@@ -543,70 +543,88 @@ impl Calls {
     }
 }
 
-/// `sql` with the text of each string literal blanked, as DuckDB 1.5.5's lexer reads them
-/// (`the_literals_the_check_skips_are_duckdbs`): `'…'`, where `''` is a quote and a backslash
-/// is itself; `E'…'`, where a backslash also escapes the character after it; and `$tag$…$tag$`,
-/// the tag empty or a name, its case kept. Each is found only where DuckDB would start one: not
-/// inside a comment (`--` to a line's end, `/* … */` nested) or a quoted name (`"…"`, `""` a
-/// quote), whose text is left to be read, and not within a word, which DuckDB continues with
-/// `$` (`x$a$` is a name) and in which a final `E` is no prefix (`xE'…'` is a plain string).
+/// What a stretch of a batch's text is, as DuckDB 1.5.5's lexer reads it ([`lex`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// Anything else: keywords, names, numbers, operators, white space, a `;`.
+    Code,
+    /// A quoted name, `"…"`, its quotes with it.
+    Name,
+    /// A string literal, its quotes and any `E` prefix or dollar tags with it.
+    Literal,
+    /// A comment: `--` to a line's end, the line break not in it, or `/* … */`, nested.
+    Comment,
+}
+
+/// `sql` cut into the stretches DuckDB 1.5.5's lexer reads apart
+/// (`the_literals_the_check_skips_are_duckdbs`, `a_batch_splits_where_duckdb_splits_it`): a
+/// string literal — `'…'`, where `''` is a quote and a backslash is itself; `E'…'`, where a
+/// backslash also escapes the character after it; and `$tag$…$tag$`, the tag empty or a name,
+/// its case kept — a quoted name (`"…"`, `""` a quote), a comment (`--` to a line's end,
+/// `/* … */` nested), and the code around them. Each is found only where DuckDB would start one:
+/// not inside another, and not within a word, which DuckDB continues with `$` (`x$a$` is a name)
+/// and in which a final `E` is no prefix (`xE'…'` is a plain string).
 ///
-/// Wherever this could part from DuckDB it errs towards reading more: a word starting with a
-/// digit is read through any `$`, as a name is, so a dollar quote after a number is read as
-/// text; and a literal, a quoted name or a comment that does not end leaves everything from
-/// there on to be read, though DuckDB will not parse the batch at all. A literal is blanked to
-/// spaces, its quotes and prefix with it, so a name never runs into its neighbour.
-fn code(sql: &str) -> String {
+/// Wherever this could part from DuckDB it errs towards reading more as code: a word starting
+/// with a digit is read through any `$`, as a name is, so a dollar quote after a number is code;
+/// and a literal, a quoted name or a `/*` comment that does not end leaves everything from there
+/// on as code, though DuckDB will not parse the batch at all. Every stretch starts and ends at an
+/// ASCII byte or at the end, so each is a `&sql[range]`; together they are `sql`, in order, and
+/// no two stretches of code are next to each other.
+pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
     let b = sql.as_bytes();
-    let mut out = b.to_vec();
+    let mut out: Vec<(Part, std::ops::Range<usize>)> = Vec::new();
+    let mut push = |part: Part, r: std::ops::Range<usize>| {
+        if let (Part::Code, Some((Part::Code, last))) = (part, out.last_mut()) {
+            last.end = r.end;
+        } else {
+            out.push((part, r));
+        }
+    };
     // What continues a word in DuckDB's lexer.
     let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
     let tag = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
     let at = |i: usize, s: &[u8]| b[i..].starts_with(s);
     let mut i = 0;
     while i < b.len() {
-        // Where a literal starts, and the quote that closes it.
         let start = i;
-        let end = match b[i] {
+        // What starts at `i`, and where it ends; `None` for one that does not end.
+        let found: Option<(Part, usize)> = match b[i] {
             b'-' if at(i, b"--") => {
-                match b[i..].iter().position(|c| matches!(c, b'\n' | b'\r')) {
-                    Some(n) => i += n,
-                    None => break,
-                }
-                continue;
+                let n = b[i..].iter().position(|c| matches!(c, b'\n' | b'\r'));
+                Some((Part::Comment, n.map_or(b.len(), |n| i + n)))
             }
             b'/' if at(i, b"/*") => {
                 let mut depth = 0usize;
+                let mut j = i;
                 loop {
-                    if i >= b.len() {
-                        return String::from_utf8_lossy(&out).into_owned();
+                    if j >= b.len() {
+                        break None;
                     }
-                    if at(i, b"/*") {
+                    if at(j, b"/*") {
                         depth += 1;
-                        i += 2;
-                    } else if at(i, b"*/") {
+                        j += 2;
+                    } else if at(j, b"*/") {
                         depth -= 1;
-                        i += 2;
+                        j += 2;
                         if depth == 0 {
-                            break;
+                            break Some((Part::Comment, j));
                         }
                     } else {
-                        i += 1;
+                        j += 1;
                     }
                 }
-                continue;
             }
             // To the next `"`: a `""` inside closes one quoted name and opens the next, which
             // reads the same as one name holding a quote.
-            b'"' => match b[i + 1..].iter().position(|c| *c == b'"') {
-                Some(n) => {
-                    i += n + 2;
-                    continue;
-                }
-                None => break,
-            },
-            b'\'' => quoted(b, i + 1, false),
-            b'e' | b'E' if b.get(i + 1) == Some(&b'\'') => quoted(b, i + 2, true),
+            b'"' => b[i + 1..]
+                .iter()
+                .position(|c| *c == b'"')
+                .map(|n| (Part::Name, i + n + 2)),
+            b'\'' => quoted(b, i + 1, false).map(|e| (Part::Literal, e + 1)),
+            b'e' | b'E' if b.get(i + 1) == Some(&b'\'') => {
+                quoted(b, i + 2, true).map(|e| (Part::Literal, e + 1))
+            }
             b'$' => {
                 let mut j = i + 1;
                 if b.get(j).is_some_and(|c| tag(*c) && !c.is_ascii_digit()) {
@@ -615,37 +633,46 @@ fn code(sql: &str) -> String {
                     }
                 }
                 if b.get(j) != Some(&b'$') {
+                    push(Part::Code, i..i + 1);
                     i += 1;
                     continue;
                 }
                 let delim = &b[i..=j];
                 let body = j + 1;
-                match b[body..].windows(delim.len()).position(|w| w == delim) {
-                    Some(n) => {
-                        let past = body + n + delim.len();
-                        out[i..past].fill(b' ');
-                        i = past;
-                        continue;
-                    }
-                    None => return String::from_utf8_lossy(&out).into_owned(),
-                }
+                b[body..]
+                    .windows(delim.len())
+                    .position(|w| w == delim)
+                    .map(|n| (Part::Literal, body + n + delim.len()))
             }
             c if word(c) => {
                 while b.get(i).is_some_and(|c| word(*c)) {
                     i += 1;
                 }
+                push(Part::Code, start..i);
                 continue;
             }
             _ => {
+                push(Part::Code, i..i + 1);
                 i += 1;
                 continue;
             }
         };
-        let Some(end) = end else {
-            break;
-        };
-        out[start..=end].fill(b' ');
-        i = end + 1;
+        let end = found.map_or(b.len(), |(_, end)| end);
+        push(found.map_or(Part::Code, |(part, _)| part), start..end);
+        i = end;
+    }
+    out
+}
+
+/// `sql` with the text of each string literal blanked ([`lex`]), for a check that reads names
+/// and calls: a comment or a quoted name is left to be read. A literal is blanked to spaces, its
+/// quotes and prefix with it, so a name never runs into its neighbour.
+fn code(sql: &str) -> String {
+    let mut out = sql.as_bytes().to_vec();
+    for (part, r) in lex(sql) {
+        if part == Part::Literal {
+            out[r].fill(b' ');
+        }
     }
     String::from_utf8_lossy(&out).into_owned()
 }

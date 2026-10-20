@@ -1805,8 +1805,9 @@ impl Workspace {
         }
         // Each result's statement, for a host's `page` (`a_page_says_the_sql_of_its_result`): the
         // agent's own text, never what DuckDB made of it, so a helper it calls is named and not
-        // expanded. Only where the split at the semicolons finds the statements DuckDB found —
-        // a dollar-quoted `;` or `'` would otherwise give a result another statement's SQL.
+        // expanded. Only where the split at the semicolons finds the statements DuckDB found:
+        // the split lexes as DuckDB does (`crate::guard::lex`), and no batch DuckDB parses has
+        // been found where it differs, but one would otherwise give a result another's SQL.
         if !out.is_empty() {
             let written = crate::hint::statements(sql);
             if written.len() as u64 + added == extracted {

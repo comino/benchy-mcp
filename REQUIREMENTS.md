@@ -1068,6 +1068,12 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_page_says_the_sql_of_its_result` — `page` returns the statement its result came from, as the
   agent wrote it, one statement of its batch: never a helper's body, cut at `max_bytes`, and left
   out where the batch cannot be split as DuckDB splits it.
+- `page_sql_keeps_every_literal_whole` — that statement drops comments and nothing else: a `--`,
+  `/*` or `;` inside `'…'`, `E'…'`, `$$…$$`, `$tag$…$tag$` or a quoted name is its text. The
+  split read `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
+  `SELECT $$a`, and `$$a/*b*/c$$` as `$$a c$$`. It now lexes as the table-function check does
+  (`the_literals_the_check_skips_are_duckdbs`), and a `;` in a dollar-quoted string no longer
+  leaves the SQL out.
 - `texts_name_the_tools_as_the_host_names_them` — in protocol 4, `hello`'s `tool_names` renames
   the agent's tools in every text that names one — a result's footer, a hint, `describe` — and
   none names benchy's own; without it, they do.
