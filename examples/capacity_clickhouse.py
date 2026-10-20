@@ -106,7 +106,9 @@ def run(binary, args, env=None):
     _, _, usage = os.wait4(p.pid, 0)
     p.returncode = 0
     cpu = usage.ru_utime + usage.ru_stime
-    return took, rss, "".join(err), cpu, usage.ru_maxrss
+    # ru_maxrss is in KiB on Linux and in bytes on macOS (getrusage(2)), as `src/trace.rs` says.
+    largest = usage.ru_maxrss // 1024 if sys.platform == "darwin" else usage.ru_maxrss
+    return took, rss, "".join(err), cpu, largest
 
 
 def wire(log):
