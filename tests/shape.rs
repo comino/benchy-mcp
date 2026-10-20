@@ -144,6 +144,9 @@ fn describe_tells_the_time_column_its_range_and_cadence() {
     has(&d, "most series have a row every 15 minutes");
 }
 
+/// The guessed key is the text column with the most values that still leaves each series rows
+/// to spare, named as a guess; then its values, how many series are on their step with nothing
+/// missing or repeated, and each numeric column's range, nulls and zeros.
 #[test]
 fn describe_tells_the_series_key() {
     let d = described();
@@ -350,7 +353,9 @@ fn a_table_without_time_gets_its_columns_summarised() {
 fn a_distinct_count_never_exceeds_the_values() {
     // DuckDB's HyperLogLog, `approx_count_distinct`, said 24 of `name_0` … `name_19`, measured on
     // 1.5.5; a host saw "about 51 distinct" on a 50-row table. A small table's count is exact,
-    // and no count is more than the column's values.
+    // and no count is more than the column's values. Each estimate is held to the values counted
+    // in the profile's one scan (for a stream, as it went in), so loads of 50,000 and 1,000,000
+    // rows without a time column cost the same as before the cap, measured.
     let mut csv = String::from("room_name,tag,area_m2\n");
     for i in 0..20 {
         let tag = if i % 2 == 0 {
@@ -385,7 +390,8 @@ fn a_distinct_count_never_exceeds_the_values() {
 
 #[test]
 fn an_integer_series_key_is_listed_in_number_order() {
-    // The keys are held as text, and were listed in text order: `50 series (1 … 9)`.
+    // The keys are held as text, and were listed in text order: `50 series (1 … 9)`. Past
+    // 200,000 series the ones kept are the first in text order, so the key gets no range.
     let mut csv = String::from("ts,series_id,kw\n");
     for t in 0..10 {
         for s in 1..=50 {
@@ -579,6 +585,10 @@ fn example_meters() -> String {
 fn a_small_table_still_finds_its_series_key() {
     // Eight rows held two series, so the key's values could not leave each series ten rows, and
     // with no key the four rows that share a time with the other meter read as four repeats.
+    // Only when the first rule finds nothing, the key is the column whose every value has rows
+    // at two times or more and which, with the time, tells apart at least 80% of the rows, more
+    // than the time alone does: counted exactly, over at most a million rows. It finds what
+    // stating the key finds: one gap and one repeat, not four repeats.
     let dir = dir_with("meters.csv", &example_meters());
     let d = sealed(&dir, &[]).describe(4096);
     has(
@@ -767,7 +777,11 @@ fn a_data_value_in_describe_is_a_quoted_literal() {
 fn an_integer_reading_is_not_taken_for_the_series_key() {
     // Integer device ids beside integer readings: CO₂ in ppm and RSSI in dBm both have more
     // values than there are devices, and each still leaves ten rows a value. The most values
-    // picked `co2`: 1600 series, none on a step, thousands of invented gaps.
+    // picked `co2`: 1600 series, none on a step, thousands of invented gaps. Where two columns
+    // of a kind could be the key, the one that cuts the table's first slice of time into series
+    // that keep a step wins over the one with the most values, when clearly more of its rows
+    // keep it. That costs one query per such column over that slice, as the step's sample
+    // reads, and none when only one column could be the key.
     let mut csv = String::from("ts,device_id,co2,rssi\n");
     let mut x: u64 = 1;
     let mut rand = |n: u64| {
@@ -1017,6 +1031,16 @@ const MIXED: &str = "CREATE TABLE readings AS
     ORDER BY m, sensor;
     CREATE TABLE sites AS SELECT * FROM (VALUES (1001, 'north'), (1002, 'south')) v(sensor, site);";
 
+/// #50: read at the table's one step (5 minutes), every complete 10- and 15-minute series of
+/// this fixture was reported broken: "8735 gaps, 17470 rows missing".
+///
+/// 149 series, each complete but for what is planted. A series' step is the greatest common
+/// divisor of its times' distances when that is longer than the table's, or shorter with the
+/// series complete on it; a series that breaks its step is judged at the distance at least half
+/// its rows keep, so a 15-minute series one of whose rows is a second late has two rows off the
+/// step, not a gap every row. The time column's line says how many series keep each step, the
+/// line on regular series how many of them do, and a series off the most common step says its
+/// own. Its runs of 0 and its late start or early end are judged at its step too.
 #[test]
 fn each_series_is_judged_at_its_own_step() {
     let d = recorded(MIXED, &["readings", "sites"]).describe(4096);
@@ -1129,6 +1153,11 @@ fn stuck_sql(order: &str) -> String {
     )
 }
 
+/// #51. Why ten times the series' average run: measured on the public meter data's 370 meters
+/// over four years, six meters hold one non-zero value for a day or more, 74 runs, every one of
+/// them ten times its meter's average. Rounded to 10 kW, a low-resolution reading, 48 meters
+/// have 1,084 such runs and the rule keeps 789 in 44; rounded to 50 kW, 173 meters have 5,888
+/// and it keeps 2,461 in 147.
 #[test]
 fn a_stuck_value_inside_a_series_is_noted() {
     let mut seen = Vec::new();

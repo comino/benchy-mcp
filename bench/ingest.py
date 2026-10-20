@@ -20,7 +20,7 @@ session. Per run it reads:
 N runs per scenario; the table shows the minimum (the run least disturbed by the rest of the
 machine) and the spread, (max - min) / min. `--record DIR` also runs each scenario once under
 `perf record` and writes, per scenario, the instructions by process and the top symbols:
-that is where docs/PERFORMANCE.md's hotspot list comes from.
+that is where docs/history/PERFORMANCE-rounds.md's hotspot lists come from.
 
 Scenarios: csv-1m, parquet-1m, ndjson-1m (a folder), exec-1m, exec-10m (an exec connector that
 `cat`s an Arrow stream, so the connector costs next to nothing and the time is benchy's),

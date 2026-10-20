@@ -203,7 +203,10 @@ fn the_empty_result_note_stays_inside_the_deadline() {
     // past the server's hard one, and the engine was killed with the agent's tables. Here, four
     // million rows: six columns of unique values, which the head of each column rules out, and
     // one, `late`, whose head is one value and whose whole is not, which only the note's budget,
-    // what is left of the deadline, stops.
+    // what is left of the deadline, stops. The killed engine's error blamed planning. Measured
+    // on these four million rows: the six columns took 8.7 s against a one-second deadline
+    // before the head check and the budget, and take milliseconds after; `late` is stopped at a
+    // 300 ms deadline.
     let mut bench = common::bench();
     let unique: Vec<String> = (1..=6).map(|n| format!("'{n}-' || i AS c{n}")).collect();
     bench

@@ -68,9 +68,10 @@ fn timings_reach_the_operator_log_from_every_process_and_never_the_agent() {
     assert!(!agent.contains("maxrss"), "{agent}");
 }
 
-/// docs/PERFORMANCE.md, item 6: the engine's `Open` (a process start, DuckDB's open, the seal)
-/// and the first loader need nothing from each other until the attach, so the loader is started
-/// before the engine has answered. Waited for in turn, every cold start paid for both.
+/// docs/history/PERFORMANCE-rounds.md, round 1 item 6: the engine's `Open` (a process start,
+/// DuckDB's open, the seal) and the first loader need nothing from each other until the attach, so
+/// the loader is started before the engine has answered. Waited for in turn, every cold start paid
+/// for both.
 #[test]
 fn the_first_loader_starts_while_the_engine_opens() {
     let (_, log) = session(&[("BENCHY_TRACE_TIMINGS", Path::new("1"))]);
@@ -91,9 +92,9 @@ fn the_first_loader_starts_while_the_engine_opens() {
     );
 }
 
-/// docs/PERFORMANCE.md, item 5: the engine's check of an attached file lists every function
-/// DuckDB has, about 0.19 G instructions, so the tables a session starts with are attached in
-/// one request and the listing is paid once, not once per table.
+/// docs/history/PERFORMANCE-rounds.md, round 1 item 5: the engine's check of an attached file lists
+/// every function DuckDB has, about 0.19 G instructions, so the tables a session starts with are
+/// attached in one request and the listing is paid once, not once per table.
 #[test]
 fn the_tables_a_session_starts_with_are_attached_in_one_request() {
     let dir = common::data_dir();

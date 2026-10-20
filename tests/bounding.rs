@@ -76,6 +76,9 @@ fn corpus() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// The whole response, JSON-escaped as the client receives it, is what the cap bounds. The
+/// corpus's nine shapes include one 1 MB value, 200 columns, 60 statements in a batch, and text
+/// that escaping inflates sixfold.
 #[test]
 fn cap_measured_on_the_wire() {
     let dir = data_dir();
@@ -151,6 +154,7 @@ fn a_truncated_result_can_be_paged() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Not an error: the result is there, and a host's `page` still gets its `sql`.
 #[test]
 fn a_page_past_the_end_says_so() {
     // An offset past the last row answered "rows 10001–10000 of 500": a range that runs
@@ -226,6 +230,7 @@ fn tool(s: &mut Server, name: &str, args: serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
+/// The data includes a 1,500-column table and a 20,000-byte column name.
 #[test]
 fn every_tool_response_obeys_the_byte_cap() {
     // The cap held for `query` and for nothing else: `get_result` returned 24 times it, because
@@ -279,6 +284,8 @@ fn every_tool_response_obeys_the_byte_cap() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Built whole, a `SELECT` with no `LIMIT` over 10,000,000 rows cost 0.63 G instructions and
+/// 150 ms a call, for 2,000 rows kept.
 #[test]
 fn a_query_without_a_limit_reads_no_further_than_it_keeps() {
     // REQ-10. A query's result was built whole before its first 2,000 rows were kept, so a
@@ -353,6 +360,12 @@ fn a_query_without_a_limit_holds_no_more_than_it_keeps() {
 #[cfg(target_os = "linux")]
 const LIMITLESS_PEAK: u64 = 128 << 20;
 
+/// Reading on past the rows kept, to find such an error, was measured and not taken: it cost
+/// more than building the result whole (0.88 G instructions and 178 ms a call over 10,000,000
+/// rows), for rows the agent never sees, and a query over more rows than the deadline can read
+/// would have become a deadline error instead of an answer. What counts as read is DuckDB's:
+/// before the stream is handed over it runs until about 1 MB of the result is buffered, counted
+/// by the width of the values' types, and an error there is raised.
 #[test]
 fn an_error_past_the_rows_kept_is_not_raised() {
     // REQ-10, and the price of reading no further than is kept: DuckDB computes the rows it is

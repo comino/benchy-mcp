@@ -792,8 +792,8 @@ thread_local! {
 /// are read back for the write, and are gone once the stage is detached. Held whole, the stage
 /// grew the loader with the file: the harness's 10,000,000-row CSV (475 MB) peaked at 513 MB.
 /// Measured on DuckDB 1.5.5 with four threads, interleaved with the uncapped stage
-/// (docs/PERFORMANCE.md, "Memory and disk that grow with the input"): at 256 MiB that load
-/// peaks at 406 MB, spilling about 95 MB, for 4.5% more instructions and 5% more CPU; at
+/// (docs/history/PERFORMANCE-rounds.md, "Memory and disk that grow with the input"): at 256 MiB
+/// that load peaks at 406 MB, spilling about 95 MB, for 4.5% more instructions and 5% more CPU; at
 /// 128 MiB at 300 MB, for 24% more instructions and 33% more CPU, the buffer manager evicting
 /// under four readers. A stage that fits, csv-1m's or ndjson-1m's, never spills, and costs what
 /// it did. Past the cap, the loader's peak stays where it is as the
@@ -996,7 +996,8 @@ fn converted(kept: &[(String, String)], zone: &str) -> String {
 }
 
 /// Whether what `reader` reads goes straight into its table ([`read_into`]) rather than through
-/// the stage. Measured with bench/ingest.py, five runs, minima (docs/PERFORMANCE.md, 2026-10-11):
+/// the stage. Measured with bench/ingest.py, five runs, minima (docs/history/PERFORMANCE-rounds.md,
+/// 2026-10-11):
 ///
 /// - **Parquet**, a file or an HTTP body staged as one: 14.4% and 12.2% fewer instructions, the
 ///   loader's peak memory 102 MB to 72 MB, the first `describe` 10–26% sooner. Read straight in.
@@ -1064,7 +1065,8 @@ fn read_into(
         let select = format!("SELECT {} FROM {reader}{limit}", converted(&kept, zone));
         // A Parquet file is read a second time, by the watch beside the write: on parquet-1m,
         // ten runs interleaved, the first `describe` 568 / 623 → 509 / 546 ms (minimum /
-        // median) for 4.2% more instructions (docs/PERFORMANCE.md, R3-2). A JSON reader is not
+        // median) for 4.2% more instructions (docs/history/PERFORMANCE-rounds.md, R3-2). A JSON
+        // reader is not
         // (none comes here since R4-2 stages every JSON file): parsed twice, it would cost about
         // 3.9 G more per 1,000,000 rows to take some 45 ms off the path.
         let beside = reader
@@ -1286,8 +1288,8 @@ fn write_table(conn: &duckdb::Connection, name: &str, select: &str) -> Result<()
 ///
 /// A file's profile read the table back twice, the scan's aggregates and the pass, each
 /// decompressing it: 0.78–0.83 G instructions per 1,000,000 rows, 26% of parquet-1m
-/// (docs/PERFORMANCE.md). The bounded queries still read the table, as for a stream. Only the
-/// columns the watch reads are scanned, a DuckDB vector at a time.
+/// (docs/history/PERFORMANCE-rounds.md, R2-4). The bounded queries still read the table, as for a
+/// stream. Only the columns the watch reads are scanned, a DuckDB vector at a time.
 ///
 /// A staged file is watched from its stage instead, beside the write ([`Beside`]); this is for a
 /// file read straight into its table, which has no stage, and for a watch that could not start.
@@ -1354,8 +1356,8 @@ type WatchedStage = (Vec<(String, String)>, crate::profile::Seen);
 /// Kept after the write instead ([`watched`]), the watch was on the path to the first
 /// `describe`: 333 ms on one thread for `examples/capacity.py`'s 5,000,000-row, four-column CSV,
 /// where the scan and pass R2-4 replaced took 184 ms on every thread, which made the first
-/// `describe` 4.4% later (docs/PERFORMANCE.md, R3-2). The write holds DuckDB to one thread
-/// ([`write_table`]), so the two are a core each. The stage is uncompressed and, up to
+/// `describe` 4.4% later (docs/history/PERFORMANCE-rounds.md, R3-2). The write holds DuckDB to one
+/// thread ([`write_table`]), so the two are a core each. The stage is uncompressed and, up to
 /// [`STAGE_MEMORY`], in memory: read twice, it is read where it lies, and the thread holds no more
 /// than a chunk of it. Past the cap, where both read back what spilled, the 5,000,000-row CSV's
 /// loader peaked 47 MB higher (317 → 364 MB), and still not more as the file grows
@@ -1797,10 +1799,10 @@ struct Column {
 /// ClickHouse's 65,409-row batches are, goes in as it is, so it is never copied to be gathered.
 /// Eight of DuckDB's vectors.
 ///
-/// Not a row group's 122,880 (docs/PERFORMANCE.md, 2026-10-11): gathering ClickHouse's and the
-/// bench's 64 Ki-row batches in pairs to reach it changed 10,000,000-row loads by -0.1% (exec)
-/// and -0.8% (ClickHouse) of instructions, inside the spread, and raised the loader's peak memory
-/// by 5 MB, the copy the pairs are gathered into.
+/// Not a row group's 122,880 (docs/history/PERFORMANCE-rounds.md, 2026-10-11): gathering
+/// ClickHouse's and the bench's 64 Ki-row batches in pairs to reach it changed 10,000,000-row loads
+/// by -0.1% (exec) and -0.8% (ClickHouse) of instructions, inside the spread, and raised the
+/// loader's peak memory by 5 MB, the copy the pairs are gathered into.
 const GATHER_ROWS: usize = 16_384;
 
 /// The table function a batch is read through, registered on the loader's connection only. It
@@ -1876,7 +1878,8 @@ impl duckdb::vtab::VTab for BatchScan {
 /// its 16-byte slot directly, as DuckDB inlines it; a longer one is copied into the vector's own
 /// heap. Every other layout goes through duckdb-rs's conversion, which is what all of them used:
 /// one C call, its UTF-8 check and a validity call per null, per value. Measured with
-/// bench/ingest.py on 10,000,000 rows (docs/PERFORMANCE.md, 2026-10-11): -4.6% of the load's
+/// bench/ingest.py on 10,000,000 rows (docs/history/PERFORMANCE-rounds.md, 2026-10-11): -4.6% of
+/// the load's
 /// instructions from an exec connector, -3.7% from ClickHouse
 /// (`a_batch_lands_as_duckdbs_own_arrow_conversion_lands_it`).
 fn fill(
@@ -2046,7 +2049,7 @@ impl<'a> Ingest<'a> {
         // tables; but 1,000,000 rows of unique text took 96 MB instead of 39 MB, so a session
         // with text-heavy tables would pay in disk and memory. Chimp, Patas, ZSTD, Roaring and
         // DICT_FSST off saved nothing. Decided 2026-10-11: FSST kept on, small free-text tables
-        // matter more than about 5% of a load (docs/PERFORMANCE.md).
+        // matter more than about 5% of a load (docs/history/PERFORMANCE-rounds.md).
         // One thread while the stream goes in. Every insert is serial whatever the setting — one
         // batch, read by a scan that does not split — but the loader's other threads were not
         // idle: a 3,000,000-row attach took 17.0 to 19.5 G instructions and 4.0 to 4.8 s of CPU
@@ -3817,6 +3820,8 @@ mod tests {
         assert_eq!(both(bench, &t, &no), (true, true));
     }
 
+    /// Read straight in, a file that went bad midway used to say only that the transaction was
+    /// aborted. The loader is left its threads, too.
     #[test]
     fn a_file_that_fails_midway_leaves_no_table_and_says_why() {
         // A file whose rows go bad after thousands of good ones fails in DuckDB's own words,
@@ -4019,6 +4024,10 @@ mod tests {
         }
     }
 
+    /// Reading an NDJSON file's timestamp columns as text and casting them costs a third fewer of
+    /// the read's instructions than the format DuckDB's sniffer found. A value the sniffer's
+    /// formats refuse and the cast reads exactly — an offset in a vector that began without one —
+    /// loads at that instant, where the sniffed read refused the file.
     #[test]
     fn a_json_files_timestamps_read_as_text_load_as_the_sniffer_reads_them() {
         // R3-1: a JSON file's timestamp columns are read as text and cast, which is a third of
@@ -4231,6 +4240,11 @@ mod tests {
         }
     }
 
+    /// The text cast of a JSON file's timestamps never takes `infinity` or `-infinity`: they are
+    /// under 19 bytes, so the file is read the sniffed way, which gives 1900-01-01 too (below).
+    /// The same held for an HTTP body read as such a file. The refusal says what to do: write the
+    /// value as null or as a real timestamp, declare the column's type in `[[source.schema]]`,
+    /// which reads it as itself, or use CSV or Parquet. A text column that says `infinity` loads.
     #[test]
     fn an_ndjson_infinity_is_refused() {
         // DuckDB 1.5.5's JSON reader reads `infinity` and `-infinity` in a column it sniffed as
@@ -4424,6 +4438,9 @@ mod tests {
         assert!(infinite);
     }
 
+    /// Of two keys that differ only in case, DuckDB renames the later one by a suffix (`Id` beside
+    /// `id` is `Id_1`, `A_1` beside `A` and `a_1` is `A_1_2`). The infinity check looked for that
+    /// name among the file's keys and found none, so an infinity there loaded as 1900-01-01.
     #[test]
     fn an_ndjson_infinity_is_refused_in_a_column_renamed_for_case() {
         // #38: of two keys that differ only in case, DuckDB 1.5.5's JSON reader renames the
@@ -4488,6 +4505,8 @@ mod tests {
         }
     }
 
+    /// `epoch` counts in a timestamp, a date or a list, past the sniffer's sample, and in a file
+    /// of 1 MiB or more, whose timestamps are read as text first: each is refused the same way.
     #[test]
     fn an_ndjson_epoch_is_refused_where_a_csv_reads_1970() {
         // #37: DuckDB 1.5.5 reads `epoch` — any case, padded — as 1970-01-01 00:00:00 from a
@@ -4652,6 +4671,11 @@ mod tests {
         }
     }
 
+    /// What the text read would change: a date (`26-01-02` would be the year 26), a struct (a key
+    /// not in the sample would be dropped, not refused), timestamps in a list (an offset
+    /// dropped), two keys differing in case, a `.json` file, a file with no timestamp at all. A
+    /// file under 1 MiB is read the sniffed way too: there the `DESCRIBE` first costs more than
+    /// the cast saves.
     #[test]
     fn a_json_file_whose_columns_the_text_read_would_change_is_read_as_it_was() {
         // R3-1 reads a file with the columns its sniffer found, and that read differs from the
@@ -4733,6 +4757,10 @@ mod tests {
         }
     }
 
+    /// Staged only up to 64 MiB while a stage held the whole table in memory, a 10,000,000-row
+    /// NDJSON file (633 MB) was read straight in on the write's one thread: 6.6 s to its first
+    /// `describe` against 4.6 s staged, its loader at the stage's cap (351 MB) where it held
+    /// 132 MB, and 134 MB spilled to the staging directory.
     #[test]
     fn a_json_file_is_staged_whatever_its_size() {
         // R4-2: a JSON or NDJSON file is staged however large it is, parsed on every thread,
@@ -4795,6 +4823,9 @@ mod tests {
         assert!(!reads_twice(parquet, Some(&hold(&narrowed))));
     }
 
+    /// With the write on every thread, two loads of one file made the same segments with two of
+    /// them in each other's blocks. The random FSST choice (below) made the layout tests fail
+    /// under load: the seed is `getrandom`'s, and no setting reaches it.
     #[test]
     fn a_files_layout_is_the_same_on_every_load() {
         // REQ-15: the same rows make the same file, segment for segment, every time. DuckDB 1.5.5
@@ -4999,6 +5030,12 @@ mod tests {
         );
     }
 
+    /// Measured through a loader: 5,000 objects of 2,000 keys (163 MB) took it to 549 MB, where
+    /// staged on every thread and then without the cap they took it to 635–648 MB; 10,000 objects
+    /// of one-digit keys to 554–578 MB against 1,125 MB, and 20,000 to 614 MB. The peak grows with
+    /// the rows only up to a row group of the table, whose 40,000,000 `MAP` entries at 20,000 rows
+    /// DuckDB writes partly outside its limit (DuckDB 1.5.5 alone, 568–603 MB): it is bounded by
+    /// the width of a row, not the file's length.
     #[test]
     fn a_wide_json_file_is_read_on_one_thread_within_its_vector() {
         // A JSON file of wide objects is read on one thread at once, and its stage held to

@@ -150,7 +150,7 @@ Left unset, `compression` follows where the server is
 `localhost`, 127.0.0.0/8 or ::1, as the URL writes it; a name is not resolved — and `"zstd"` for
 any other. On one machine both ends of the compression are its CPU: for 10,000,000 rows, zstd
 cost ClickHouse 2.3 s of CPU to send against 0.65 s for none, and benchy 0.3 s to decode, so a
-load with zstd took 7.7 s of CPU in all where none took 6.0 s (docs/PERFORMANCE.md, item 3).
+load with zstd took 7.7 s of CPU in all where none took 6.0 s (docs/history/PERFORMANCE-rounds.md, round 1 item 3).
 Anywhere else zstd moves a sixth of the bytes, which on 1 Gbit/s is 0.3 s against 2 s, and the
 server's CPU is not this machine's. A server on the same machine addressed by another name, or
 on a fast private network, may do better with `compression = "none"` set.
@@ -164,7 +164,8 @@ decodes past the cap is refused at the cap, not decoded whole
 held to everything a connector's stream is — view columns counted by what they unpack to, nothing
 after the end-of-stream marker — since a server is trusted no more than a connector
 (`a_clickhouse_response_is_held_to_what_a_connectors_stream_is`).
-[CAPACITY.md](CAPACITY.md) and [PERFORMANCE.md](PERFORMANCE.md) have the measurements.
+[CAPACITY.md](CAPACITY.md) and [PERFORMANCE.md](PERFORMANCE.md) have the measurements, and
+[history/PERFORMANCE-rounds.md](history/PERFORMANCE-rounds.md) the rounds behind them.
 
 ### Read-only users
 
@@ -373,7 +374,7 @@ type names the column — and is never loaded as nulls or as another column's va
 (`a_declared_file_that_does_not_match_fails_naming_why`). Declared as its sniffer would type it,
 a file makes the table the sniffed read makes
 (`a_declared_file_loads_as_the_sniffed_file_does`); a 1,000-row CSV loads with 42% fewer
-instructions, a 1,000,000-row NDJSON file with 19% fewer (docs/PERFORMANCE.md, R3-5). DuckDB's
+instructions, a 1,000,000-row NDJSON file with 19% fewer (docs/history/PERFORMANCE-rounds.md, R3-5). DuckDB's
 JSON sniffer types a zone-less time and one ending in `Z` as `timestamp`; declared
 `timestamptz`, an NDJSON column is cast by ICU, whose start costs about 130 M instructions.
 

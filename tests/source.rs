@@ -246,12 +246,14 @@ fn loading_never_downloads_an_extension() {
     assert_eq!(setting("autoload_known_extensions"), "false");
 }
 
+/// Holding one row group of a bulk insert before writing it, not DuckDB's five, a stream's or a
+/// Parquet file's loader peaks 11–16 MB lower; a CSV's, staged in memory first, does not move.
 #[test]
 fn a_loader_writes_each_row_group_as_it_fills() {
     // DuckDB holds five row groups of a bulk insert before it writes them out; a loader writes
     // one table, once, from one thread, and has no use for them. Held to one, a stream's or a
     // Parquet file's loader peaked 11 to 16 MB lower with the same instructions, and every
-    // source is still written the same way (docs/PERFORMANCE.md R2-8;
+    // source is still written the same way (docs/history/PERFORMANCE-rounds.md R2-8;
     // `the_physical_layout_says_nothing_of_where_data_came_from`).
     let b = common::bench();
     let held: String = b

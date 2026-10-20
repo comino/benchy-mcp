@@ -203,6 +203,8 @@ fn cpu_secs(pid: u32) -> f64 {
     ticks as f64 / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64
 }
 
+/// Measured on the shared development box, four cores, eight runnable tasks: 0.76 s of the
+/// engine's CPU in 0.80 s of wall time on one thread, and 1.59 s in 0.72 s on four.
 #[test]
 #[cfg(target_os = "linux")]
 fn the_engine_runs_agent_sql_on_the_threads_it_is_given() {

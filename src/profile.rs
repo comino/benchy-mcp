@@ -2074,7 +2074,7 @@ fn pass(
 /// [`HotMeasure`]), the key's first sixteen bytes among them, so a row's series is found without
 /// reaching the key's text, and its counts are added without an `Option` each. At 500 series
 /// sharing each minute that was 386 instructions a row, a third of it finding the series
-/// (docs/PERFORMANCE.md, R3-4). The [`Series`] are filled in from them once, by
+/// (docs/history/PERFORMANCE-rounds.md, R3-4). The [`Series`] are filled in from them once, by
 /// [`Tally::finish`].
 #[derive(Clone)]
 struct Tally {
@@ -2249,8 +2249,8 @@ const INT_KEY: usize = usize::MAX;
 /// R3-10: an integer key's [`Words`], its value in two words. Written as text for every row so
 /// that it could be found as text, an integer key cost the watch thread 940 ms of CPU where the
 /// same rows with text keys cost 619 ms, at exec_series-10m's shape: the watch close to the path
-/// to the first `describe` (docs/PERFORMANCE.md, R3-10). Its text is written once, for its
-/// series ([`Tally::find`]); its distinct count was always counted as an integer.
+/// to the first `describe` (docs/history/PERFORMANCE-rounds.md, R3-10). Its text is written once,
+/// for its series ([`Tally::find`]); its distinct count was always counted as an integer.
 #[inline(always)]
 fn int_words(x: i128) -> Words {
     Words {
@@ -2408,7 +2408,7 @@ impl Tally {
     /// series, then each measure's values, then the times', each over the batch's own slices.
     /// Row by row, through a closure and an `Option` for each value, the watch took 356
     /// instructions a row of exec_series' 500 meters; this way, with the times added up a run at
-    /// a time, 285, where the watch took 398 before R3-4 (docs/PERFORMANCE.md).
+    /// a time, 285, where the watch took 398 before R3-4 (docs/history/PERFORMANCE-rounds.md).
     fn add<'k>(
         &mut self,
         n: usize,
@@ -2842,8 +2842,8 @@ thread_local! {
 /// bitmap — with what makes each value the one the bench holds applied as it is read.
 ///
 /// The watch first took each column as a `Vec<Option<_>>` the batch was copied into. Those
-/// copies were 15–20% of `stream.watch` and 1–4 MB of a loader's peak (docs/PERFORMANCE.md,
-/// R2-2); read in place, they cost neither.
+/// copies were 15–20% of `stream.watch` and 1–4 MB of a loader's peak
+/// (docs/history/PERFORMANCE-rounds.md, R2-2); read in place, they cost neither.
 pub struct Held<'a> {
     values: Values<'a>,
     nulls: Option<&'a duckdb::arrow::buffer::NullBuffer>,
@@ -3118,7 +3118,8 @@ impl Order {
 /// then makes that was not kept, or whose tally gave up, is read from the table as before, and
 /// says the same.
 ///
-/// Measured with bench/ingest.py (docs/PERFORMANCE.md, 2026-10-11): a 10,000,000-row stream of
+/// Measured with bench/ingest.py (docs/history/PERFORMANCE-rounds.md, 2026-10-11): a
+/// 10,000,000-row stream of
 /// one series, 12.8% fewer instructions in all (exec) and 12.5% (ClickHouse); of 500 series
 /// sharing each minute, 15.0%. Keeping every tally, rather than choosing one, saved nothing: the
 /// unused one cost what the scan it replaced did.
@@ -5211,7 +5212,8 @@ mod tests {
         // R3-4: meters read in a fixed cycle, every meter at each minute, as exec_series-10m's
         // 500 are. The row after one of series x is one of series x + 1, so that is tried
         // first, and a row costs one key compare, not a miss on the last row's series and then
-        // a hit on the next. Batches end anywhere in the cycle.
+        // a hit on the next. Batches end anywhere in the cycle. Measured: the watch of 500
+        // series cost 398 instructions a row with two compares, 285 with one.
         let keys: Vec<String> = (0..500).map(|k| format!("m{k:03}")).collect();
         let (rounds, batch) = (40, 4_096);
         let n = 500 * rounds;
@@ -5437,6 +5439,8 @@ mod tests {
         // keys at exec_series-10m's shape. It is found by the integer itself, and written as
         // text once, when its series begins, as `CAST(… AS VARCHAR)` writes it: negative, wider
         // than 32 bits, an unsigned counter past `i64::MAX`, and a null, which is a series too.
+        // At 10,000,000 rows of 500 integer-keyed series that took 27% off the instructions and
+        // the watch's CPU from 926 to 364 ms.
         use duckdb::arrow::array::{
             ArrayRef, Float64Array, Int64Array, TimestampMicrosecondArray, UInt64Array,
         };
@@ -5525,9 +5529,10 @@ mod tests {
     #[test]
     fn an_ordered_series_is_regular_however_its_checksums_wrap() {
         // #15: in microseconds the sum of a series' squared distances passes an i128 sooner,
-        // and wraps. A series whose times came in order is proven regular without it: here
-        // 1,000,000 rows about 11.6 days apart, whose squares sum to about 3e41, a stand-in
-        // for a per-second series of decades.
+        // and wraps (a per-second series of about 25 years), and a wrapped sum fit nothing, so
+        // the series was not called regular. A series whose times came in order is proven regular
+        // without it: here 1,000,000 rows about 11.6 days apart, whose squares sum to about 3e41, a
+        // stand-in for a per-second series of decades.
         let (n, step) = (1_000_000i64, 1_000_000_000_000i64);
         let mut s = Series {
             rows: n,

@@ -327,7 +327,7 @@ const SYSTEM_VIEWS: &CStr =
 /// does not. Every function is named through `system.main`, since this runs inside the agent's
 /// transaction, after its CREATE (`benchys_catalog_reads_cannot_be_shadowed`). Measured on DuckDB
 /// 1.5.5: 168 names, 158 of them not in `duckdb_functions()`; one parse for each of 337 names,
-/// once in an engine's life (docs/PERFORMANCE.md, "The query path: no-shadowing").
+/// once in an engine's life (docs/history/PERFORMANCE-rounds.md, "The query path: no-shadowing").
 pub(crate) const PARSER_NAMES: &CStr =
     c"WITH rewritten(k) AS (VALUES ('try'), ('percentile_cont'), \
         ('percentile_disc'), ('ifnull'), ('construct_array'), ('date'), \
@@ -796,7 +796,7 @@ impl Bench {
             // ±0.8%, and the same row groups, segments and compression from every source. Each
             // row group's segments now start a block of their own: the eval's 840,960 meter rows
             // take 29 blocks where they took 28, ch-10m's file is 2% larger, and queries over
-            // them run as fast (docs/PERFORMANCE.md R2-8;
+            // them run as fast (docs/history/PERFORMANCE-rounds.md R2-8;
             // `a_loader_writes_each_row_group_as_it_fills`).
             ingest
                 .execute_batch(
@@ -1028,7 +1028,8 @@ impl Workspace {
     /// `duckdb_functions()` builds a row for each of DuckDB's ~3,000 built-in functions and
     /// overloads before any filter applies (DuckDB 1.5 gives that table function neither filter
     /// nor projection pushdown, and no other listing reaches a catalog's macros), which was 70% of
-    /// the engine's instructions and about 0.19 G per table (docs/PERFORMANCE.md, item 5). Asked
+    /// the engine's instructions and about 0.19 G per table (docs/history/PERFORMANCE-rounds.md,
+    /// round 1 item 5). Asked
     /// once for every catalog in the batch, it is paid once. Every catalog is still checked
     /// before any of them goes on the agent's search path, so the check is as strict as before
     /// (`an_attached_file_brings_its_table_and_nothing_else`,
@@ -1709,7 +1710,8 @@ impl Workspace {
                 // escaped-name spoofs are written against, and blind to the CREATE TYPE DuckDB
                 // adds for a dynamic PIVOT. After it, the catalog names the object as DuckDB will
                 // resolve it. Measured on DuckDB 1.5.5 through `benchy-mcp host`, instructions per
-                // call (docs/PERFORMANCE.md, "The query path: no-shadowing"): a small SELECT
+                // call (docs/history/PERFORMANCE-rounds.md, "The query path: no-shadowing"): a
+                // small SELECT
                 // 1.22 M before and 1.20 M after, the same within the noise; a CREATE TEMP TABLE
                 // AS and its DROP 1.75 M → 4.1 M, the transaction and one listing of tables and
                 // views; a CREATE VIEW and its DROP 5.55 M → 3.9 M, since a CREATE that makes a
@@ -2334,7 +2336,8 @@ impl Workspace {
     /// (`a_pivot_type_that_cannot_be_dropped_spoils_the_engine`).
     fn drop_pivot_types(&mut self) {
         // The DROP's own error says what failed, so the types are listed once: listing them
-        // again after cost a dynamic PIVOT about 6 M instructions more (docs/PERFORMANCE.md).
+        // again after cost a dynamic PIVOT about 6 M instructions more
+        // (docs/history/PERFORMANCE-rounds.md, "The query path: no-shadowing").
         let left = match self.agent_rows(PIVOT_TYPES) {
             Ok(types) => types
                 .into_iter()
@@ -3454,6 +3457,10 @@ mod tests {
         rows[0].1.clone()
     }
 
+    /// The zone is now set globally before the lock, which reaches connections opened before
+    /// and after; the seal reads it back on the agent's connection, sealed from a bench and
+    /// sealed empty, and a day's bucket of 23:30 UTC is that day. Run in a process of its own
+    /// whose zone is Asia/Kolkata, checked to have taken.
     #[test]
     fn the_agent_connection_is_utc_on_a_host_that_is_not() {
         // Measured on DuckDB 1.5.5 before the fix, on a host in Europe/Berlin: `SET TimeZone` is

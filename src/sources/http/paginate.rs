@@ -568,6 +568,8 @@ mod tests {
         assert_eq!(p.next(&s).unwrap(), Next::End);
     }
 
+    /// A `Link` or body URL on another scheme, host or port would carry the source's credentials
+    /// there.
     #[test]
     fn a_next_url_on_another_origin_is_refused() {
         for next in [

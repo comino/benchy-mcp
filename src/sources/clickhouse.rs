@@ -1560,6 +1560,10 @@ mod tests {
         (m.token, m.nullable)
     }
 
+    /// Every integer to BIGINT but `UInt64`, which does not fit and is held as HUGEINT, as from
+    /// every source (REQ-15); every float to DOUBLE, every instant to TIMESTAMPTZ in microseconds
+    /// and UTC, `Date` to DATE, text-like types to VARCHAR. Each conversion ends in the ClickHouse
+    /// type whose Arrow form is the bench's.
     #[test]
     fn clickhouse_types_map_to_the_canonical_vocabulary() {
         for (ch, want, nullable) in [
@@ -1620,6 +1624,7 @@ mod tests {
         );
     }
 
+    /// Integers past 64 bits and decimals past 38 digits arrive as exact text.
     #[test]
     fn unsupported_clickhouse_types_become_json_text_or_are_dropped() {
         // Containers arrive as JSON text, exact wide numbers as decimal text.
@@ -1659,6 +1664,7 @@ mod tests {
             .contains("finalizeAggregation"));
     }
 
+    /// A backquote, a backslash or a newline in a name cannot end the identifier it is in.
     #[test]
     fn identifiers_are_quoted_whatever_they_hold() {
         assert_eq!(ident("ts"), "`ts`");
@@ -1698,6 +1704,7 @@ mod tests {
         }
     }
 
+    /// The parameters are percent-encoded on the URL; none is in the SQL text, however hostile.
     #[test]
     fn values_travel_as_query_parameters_never_in_the_sql() {
         // The plan is built from what DESCRIBE said; here it is built by hand around the same
@@ -1760,6 +1767,7 @@ mod tests {
         assert_eq!(url_encode("ü"), "%C3%BC");
     }
 
+    /// A window without an offset means a different instant to each reader.
     #[test]
     fn a_time_window_must_say_its_offset() {
         assert_eq!(rfc3339_micros("1970-01-01T00:00:00Z"), Some(0));
@@ -1788,6 +1796,7 @@ mod tests {
         }
     }
 
+    /// A URL reaches logs, so it may carry no user or password.
     #[test]
     fn a_clickhouse_url_cannot_carry_a_password() {
         assert!(check_url("http://localhost:8123").is_ok());

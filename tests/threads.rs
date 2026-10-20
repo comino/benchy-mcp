@@ -201,6 +201,11 @@ mod linux {
     }
 }
 
+/// DuckDB 1.5.5 starts its workers when it opens (three beside the opening thread on four
+/// cores) and again when `threads` is set. On four threads the probe ran on four, three of them
+/// workers, and every one was refused both the file and the connection. Mutation-checked: with
+/// `threads` set before the confinement the engine refuses to serve (`4 threads were running`),
+/// and with the check that the engine is alone also removed, a worker opened the file.
 #[test]
 #[cfg(target_os = "linux")]
 fn the_engines_threads_are_started_after_it_is_confined() {

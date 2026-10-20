@@ -15,8 +15,8 @@
 //! length are rewritten in the message's metadata, where they are fixed-size values; nothing else
 //! of it changes. The check used to decompress into nothing and leave the decoding to arrow:
 //! LZ4 ran twice, 1.7 G instructions more for 10,000,000 rows than the same rows uncompressed
-//! (docs/PERFORMANCE.md, R2-6). Decoded into memory, a lie costs what it decoded before it was
-//! caught, never more than its claim, which the bound has already admitted.
+//! (docs/history/PERFORMANCE-rounds.md, R2-6). Decoded into memory, a lie costs what it decoded
+//! before it was caught, never more than its claim, which the bound has already admitted.
 //!
 //! An uncompressed message goes to arrow as it was read: one copy of each body, the one arrow's
 //! own reader would have made.

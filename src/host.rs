@@ -148,7 +148,8 @@ fn caps_json(c: &Caps) -> Value {
 ///
 /// Opening it is DuckDB's whole start — its catalog of built-in functions, its buffer manager, its
 /// threads — about 50 M instructions, which is why a host's server spent 82 M instructions on a
-/// session where the MCP server spends 25 M (docs/PERFORMANCE.md, item 8). It is opened on a thread
+/// session where the MCP server spends 25 M (docs/history/PERFORMANCE-rounds.md, round 1 item 8).
+/// It is opened on a thread
 /// of its own while the engine opens, so the session's start waits for neither in turn.
 pub struct Prover(std::thread::JoinHandle<Option<duckdb::Connection>>);
 

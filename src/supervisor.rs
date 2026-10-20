@@ -59,7 +59,8 @@ pub fn kill_engine_now() {
 /// signal is all there is.
 ///
 /// Finding them reads the `stat` of every process on the machine, so it costs what the machine
-/// runs, not what the session does: about 400 processes here (docs/PERFORMANCE.md, item 8). Only
+/// runs, not what the session does: about 400 processes here (docs/history/PERFORMANCE-rounds.md,
+/// round 1 item 8). Only
 /// an exec source's loader starts connectors — the engine runs none, and neither does a file,
 /// Arrow or built-in loader — so only that one is looked through. `/proc/<pid>/task/*/children`
 /// lists a loader's children directly where the kernel is built with CONFIG_PROC_CHILDREN, as
@@ -222,14 +223,14 @@ pub const MEMORY_CEILING_UNENFORCED: Option<&str> = if cfg!(target_os = "linux")
 /// The most resident memory one loader may hold, in bytes, unless the operator says otherwise
 /// (`--loader-memory-ceiling`, `[loader] memory_ceiling`): 1 GB.
 ///
-/// Well above what a load is measured to need (docs/PERFORMANCE.md, "A memory bound for
-/// loaders"): the harness's 10,000,000-row loads peak at 94–112 MB for ClickHouse, Parquet, Arrow
-/// and a connector, and at 351–410 MB for CSV and NDJSON, whose stage is held to 256 MiB; a
-/// 10,000,000-row Parquet file in one row group at 118 MB; a CSV of 300 `DOUBLE` columns, read on
-/// one thread under that cap, at 343 MB, and an NDJSON of 2,000 keys an object at 549–614 MB,
-/// bounded by a row group of its table (`a_wide_json_file_is_read_on_one_thread_within_its_vector`).
-/// What passes it is a connector, which nothing else bounds: one that held 800 MB before it
-/// wrote a row.
+/// Well above what a load is measured to need (docs/history/PERFORMANCE-rounds.md, "R6-L1. A
+/// memory bound for loaders"): the harness's 10,000,000-row loads peak at 94–112 MB for ClickHouse,
+/// Parquet, Arrow and a connector, and at 351–410 MB for CSV and NDJSON, whose stage is held to 256
+/// MiB; a 10,000,000-row Parquet file in one row group at 118 MB; a CSV of 300 `DOUBLE` columns,
+/// read on one thread under that cap, at 343 MB, and an NDJSON of 2,000 keys an object at 549–614
+/// MB, bounded by a row group of its table
+/// (`a_wide_json_file_is_read_on_one_thread_within_its_vector`). What passes it is a connector,
+/// which nothing else bounds: one that held 800 MB before it wrote a row.
 pub const LOADER_MEMORY_CEILING: u64 = 1_000_000_000;
 
 /// The loader memory ceiling the operator gave, `--loader-memory-ceiling` or `[loader]
@@ -641,7 +642,8 @@ impl Supervisor {
     ///
     /// The engine's `Open` — a process start, DuckDB's open, the seal, the confinement — and the
     /// first loader need nothing from each other until the attach, so the first loader runs while
-    /// the engine opens (docs/PERFORMANCE.md, item 6). [`Supervisor::opened`] waits for the
+    /// the engine opens (docs/history/PERFORMANCE-rounds.md, round 1 item 6).
+    /// [`Supervisor::opened`] waits for the
     /// answer; the first attach waits for it too, and nothing is attached to an engine that did
     /// not open. The two are separate processes, so the engine still seals and confines with no
     /// thread but its own (`sandbox::alone`).
@@ -800,8 +802,8 @@ impl Supervisor {
     ///
     /// One request, because the check the engine makes of an attached file lists every function
     /// DuckDB has, and is paid once per request rather than once per table
-    /// (`Workspace::attach_all`, docs/PERFORMANCE.md item 5). And the first engine opens while
-    /// every loader runs, not only the first (`Supervisor::start`).
+    /// (`Workspace::attach_all`, docs/history/PERFORMANCE-rounds.md round 1 item 5). And the first
+    /// engine opens while every loader runs, not only the first (`Supervisor::start`).
     /// `the_tables_a_session_starts_with_are_attached_in_one_request` is the test.
     pub fn load_all(&mut self, sources: Vec<Source>) -> Vec<(String, Result<Attached, LoadError>)> {
         let fetched: Vec<(String, Result<PathBuf, LoadError>)> = sources
@@ -1924,7 +1926,8 @@ fn run_loader(
 }
 
 /// The most loaders `run_loaders` runs at once. Each is a process with a DuckDB of its own: a
-/// 10,000,000-row stream peaks at about 116 MB in its loader (docs/PERFORMANCE.md), so four at
+/// 10,000,000-row stream peaks at about 116 MB in its loader (docs/history/PERFORMANCE-rounds.md),
+/// so four at
 /// once stay under half a gigabyte.
 const MAX_LOADERS_AT_ONCE: usize = 4;
 

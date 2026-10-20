@@ -17,7 +17,7 @@
 //!
 //! Why these decoders, measured on 10,000,000 rows of `bench/gen_data.py` as one ClickHouse 26.8
 //! `ArrowStream` response, 240 MB decoded, aarch64 Neoverse-N1, user-space instructions
-//! (spike/decompress, docs/PERFORMANCE.md):
+//! (spike/decompress, docs/history/PERFORMANCE-rounds.md, round 1 item 3):
 //!
 //! | body | decoder | on the wire | instructions | CPU |
 //! |---|---|---:|---:|---:|
@@ -132,6 +132,9 @@ mod tests {
         }
     }
 
+    /// Read to a 1 MiB cap, a body that would decode to 1 GiB gives the cap and has taken less
+    /// than one frame's few KiB off the wire: the decoder works as the reader pulls, so a bomb is
+    /// stopped at the cap, never decoded whole.
     #[test]
     fn a_bomb_is_decoded_only_as_far_as_it_is_read() {
         // 1 GiB of zeros, as 16 frames of 64 MiB: a few KiB on the wire.
@@ -170,6 +173,8 @@ mod tests {
         );
     }
 
+    /// A frame header is the server's to write: one that asks for a 64 MiB window is refused, and
+    /// 32 MiB is within the bound.
     #[test]
     fn a_zstd_window_past_32_mib_is_refused() {
         // A frame that asks for a 64 MiB window. libzstd's own default limit is 128 MiB, so it
