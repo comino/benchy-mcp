@@ -711,3 +711,76 @@ fn a_channel_and_a_descriptor_serve_one_session() {
     assert_eq!(r["tables"][0]["rows"], 6, "{r}");
     assert_eq!(r["tables"][1]["rows"], 5, "{r}");
 }
+
+/// What `f` starts, started from this thread pinned to one CPU, so the process it starts — and
+/// every thread and loader of that process — sees one CPU, as a pod limited to `cpu: 1` does
+/// (`available_parallelism` reads the affinity mask and the cgroup quota alike). The test's thread
+/// gets its own CPUs back after.
+#[cfg(target_os = "linux")]
+fn on_one_cpu<T>(f: impl FnOnce() -> T) -> T {
+    unsafe {
+        let mut was: libc::cpu_set_t = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::cpu_set_t>();
+        assert_eq!(libc::sched_getaffinity(0, size, &mut was), 0);
+        let first = (0..libc::CPU_SETSIZE as usize)
+            .find(|&c| libc::CPU_ISSET(c, &was))
+            .expect("a CPU to run on");
+        let mut one: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(first, &mut one);
+        assert_eq!(libc::sched_setaffinity(0, size, &one), 0);
+        let made = f();
+        assert_eq!(libc::sched_setaffinity(0, size, &was), 0);
+        made
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_channel_and_a_descriptor_load_in_request_order_on_one_cpu() {
+    // Where the machine gives the session one CPU, its loaders run one at a time. They must run
+    // in the order of the list, the order a host writes its streams in: a channel table, then a
+    // descriptor's, then a channel table, written by one writer in that order. Run channel tables
+    // first, as one group, the second channel table waited for a stream the host could not write
+    // yet — it was blocked on the descriptor's pipe, full, which nothing read — until the load
+    // timeout (300 s by default) failed it and closed the channel.
+    use common::streamed::pipe;
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let (mut s, mut chan) = on_one_cpu(|| {
+        Streamer::spawn_with_channel(&["--stream-channel", "3", "--load-timeout", "10"])
+    });
+    let allowed = std::fs::read_to_string(format!("/proc/{}/status", s.child.id())).unwrap();
+    assert!(
+        allowed
+            .lines()
+            .any(|l| l.starts_with("Cpus_allowed_list:") && !l.contains([',', '-'])),
+        "the session sees one CPU: {allowed}"
+    );
+    assert_eq!(s.call("hello", json!({"protocol": V5}), &[])["protocol"], 5);
+    let (read, mut write) = pipe();
+    let id = s.send(
+        "attach",
+        json!({"tables": [channel("a"), {"name": "b", "stream": true}, channel("c")]}),
+        &[read.as_raw_fd()],
+    );
+    drop(read);
+    // Far more than a pipe holds (64 KiB), so the writer waits on `b` until its loader reads.
+    let b = stream(&readings(100_000, "b"), true);
+    assert!(b.len() > 1 << 20, "{}", b.len());
+    let (a, c) = (
+        stream(&readings(3, "a"), true),
+        stream(&readings(5, "c"), true),
+    );
+    let writer = std::thread::spawn(move || {
+        chan.write_all(&a)?;
+        write.write_all(&b)?;
+        drop(write);
+        chan.write_all(&c)
+    });
+    let r = s.recv();
+    assert_eq!(r["id"], id, "{r}");
+    for (k, rows) in [(0, 3), (1, 100_000), (2, 5)] {
+        assert_eq!(r["tables"][k]["rows"], rows, "table {k}: {r}");
+    }
+    writer.join().unwrap().expect("every stream written whole");
+}

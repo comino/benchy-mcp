@@ -2033,10 +2033,15 @@ fn run_loaders(
         done
     };
     if width <= 1 {
-        for item in &work {
-            for &k in item {
-                *answers[k].lock().unwrap_or_else(|p| p.into_inner()) = Some(run_one(k, true));
-            }
+        // One at a time, in the order of the list, which is the order a host writes its streams
+        // in. Not by `work`: that runs every channel table before the descriptor tables after
+        // the first, and a host writing a channel table, a descriptor's, then a channel table
+        // waited on the descriptor's full pipe while the second channel table's loader waited
+        // for a stream not yet written, until the load timeout failed it and closed the channel
+        // (`a_channel_and_a_descriptor_load_in_request_order_on_one_cpu`). One CPU is what a
+        // pod with `cpu: 1` has: `available_parallelism` reads the cgroup quota.
+        for (k, answer) in answers.iter().enumerate() {
+            *answer.lock().unwrap_or_else(|p| p.into_inner()) = Some(run_one(k, true));
         }
     } else {
         let next = std::sync::atomic::AtomicUsize::new(0);

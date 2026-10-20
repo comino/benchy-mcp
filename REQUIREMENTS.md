@@ -1043,6 +1043,12 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   and `"channel"` not before protocol 5.
 - `a_channel_and_a_descriptor_serve_one_session` — both streamed forms in one session and in one
   request.
+- `a_channel_and_a_descriptor_load_in_request_order_on_one_cpu` — where a session has one CPU,
+  so one loader at a time (a pod with `cpu: 1`), the tables of one request load in the order of
+  the list: a channel table, a descriptor's of over a megabyte and a channel table, written in that order
+  by one writer, all load. Every channel table first, the last waited for a stream its writer,
+  blocked on the descriptor's full pipe, could not write until the load timeout closed the
+  channel.
 - `a_channel_reader_stops_at_each_streams_end_marker` — the channel's reader follows the Arrow
   messages as they pass and reads nothing past a stream's marker, whatever size its reads are.
 - `a_refused_stream_is_drained_to_its_marker_within_a_bound` — the rest of a refused stream is read

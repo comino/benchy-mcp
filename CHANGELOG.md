@@ -62,6 +62,12 @@ Fixed:
   90 s past a 1 s deadline. The request is now written on the thread that reads the reply, and
   the engine is killed and rebuilt at the hard deadline as for any other request
   (`a_request_the_engine_does_not_read_is_held_to_the_hard_deadline`).
+- **A request mixing channel and descriptor tables no longer stalls on one CPU** (#11). With one
+  loader at a time (a pod with `cpu: 1`), every channel table ran before the descriptor tables
+  after the first, so `[channel a, descriptor b, channel c]`, written in that order, waited for
+  `c` while the writer was blocked on `b`'s full pipe, until the load timeout (300 s by
+  default) failed `c` and closed the channel. The tables now load in the order of the list
+  (`a_channel_and_a_descriptor_load_in_request_order_on_one_cpu`).
 
 ## [0.2.0] — 2026-10-17
 
