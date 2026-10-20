@@ -23,9 +23,11 @@ examine_globs = [
 additional_cargo_args = ["--release"]
 
 exclude_re = [
-    # Equivalent: the three rights are single, distinct bits, and for disjoint bits `a ^ b` is
-    # `a | b`.
-    'src/sandbox\.rs:\d+:\d+: replace \| with \^ in restrict_to$',
+    # Equivalent: for disjoint bits `a ^ b` is `a | b`. In `engine_ruleset` the three removal
+    # rights are single, distinct bits (this was `restrict_to` until the ruleset was built apart
+    # from applying it); in `staging_rights`, `Truncate` came in ABI 3 and is not among the
+    # rights `from_all(ABI::V1)` names.
+    'src/sandbox\.rs:\d+:\d+: replace \| with \^ in (engine_ruleset|staging_rights)$',
 
     # Equivalent: `elapsed() < grace` and `<= grace` differ only if the clock reads exactly
     # `grace` when sampled, and then for one 20 ms poll.
