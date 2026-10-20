@@ -26,7 +26,11 @@ BULLET = re.compile(r"^\s*-\s+`([a-z][a-z0-9_]*)`(\s+\*\(planned\)\*)?\s+—", r
 CITATION = re.compile(r"REQ-\d+:?\s+`([a-z][a-z0-9_]*)`")
 CITING = ["src/**/*.rs", "tests/**/*.rs", "docs/*.md", "README.md", "CONTRIBUTING.md",
           "SECURITY.md", "corpus/*.toml", "examples/**/*.py", "examples/**/*.sh", "examples/*.toml",
-          "spike/src/*.rs", "spike/*.md", "spike/*.py", ".cargo/mutants.toml"]
+          "spike/src/*.rs", "spike/*.md", "spike/*.py", ".cargo/mutants.toml",
+          # The archive is checked like the normative docs: its prose stays as it was written,
+          # but a REQ-n citation there is still a pointer a reader follows to a test, so a
+          # rename updates it as it updates any other.
+          "docs/history/*.md"]
 TEST = re.compile(r"#\[test\]\s*(?:#\[[^\]]*\]\s*)*(?:pub\s+)?fn\s+([a-z][a-z0-9_]*)\s*\(")
 
 
