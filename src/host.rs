@@ -705,7 +705,11 @@ fn read_requests(
             );
             reply["id"] = id.into();
             reply["protocol"] = (*newest).into();
-            send(out, &reply);
+            // The reader's replies end the session as the call loop's do: a host that cannot
+            // read this one has gone (`a_reply_the_reader_cannot_write_ends_the_session`).
+            if !send(out, &reply) {
+                break;
+            }
             agreed = Some(*newest);
             continue;
         }
@@ -724,14 +728,18 @@ fn read_requests(
         }
         match call.as_str() {
             "hello" => {
-                send(
+                if !send(
                     out,
                     &refused(id.into(), "E_REQUEST", "`hello` comes once, first"),
-                );
+                ) {
+                    break;
+                }
                 continue;
             }
             "ping" => {
-                send(out, &json!({"id": id, "ok": true}));
+                if !send(out, &json!({"id": id, "ok": true})) {
+                    break;
+                }
                 continue;
             }
             _ => {}

@@ -951,6 +951,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   not "I have gone": a host that writes everything and then reads is answered in full.
 - `a_host_that_has_gone_is_not_worked_for` — one that has closed its end of the replies too gets
   nothing more run: the first reply that cannot be written ends the session.
+- `a_reply_the_reader_cannot_write_ends_the_session` — so does one the reader writes itself, not
+  the call loop: a `hello`, a `ping`, a second `hello`'s refusal. These were written and the
+  failure dropped, so a host that had gone kept its session, engine and warden running for as
+  long as its stdin stayed open.
 - `a_request_larger_than_a_request_can_be_ends_the_session` — a megabyte, when every frame is
   parsed and a request is SQL or a path.
 - `hello_says_what_the_session_is` — the version agreed, the newest both speak, the engine, the

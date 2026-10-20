@@ -50,6 +50,13 @@ Changed behaviour:
   `duckdb_memory`, `duckdb_extensions`, `duckdb_secrets` and the like) and DuckDB's test
   functions are refused too.
 
+Fixed:
+
+- **A failed `hello` or `ping` reply ends the session** (#17). The reader answers these itself
+  and ignored a failed write, so a host that had closed its end of the replies kept its
+  session, engine and warden running for as long as its stdin stayed open. A second `hello`'s
+  refusal counts too (`a_reply_the_reader_cannot_write_ends_the_session`).
+
 ## [0.2.0] — 2026-10-17
 
 Fixes from a review of 0.1.0. Still an experimental prototype: **some of these change what a

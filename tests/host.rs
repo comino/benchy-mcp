@@ -1022,6 +1022,30 @@ fn a_host_that_has_gone_is_not_worked_for() {
     );
 }
 
+#[test]
+fn a_reply_the_reader_cannot_write_ends_the_session() {
+    // `hello`, `ping` and a second `hello` are answered by the reader itself, not the call loop.
+    // A host that has closed its end of the replies is gone whichever of them it was sent: the
+    // session ends, though its stdin is still open, as it does for a query's reply
+    // (`a_host_that_has_gone_is_not_worked_for`).
+    let gone = |h: &mut Host| drop(std::mem::replace(&mut h.stdout, spare_stdout()));
+    let mut h = Host::spawn(&[]);
+    gone(&mut h);
+    h.send(&json!({"id": 1, "call": "hello", "protocol": [1]}));
+    assert!(h.ended(), "a `hello` reply that could not be written");
+    let mut h = Host::start(&[]);
+    gone(&mut h);
+    h.send(&json!({"id": 1, "call": "ping"}));
+    assert!(h.ended(), "a `ping` reply that could not be written");
+    let mut h = Host::start(&[]);
+    gone(&mut h);
+    h.send(&json!({"id": 1, "call": "hello", "protocol": [1]}));
+    assert!(
+        h.ended(),
+        "a second `hello`'s refusal that could not be written"
+    );
+}
+
 /// Stand-ins for a Host's pipes, so the real ones can be closed while the Host lives on.
 fn spare_stdin() -> ChildStdin {
     let mut other = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();

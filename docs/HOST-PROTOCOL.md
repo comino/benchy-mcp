@@ -694,7 +694,8 @@ yet, and fixed for the session:
 - **End.** EOF on stdin — closing the pipe, or shutting down the socket's writing side — means no
   more requests: every request already sent is answered, in order,
   and then the session ends. A host that has closed its end of the replies too is not worked for
-  further — the first reply that cannot be written ends the session. SIGTERM, SIGINT or SIGHUP end
+  further — the first reply that cannot be written ends the session, `hello`'s and `ping`'s
+  included (`a_reply_the_reader_cannot_write_ends_the_session`). SIGTERM, SIGINT or SIGHUP end
   it at once: the engine is killed, the call running gets no reply, and the session directory
   goes. If the process is killed outright, the session's warden removes the directory, and the
   engine and every loader notice they have been re-parented and stop (REQ-1).
