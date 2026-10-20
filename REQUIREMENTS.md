@@ -1002,6 +1002,16 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   parsed and a request is SQL or a path.
 - `hello_says_what_the_session_is` — the version agreed, the newest both speak, the engine, the
   sandbox, the caps and the limits.
+- `hello_says_how_long_a_load_and_the_hard_grace_may_take` — `timeouts`, the load timeout and the
+  grace past the deadline before the engine is killed, beside the caps and not in them, so the
+  caps can still be handed back in a `query`.
+- `print_limits_says_what_hello_would` — `host --print-limits` prints the caps, limits and
+  timeouts `hello` reports for the same flags, refuses what a session would refuse to start
+  with, and starts nothing.
+- `version_json_says_what_a_pin_bump_checks` — `--version --json`, which a release's
+  `compat.json` repeats, names every protocol version `hello` agrees to and no other, the
+  version and DuckDB library `hello` and `doctor` name, and the Landlock ABI below which the
+  sandbox's full posture falls short.
 - `a_host_may_lower_the_memory_ceiling_but_never_raise_it` — the operator sets the engine's
   memory ceiling (`--memory-ceiling`, or `[engine] memory_ceiling` in the config); in protocol 3
   `hello`'s `limits.memory_ceiling` lowers it as any limit is lowered, and the lower one is what

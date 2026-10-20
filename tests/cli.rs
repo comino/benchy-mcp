@@ -179,3 +179,171 @@ fn a_skipped_file_is_named_in_the_operator_log() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&log);
 }
+
+/// What `--version --json` prints: each field docs/HOST-PROTOCOL.md documents, and what a
+/// release's `compat.json` carries beside `min_glibc`, which is measured from the built binaries
+/// rather than known to them (packaging/compat.py).
+const VERSION_FIELDS: [&str; 5] = [
+    "benchy",
+    "duckdb",
+    "host_protocols",
+    "platforms",
+    "full_sandbox_min_landlock_abi",
+];
+
+/// The release platform this binary was built for, as a bundle's name says it.
+fn this_platform() -> String {
+    let os = if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "macos"
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" if os == "macos" => "arm64",
+        a => a,
+    };
+    format!("{os}-{arch}")
+}
+
+/// `hello`'s reply to a host offering `offered`.
+fn hello(offered: &[u64]) -> serde_json::Value {
+    use benchy_mcp::proto::{read_frame, write_frame};
+    let mut child = Command::new(BIN)
+        .arg("host")
+        .args(PLATFORM)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    write_frame(
+        &mut stdin,
+        &serde_json::json!({"id": 1, "call": "hello", "protocol": offered}),
+    )
+    .unwrap();
+    let reply = read_frame(&mut stdout).expect("a reply to hello");
+    let _ = child.kill();
+    let _ = child.wait();
+    reply
+}
+
+#[test]
+fn version_json_says_what_a_pin_bump_checks() {
+    // A host that pins a release checks it in its CI before deploying, against the release's
+    // compat.json or the binary it was handed: what it reads must be what `hello` and `doctor`
+    // find at run time, or the check passes a pin that fails in production.
+    let out = Command::new(BIN)
+        .args(["--version", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON alone ({e}):\n{text}"));
+    let mut got: Vec<&str> = v
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    got.sort_unstable();
+    let mut want = VERSION_FIELDS.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        got, want,
+        "every documented field, and none that is not: {v}"
+    );
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/HOST-PROTOCOL.md"
+    ))
+    .unwrap();
+    for f in VERSION_FIELDS.iter().chain(&["min_glibc"]) {
+        assert!(
+            doc.contains(&format!("`{f}`")),
+            "HOST-PROTOCOL.md documents `{f}`"
+        );
+    }
+
+    // The version Cargo.toml says, and the library's own, as plain `--version` says them.
+    assert_eq!(v["benchy"], env!("CARGO_PKG_VERSION"), "{v}");
+    let plain = Command::new(BIN).arg("--version").output().unwrap();
+    let plain = String::from_utf8(plain.stdout).unwrap();
+    let duckdb = v["duckdb"].as_str().expect("duckdb is a string");
+    assert!(duckdb.starts_with(|c: char| c.is_ascii_digit()), "{v}");
+    assert_eq!(
+        plain.lines().nth(1),
+        Some(format!("DuckDB v{duckdb}").as_str())
+    );
+    let platforms: Vec<&str> = v["platforms"]
+        .as_array()
+        .expect("platforms is a list")
+        .iter()
+        .filter_map(|p| p.as_str())
+        .collect();
+    assert!(platforms.contains(&this_platform().as_str()), "{v}");
+
+    // The protocol range is the one `hello` agrees to: its newest is the newest offered of
+    // everything, its oldest is answered alone, and one past either end is refused.
+    let protocols: Vec<u64> = v["host_protocols"]
+        .as_array()
+        .expect("host_protocols is a list")
+        .iter()
+        .map(|p| p.as_u64().expect("a version number"))
+        .collect();
+    let (oldest, newest) = (protocols[0], *protocols.last().unwrap());
+    assert_eq!(
+        protocols,
+        (oldest..=newest).collect::<Vec<_>>(),
+        "no gaps: {v}"
+    );
+    let all: Vec<u64> = (0..=newest + 1).collect();
+    let greeted = hello(&all);
+    assert_eq!(greeted["protocol"], newest, "{greeted}");
+    assert_eq!(hello(&[oldest])["protocol"], oldest);
+    for outside in [oldest - 1, newest + 1] {
+        let r = hello(&[outside]);
+        assert_eq!(r["error"]["code"], "E_VERSION", "{outside}: {r}");
+    }
+    assert_eq!(greeted["benchy"], v["benchy"], "{greeted}");
+    assert_eq!(greeted["engine"], format!("DuckDB v{duckdb}"), "{greeted}");
+
+    // The ABI is the one below which the sandbox's full posture falls short, on any kernel, not
+    // only on the one these tests run on.
+    let full = v["full_sandbox_min_landlock_abi"]
+        .as_u64()
+        .expect("a Landlock ABI") as u32;
+    let posture = benchy_mcp::sandbox::Posture::Full;
+    assert!(posture.shortfall(full).is_none(), "{v}");
+    assert!(posture.shortfall(full - 1).is_some(), "{v}");
+
+    // `doctor` names the same version and library; and, where Landlock is, it calls the sandbox
+    // full exactly from the ABI this says the full posture needs, as `hello` does.
+    let doctor = Command::new(BIN).arg("doctor").output().unwrap();
+    let doctor = String::from_utf8(doctor.stdout).unwrap();
+    assert_eq!(
+        doctor.lines().next(),
+        Some(format!("benchy-mcp {}", env!("CARGO_PKG_VERSION")).as_str())
+    );
+    assert!(doctor.contains(&format!(": DuckDB v{duckdb} ")), "{doctor}");
+    #[cfg(target_os = "linux")]
+    {
+        let out = Command::new(BIN)
+            .args(["doctor", "--probe", "--json"])
+            .output()
+            .unwrap();
+        let d: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(d["benchy"], v["benchy"], "{d}");
+        assert_eq!(d["engine"], format!("DuckDB v{duckdb}"), "{d}");
+        let full = u64::from(full);
+        let abi = d["landlock_abi"].as_u64().unwrap();
+        assert_eq!(d["verdict"] == "enforced", abi >= full, "{d}");
+        assert_eq!(
+            greeted["sandbox_posture"]["network"],
+            abi >= full,
+            "{greeted}"
+        );
+    }
+}

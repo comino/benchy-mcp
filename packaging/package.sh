@@ -5,7 +5,8 @@
 #   BENCHY_BUNDLE=1 cargo build --release --locked --target <triple>
 #   packaging/package.sh <triple> <platform> <outdir>
 #
-# Writes <outdir>/benchy-mcp-<platform>.tar.gz and its .sha256. The asset name carries no
+# Writes <outdir>/benchy-mcp-<platform>.tar.gz, its .sha256 and its CycloneDX SBOM,
+# benchy-mcp-<platform>.cdx.json (packaging/sbom.py). The asset name carries no
 # version, so https://github.com/<repo>/releases/latest/download/<asset> always names the newest;
 # the directory inside it does. Refuses a binary whose rpath reaches outside its own directory:
 # an installed copy would otherwise look for the library on the build machine first.
@@ -106,6 +107,9 @@ tar -C "$out" -czf "$out/$asset" "$name"
 	cd "$out"
 	if command -v sha256sum >/dev/null; then sha256sum "$asset"; else shasum -a 256 "$asset"; fi
 ) >"$out/$asset.sha256"
+# The bundle's SBOM, from the staged files it hashes: every crate the release builds for this
+# target, and DuckDB's library as shipped (thinned, on macOS) beside the release file it came from.
+python3 "$root/packaging/sbom.py" "$target" "$platform" "$stage" >"$out/benchy-mcp-$platform.cdx.json"
 rm -rf "$stage"
 echo "$out/$asset: benchy-mcp $version, DuckDB $duckdb ($zip, SHA-256 $pin)"
 cat "$out/$asset.sha256"

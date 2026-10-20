@@ -26,6 +26,9 @@ python3 -I packaging/test_duckdb_lib.py
 python3 packaging/duckdb_lib.py fetch
 CARGO_TARGET_DIR="$PWD/target/clippy" python3 packaging/duckdb_lib.py fetch
 
+step "a release's SBOM and compat.json say what it ships"
+python3 -I packaging/test_release_files.py
+
 step "clippy, warnings are errors"
 CARGO_TARGET_DIR="$PWD/target/clippy" CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
 

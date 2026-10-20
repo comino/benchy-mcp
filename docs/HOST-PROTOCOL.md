@@ -1,6 +1,6 @@
 # Host protocol
 
-Contract versions **`benchy-host/1`** to **`benchy-host/6`**, served by `benchy-mcp host`. In
+Contract versions **`benchy-host/1`** to **`benchy-host/7`**, served by `benchy-mcp host`. In
 version 2, one `attach` can put several tables on the bench. In version 3, a table can be streamed
 through a pipe the host passes with the request, with no file on either side; an `attach` can
 state the table's time column and series key; and `hello` can lower the session's limits
@@ -8,7 +8,8 @@ state the table's time column and series key; and `hello` can lower the session'
 host's names ([Tool names](#tool-names-in-version-4)). In version 5, a table can come through the
 session's stream channel, one more pipe benchy inherits, which needs no descriptor passing and so
 no Unix socket ([Through a stream channel](#through-a-stream-channel-in-version-5)). In version 6,
-`hello` reports the loader memory ceiling, and a host may lower it ([Memory](#frames)). A host that
+`hello` reports the loader memory ceiling, and a host may lower it ([Memory](#frames)). In version
+7, it reports the engine's threads, and a host may lower them ([Threads](#frames)). A host that
 speaks an older version is
 served as before: its requests mean what they meant, and its replies may carry fields it does not
 know, which it ignores.
@@ -21,7 +22,7 @@ the same supervisor, loaders and engine.
 ## Roles
 
 ```
-host ──benchy-host/6 on stdio──▶ supervisor ──frames──▶ engine (sealed, empty at start)
+host ──benchy-host/7 on stdio──▶ supervisor ──frames──▶ engine (sealed, empty at start)
   │                                 │    ▲                   ▲
   ├──pipe (protocol 3)──▶ loader ───┘    └── store/ ──link──▶ ws-N/ ── ATTACH READ_ONLY, unlink
   └──stream channel (protocol 5)──▶ loader, one stream each, in turn
@@ -37,6 +38,41 @@ host ──benchy-host/6 on stdio──▶ supervisor ──frames──▶ engi
 - A **loader** is a short-lived process that turns one input into one DuckDB file. The loaders
   of one request run side by side.
 - The **engine** runs agent SQL. It is sealed before anything is attached and never unsealed.
+
+## Versions
+
+A host learns what a session speaks from `hello`, at run time. What a release speaks can be
+checked before that, when a host bumps its pin: in CI, before deploying. Each release has a
+`compat.json`, listed in its `SHA256SUMS`, and `benchy-mcp --version --json` prints the same
+object from the binary a host was handed, less `min_glibc`:
+
+```json
+{"benchy": "0.2.0", "duckdb": "1.5.5", "host_protocols": [1, 2, 3, 4, 5, 6, 7],
+ "platforms": ["linux-x86_64", "linux-aarch64", "macos-arm64", "macos-x86_64"],
+ "full_sandbox_min_landlock_abi": 4, "min_glibc": "2.35"}
+```
+
+- `benchy` — the release's version, as `hello`'s `benchy` says it.
+- `duckdb` — the version of the DuckDB library it ships and links, as `hello`'s `engine` names it
+  (`DuckDB v1.5.5`); asked of the library, not written down.
+- `host_protocols` — every protocol version `hello` agrees to, oldest to newest, without gaps. A
+  host whose newest version is not in it is answered an older one; one that shares none with it is
+  refused with `E_VERSION`.
+- `platforms` — the bundles the release has, as their names say them
+  (`benchy-mcp-<platform>.tar.gz`).
+- `full_sandbox_min_landlock_abi` — the oldest Landlock ABI under which the engine's posture is
+  `full` with `network` true, as `sandbox_posture` reports it: below it, TCP is not confined
+  (Linux 6.7 has ABI 4), and `--require-full-sandbox` refuses to start.
+- `min_glibc` — the oldest glibc the Linux bundles run on: the newest `GLIBC_` symbol version the
+  binary or DuckDB's library needs, read from the built files. Only in `compat.json`; no binary
+  says it of itself.
+
+Hosts ignore a field they do not know: one may be added in a later release. What the limits of
+a flag set are is asked of `benchy-mcp host [flags] --print-limits`, which prints `hello`'s
+`protocol`, `caps`, `limits`, `timeouts` and `unenforced` for a session that agrees on the newest
+version, as JSON, and starts nothing. Flags or a config a session would refuse to start with, it
+refuses the same way; the sandbox it does not open, so `--require-full-sandbox` is checked by
+starting a session, or by `benchy-mcp doctor --json`.
 
 ## Frames
 
@@ -75,6 +111,7 @@ the session ends: a host that cannot open a session has nothing else it can do i
 {"id": 1, "ok": true, "protocol": 5, "benchy": "0.2.0", "engine": "DuckDB v1.5.5",
  "sandbox": "fully enforced",
  "caps": {"max_rows": 200, "max_bytes": 8192, "max_cell_bytes": 256, "deadline_secs": 20},
+ "timeouts": {"load_timeout_secs": 300, "hard_grace_secs": 10},
  "limits": {"attach_rows": 10000000, "attach_bytes": 268435456, "attachments": 64,
             "session_rows": 50000000, "session_bytes": 2147483648,
             "memory": 1000000000, "memory_ceiling": 1500000000}}
@@ -86,7 +123,10 @@ common is `E_VERSION`, and the session ends. A host lists every version it speak
 newest: a host that offers `[5]` to a benchy that speaks 1 to 4 is refused, where `[1, 2, 3, 4, 5]`
 is answered 4 and the host knows what it may send. A second `hello` is refused as `E_REQUEST`,
 and the session goes on. The caps are the command line's (`--max-rows`, `--max-bytes`,
-`--max-cell-bytes`, `--deadline`).
+`--max-cell-bytes`, `--deadline`). `timeouts` are what a host sets its own timeouts around: how
+long one load may take before it fails (`--load-timeout`), and how long a query may run past its
+deadline before the engine is killed and rebuilt (`--hard-grace`). They are beside the caps, not
+in them, because a host may hand the caps back in a `query`, which takes only the four.
 
 `sandbox` is how much of its Landlock confinement the engine's kernel enforces, as a sentence:
 
@@ -110,8 +150,8 @@ The first three are the whole string; the last begins with `unavailable: `.
 | 7 | `threads` in `hello`'s `limits`, reported and lowered (**Threads** below) | `limits.threads`, and the session ends; it is not reported |
 
 Replies only grow: a field a reply gained in a later version (`results` beside a query's text,
-`sql` on a page, `unenforced` beside the limits, `sandbox_posture` in `hello`) is sent whatever
-version was agreed, and a host that does not know it ignores it. The one exception is a field of
+`sql` on a page, `unenforced` beside the limits, `sandbox_posture` and `timeouts` in `hello`) is
+sent whatever version was agreed, and a host that does not know it ignores it. The one exception is a field of
 `limits`: a host may send `limits` back as it got it, and a field there that its version does not
 take would end its session, so `limits.loader_memory_ceiling` (and
 `unenforced.loader_memory_ceiling`) is reported only to a session that agrees on 6, and

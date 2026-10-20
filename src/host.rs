@@ -65,6 +65,8 @@ pub struct Session {
     pub dir: PathBuf,
     /// Whether the session has a stream channel (`--stream-channel`).
     pub channel: bool,
+    /// How long one load may take (`--load-timeout`), reported for a host's own timeouts.
+    pub load_timeout: std::time::Duration,
 }
 
 /// The fields each call takes in protocol `version`. A field benchy does not know is an error,
@@ -240,6 +242,40 @@ fn hello_reply(s: &Session) -> Value {
     hello_reply_where(s, crate::supervisor::MEMORY_CEILING_UNENFORCED)
 }
 
+/// What a host sets its own timeouts from, which the caps do not say: how long one load may take
+/// and how long past the deadline a query may run before the engine is killed. Beside the caps,
+/// not in them: a host may hand the caps back in a `query`, which takes the four it has.
+fn timeouts_json(caps: &Caps, load_timeout: std::time::Duration) -> Value {
+    json!({
+        "load_timeout_secs": load_timeout.as_secs(),
+        "hard_grace_secs": caps.hard_grace.as_secs(),
+    })
+}
+
+/// `host --print-limits`: what `hello` would report to a session agreeing on the newest protocol,
+/// started with these caps, limits and load timeout — for a host to check a flag set before it
+/// starts a session (`print_limits_says_what_hello_would`).
+pub fn effective(caps: &Caps, limits: &HostLimits, load_timeout: std::time::Duration) -> Value {
+    let unenforced = crate::supervisor::MEMORY_CEILING_UNENFORCED;
+    let newest = PROTOCOLS[PROTOCOLS.len() - 1];
+    let mut reply = json!({
+        "protocol": newest,
+        "caps": caps_json(caps),
+        "limits": limits_json_where(limits, unenforced),
+        "timeouts": timeouts_json(caps, load_timeout),
+    });
+    if let Some(why) = unenforced {
+        reply["unenforced"] = json!({ "memory_ceiling": why });
+    }
+    for_version(
+        &mut reply,
+        limits,
+        newest,
+        crate::supervisor::LOADER_MEMORY_CEILING_UNENFORCED,
+    );
+    reply
+}
+
 fn hello_reply_where(s: &Session, unenforced: Option<&str>) -> Value {
     let mut reply = json!({
         "ok": true,
@@ -253,6 +289,7 @@ fn hello_reply_where(s: &Session, unenforced: Option<&str>) -> Value {
         "sandbox_posture": s.sandbox.report(s.landlock_abi),
         "caps": caps_json(&s.caps),
         "limits": limits_json_where(&s.limits, unenforced),
+        "timeouts": timeouts_json(&s.caps, s.load_timeout),
     });
     // Beside `limits`, not in it: a host may send `limits` back to lower them, and a field
     // `hello` does not take there is refused.
@@ -1430,6 +1467,7 @@ mod tests {
             limits: Default::default(),
             dir: "/nowhere".into(),
             channel: false,
+            load_timeout: std::time::Duration::from_secs(300),
         };
         let ceiling = session.limits.memory_ceiling;
         // where it is enforced (Linux), the reply is as it was

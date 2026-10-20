@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Prove a release bundle works where nothing was built: no target/, no Rust, no DuckDB elsewhere.
 #
-#   packaging/smoke.sh <dir holding benchy-mcp-<platform>.tar.gz and .sha256> <platform>
+#   packaging/smoke.sh <dir holding benchy-mcp-<platform>.tar.gz and .sha256> <platform> [compat.json]
 #
 # Unpacks into a fresh directory and runs what a user runs, then installs it with install.sh from
 # a local web server, the way a user's curl would fetch it. A broken rpath, a missing library or
 # a checksum that does not match fails here, before a release is published.
+#
+# With the release's compat.json (packaging/compat.py write), the unpacked binary must say what it
+# says, and on Linux need no newer glibc: compat.json is written from one platform's binary, and
+# this is where every other platform's is held to it.
 set -euo pipefail
 
-dist=$(cd "$1" && pwd) platform=$2
+dist=$(cd "$1" && pwd) platform=$2 compat=${3:+$(cd "$(dirname "$3")" && pwd)/$(basename "$3")}
 repo=$(cd "$(dirname "$0")/.." && pwd)
 asset="benchy-mcp-$platform.tar.gz"
 work=$(mktemp -d)
@@ -41,6 +45,17 @@ step "--version reports Cargo.toml's version"
 want=$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -n 1)
 "$bin" --version
 [ "$("$bin" --version | head -n 1)" = "benchy-mcp $want" ]
+
+step "--version --json, and the release's compat.json"
+"$bin" --version --json
+python3 -c 'import json, sys; v = json.load(sys.stdin); assert v["benchy"] == sys.argv[1], v; assert sys.argv[2] in v["platforms"], v' \
+	"$want" "$platform" < <("$bin" --version --json)
+if [ -n "$compat" ]; then
+	cat "$compat"
+	python3 "$repo/packaging/compat.py" check "$compat" "$bin"
+else
+	echo "no compat.json given: not checked against one"
+fi
 
 step "doctor, and the library it loaded is the one beside it"
 "$bin" doctor | tee "$work/doctor"
