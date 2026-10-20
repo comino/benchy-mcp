@@ -863,6 +863,12 @@ fetched again by id.
   bench: its own, a clone, and one opened after it, as the helpers' build does.
 - `a_zone_other_than_utc_stops_the_engine` — an agent connection the seal finds in another zone,
   or with ICU loaded and no zone to read, is a startup failure, not a host-dependent result.
+- `the_agent_is_told_times_are_utc_and_how_to_bucket_local_days` — the instructions say times
+  are UTC and how to reach local calendar periods, and a `SET` or `RESET` of `TimeZone`, in any
+  spelling, is refused with that rather than the list of statements allowed. Nothing said so
+  before, and agents asked "per day" bucketed in UTC. The example,
+  `date_trunc('day', timezone('Europe/Berlin', ts))`, runs on a loaded TIMESTAMPTZ column and
+  gives Berlin's days, which differ from UTC's.
 
 ## REQ-11 — Teach the dialect where it lands
 

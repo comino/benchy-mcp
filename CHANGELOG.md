@@ -8,6 +8,15 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 Changed behaviour:
 
+- **The agent is told times are UTC** (#52). The session is pinned to UTC, and neither the
+  instructions nor a refused `SET TimeZone` said so. Both now say "Times are UTC. For local
+  calendar periods, convert first, e.g. `date_trunc('day', timezone('Europe/Berlin', ts))`.",
+  and a `SET` or `RESET` of `TimeZone` gets that instead of the statements allowed
+  (`the_agent_is_told_times_are_utc_and_how_to_bucket_local_days`). The instructions are 115
+  bytes longer. `dialect` recommends `time_bucket` for buckets below a day only: on a
+  TIMESTAMPTZ column, one engine thread, `time_bucket` of a day took 10.05 s of CPU over
+  1,000,000 rows where `date_trunc('day', …)` took 0.30 s, and a month 20.7 s against 0.31 s;
+  by the hour `time_bucket` is the faster, 0.10 s against 0.29 s.
 - **`describe` judges each series at its own step** (#50). On a table of series every 5, 10
   and 15 minutes, every complete 10- and 15-minute series was read at the table's 5 minutes and
   reported broken ("1014: 8735 gaps, 17470 rows missing"). A series is now judged at the step

@@ -294,6 +294,45 @@ fn is_export(statement: &str) -> bool {
     }
 }
 
+/// Said wherever the agent may assume a zone of its own: the instructions, and a refused
+/// `SET TimeZone`. The lockdown pins every connection to UTC (REQ-10
+/// `the_agent_connection_is_utc_on_a_host_that_is_not`), and nothing said so, so an agent asked
+/// for "per day" bucketed UTC days without a word. The example is run on a loaded TIMESTAMPTZ
+/// column and gives Berlin's days (`the_agent_is_told_times_are_utc_and_how_to_bucket_local_days`).
+pub const UTC: &str = "Times are UTC. For local calendar periods, convert first, e.g. \
+                       `date_trunc('day', timezone('Europe/Berlin', ts))`.";
+
+/// Whether `statement` sets or resets `TimeZone`: `SET [GLOBAL|SESSION|LOCAL] TimeZone …` or
+/// `RESET …`, in any case, the name quoted or not, comments anywhere.
+pub fn sets_time_zone(statement: &str) -> bool {
+    use crate::guard::Part;
+    let mut words = Vec::new();
+    for (part, r) in crate::guard::lex(statement) {
+        let text = &statement[r];
+        match part {
+            Part::Code => words.extend(
+                text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_ascii_lowercase),
+            ),
+            Part::Name => words.push(text.trim_matches('"').to_ascii_lowercase()),
+            Part::Literal => words.push(String::new()),
+            Part::Comment => {}
+        }
+        if words.len() >= 3 {
+            break;
+        }
+    }
+    let mut w = words.iter().map(String::as_str);
+    if !matches!(w.next(), Some("set" | "reset")) {
+        return false;
+    }
+    match w.next() {
+        Some("global" | "session" | "local") => w.next() == Some("timezone"),
+        name => name == Some("timezone"),
+    }
+}
+
 /// The `index`th statement (from 0) of a batch, as written ([`statements`]).
 pub fn statement(sql: &str, index: usize) -> Option<String> {
     statements(sql).into_iter().nth(index)

@@ -62,3 +62,77 @@ fn time_zone_conversion_works_in_the_shipped_build() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn the_agent_is_told_times_are_utc_and_how_to_bucket_local_days() {
+    // #52: the session is pinned to UTC, and nothing said so: `SET TimeZone` was refused with the
+    // list of statements allowed, and an agent asked for "per day" bucketed in UTC without a
+    // word. The instructions say it, and so does the refusal, with the way to local periods; and
+    // that way is held here to what it promises, on a loaded TIMESTAMPTZ column of a sealed bench.
+    let advice = "Times are UTC. For local calendar periods, convert first, e.g. \
+                  `date_trunc('day', timezone('Europe/Berlin', ts))`.";
+    let d = unique("utc-days");
+    std::fs::create_dir_all(&d).unwrap();
+    // 23:30 on the 14th, 00:30 and 13:00 on the 15th in Berlin; in UTC two on the 14th.
+    std::fs::write(
+        d.join("readings.csv"),
+        "ts,kw\n2026-01-14T22:30:00Z,1\n2026-01-14T23:30:00Z,2\n2026-01-15T12:00:00Z,3\n",
+    )
+    .unwrap();
+    let mut s = Server::start(&d, &[]);
+    let init = s.call(
+        "initialize",
+        serde_json::json!({"protocolVersion": "2026-07-28", "capabilities": {},
+                           "clientInfo": {"name": "t", "version": "0"}}),
+    );
+    let instructions = init["result"]["instructions"].as_str().unwrap_or_default();
+    assert!(instructions.contains(advice), "{instructions}");
+
+    for sql in [
+        "SET TimeZone = 'Europe/Berlin'",
+        "set timezone to 'Europe/Berlin'",
+        "SET GLOBAL TimeZone = 'Europe/Berlin'",
+        "SET SESSION \"TimeZone\" = 'Europe/Berlin'",
+        "RESET TimeZone",
+        "SELECT 1; /* local */ SET TimeZone = 'Europe/Berlin'",
+    ] {
+        let (err, body, _) = s.query(sql);
+        assert!(err, "{sql}: {body}");
+        assert!(body.contains(advice), "{sql}: {body}");
+        assert!(
+            !body.contains("Allowed:"),
+            "{sql}: the generic list: {body}"
+        );
+    }
+    // Any other setting is refused as before.
+    let (err, body, _) = s.query("SET threads = 4");
+    assert!(err && body.contains("Allowed: SELECT"), "{body}");
+    assert!(!body.contains("Times are UTC"), "{body}");
+
+    let (err, body, _) = s.query("SELECT typeof(ts) AS t FROM readings LIMIT 1");
+    assert!(
+        !err && body.contains("TIMESTAMP WITH TIME ZONE"),
+        "the column the advice is for: {body}"
+    );
+    let (err, body, _) = s.query(
+        "SELECT date_trunc('day', timezone('Europe/Berlin', ts))::VARCHAR AS day, count(*) AS n \
+         FROM readings GROUP BY ALL ORDER BY day",
+    );
+    assert!(!err, "{body}");
+    let rows: Vec<&str> = body.lines().skip(1).take(2).collect();
+    assert_eq!(
+        rows,
+        ["2026-01-14 00:00:00 | 1", "2026-01-15 00:00:00 | 2"],
+        "Berlin's days: {body}"
+    );
+    let (err, body, _) = s.query(
+        "SELECT date_trunc('day', ts)::VARCHAR AS day, count(*) AS n \
+         FROM readings GROUP BY ALL ORDER BY day",
+    );
+    assert!(!err, "{body}");
+    assert!(
+        body.contains("2026-01-14 00:00:00+00 | 2"),
+        "and UTC's differ: {body}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

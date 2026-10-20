@@ -95,12 +95,34 @@ Not deltas — reasons the bench is worth using at all.
 | `QUALIFY` | filter on a window function without a subquery |
 | `GROUP BY ALL`, `ORDER BY ALL` | no repeating the projection |
 | `SELECT * EXCLUDE (a, b)`, `* REPLACE (x*2 AS x)` | trim or patch a wide projection in place |
-| `time_bucket(INTERVAL '15 minutes', ts)` | regular buckets without arithmetic on epochs |
+| `time_bucket(INTERVAL '15 minutes', ts)` | regular buckets without arithmetic on epochs — for buckets below a day; for a day or more, `date_trunc('day', ts)` (after `timezone('Europe/Berlin', ts)` for local days), about 30 times faster here |
 | `list_*` / `struct_*`, `UNNEST` | nested data without a join explosion |
 | `PIVOT` / `UNPIVOT` | as statements, not hand-rolled conditional aggregation |
 | `approx_quantile`, `reservoir_sample` | cheap distribution answers on large tables |
 | `regr_slope`, `corr`, `covar_pop` | regression in the engine rather than in the agent's head |
 | `union_by_name` | stack tables whose columns do not line up |
+
+Times are UTC, and the session's zone cannot be set. For local calendar periods, convert first:
+`date_trunc('day', timezone('Europe/Berlin', ts))` is Berlin's day.
+
+<!-- maintainers -->
+Measured on DuckDB 1.5.5, one engine thread, aarch64, through a sealed engine: CPU of the engine
+for `SELECT count(*) FROM (SELECT <bucket> AS b, count(*) FROM t GROUP BY ALL)` over a
+TIMESTAMPTZ column, a row every 31 s, median of three. Every timestamp is loaded as TIMESTAMPTZ,
+so bucketing goes through ICU, and `time_bucket` with an interval of a day or more is slow:
+
+| 1,000,000 rows | `date_trunc` | `time_bucket` |
+|---|---|---|
+| hour | 0.29 s | 0.10 s |
+| 15 minutes | — | 0.11 s |
+| day | 0.30 s | 10.05 s |
+| day, Europe/Berlin (`timezone(…)` first; `time_bucket`'s zone argument) | 0.40 s | 18.80 s |
+| week (`INTERVAL '7 days'`) | 0.38 s | 10.10 s |
+| month | 0.31 s | 20.70 s |
+
+At 10,000,000 rows `date_trunc` takes 2.95 s by hour and 2.96 s by day, `time_bucket` 0.96 s by
+hour, and every `time_bucket` of a day or more passed a 60 s deadline.
+<!-- /maintainers -->
 
 ## Writing a table macro: read the arguments once
 
