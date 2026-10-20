@@ -596,6 +596,10 @@ kill. So is one loader's: each is read the same way while it loads, with the con
 
 - `a_runaway_batch_loses_the_batch_not_the_bench` — a runaway is interrupted at its deadline and
   the agent's tables survive.
+- `a_request_the_engine_does_not_read_is_held_to_the_hard_deadline` — the hard deadline covers
+  writing the request too. A 512 KiB query to a stopped engine, more than its stdin pipe holds,
+  had no reply after 90 s past a 1 s deadline; it is answered `E_REBUILT` at the hard deadline,
+  and the bench serves again.
 - `planner_blowup_killed` — a query that takes seconds just to plan is stopped by killing the
   engine; the bench is rebuilt and the lost scratch is stated.
 - `an_engine_past_its_memory_ceiling_is_killed_even_while_planning` — a query whose planning
@@ -951,6 +955,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   not "I have gone": a host that writes everything and then reads is answered in full.
 - `a_host_that_has_gone_is_not_worked_for` — one that has closed its end of the replies too gets
   nothing more run: the first reply that cannot be written ends the session.
+- `a_reply_the_reader_cannot_write_ends_the_session` — so does one the reader writes itself, not
+  the call loop: a `hello`, a `ping`, a second `hello`'s refusal. These were written and the
+  failure dropped, so a host that had gone kept its session, engine and warden running for as
+  long as its stdin stayed open.
 - `a_request_larger_than_a_request_can_be_ends_the_session` — a megabyte, when every frame is
   parsed and a request is SQL or a path.
 - `hello_says_what_the_session_is` — the version agreed, the newest both speak, the engine, the
@@ -999,7 +1007,9 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_descriptor_is_taken_only_by_a_streamed_attach` — a descriptor on any other request, a stream
   without one, more than one a stream, a stream beside a path, `stream` not `true`: refused as
   `E_REQUEST`, every descriptor closed before the answer; a descriptor that is not a pipe, a
-  socket or a file is `E_DATA`; protocol 2 has no `stream`.
+  socket or a file is `E_DATA`; protocol 2 has no `stream`. Closed is proven by the writer being
+  told nobody reads, so no other test of the binary starts a process meanwhile: one not yet
+  exec'd held a copy of the read end, and the write went through now and then.
 - `a_stream_needs_a_socket_to_come_over` — on pipes no descriptor can come, and a streamed attach
   is refused saying so.
 - `a_host_streams_tables_back_to_back_over_one_channel` — in protocol 5, a session started with
@@ -1035,6 +1045,12 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   and `"channel"` not before protocol 5.
 - `a_channel_and_a_descriptor_serve_one_session` — both streamed forms in one session and in one
   request.
+- `a_channel_and_a_descriptor_load_in_request_order_on_one_cpu` — where a session has one CPU,
+  so one loader at a time (a pod with `cpu: 1`), the tables of one request load in the order of
+  the list: a channel table, a descriptor's of over a megabyte and a channel table, written in that order
+  by one writer, all load. Every channel table first, the last waited for a stream its writer,
+  blocked on the descriptor's full pipe, could not write until the load timeout closed the
+  channel.
 - `a_channel_reader_stops_at_each_streams_end_marker` — the channel's reader follows the Arrow
   messages as they pass and reads nothing past a stream's marker, whatever size its reads are.
 - `a_refused_stream_is_drained_to_its_marker_within_a_bound` — the rest of a refused stream is read
