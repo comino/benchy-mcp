@@ -2677,6 +2677,7 @@ unsafe fn collect_legacy(
         note: None,
         cut_values: keep.cut,
         sql: None,
+        cell_cap: cap.max_cell_bytes,
     }
 }
 
@@ -3060,6 +3061,7 @@ unsafe fn collect_arrow(
         note: None,
         cut_values: keep.cut,
         sql: None,
+        cell_cap: cap.max_cell_bytes,
     }))
 }
 

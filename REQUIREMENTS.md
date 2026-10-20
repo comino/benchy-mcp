@@ -806,6 +806,11 @@ fetched again by id.
 - `a_truncated_result_can_be_paged` — a capped result is read further with `get_result` and an
   offset, without re-running the query; the last page says it is the end. The first 2,000 rows
   (at most 1 MiB) of each of the last 32 results are kept.
+- `a_page_cuts_values_at_its_own_cell_cap` — a page whose call lowers `max_cell_bytes` cuts each
+  value to it, as the query would have, and says TRUNCATED. Values were cut once, when the result
+  was kept, at the query's cap: a host's page at 16 bytes got all 200 bytes of
+  `repeat('x', 200)`. A value cut when it was kept says what is missing of the value, not of the
+  first cut.
 - `a_query_without_a_limit_reads_no_further_than_it_keeps` — a `SELECT` is streamed and read
   only as far as its rows are kept, then stopped. Built whole first, a `SELECT` with no `LIMIT`
   cost the whole result: over 10,000,000 rows 0.63 G instructions and 150 ms a call, and over

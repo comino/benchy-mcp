@@ -86,6 +86,10 @@ pub struct QueryResult {
     /// `None` where it cannot be told apart in its batch. A host's `page` returns it
     /// (`a_page_says_the_sql_of_its_result`).
     pub sql: Option<String>,
+    /// The cell cap its values were kept at: the cap of the call that ran it. A page may ask
+    /// for a lower one, and a value kept longer than that is cut again as the page shows it
+    /// (`a_page_cuts_values_at_its_own_cell_cap`).
+    pub cell_cap: usize,
 }
 
 /// The most of a result's statement kept with it. A request is at most 1 MiB, and 32 results are
@@ -161,8 +165,49 @@ pub fn fit(s: &str, max_wire: usize) -> String {
     }
 }
 
-fn row_line(row: &[Cell]) -> String {
-    row.iter().map(Cell::text).collect::<Vec<_>>().join(" | ")
+/// One row as a page shows it, each value at most `max` bytes, as the call that kept it would
+/// have cut it at that cap; whether a value was cut here is added to `cut`.
+fn row_line(row: &[Cell], kept_at: usize, max: usize, cut: &mut bool) -> String {
+    row.iter()
+        .map(|c| match recut(c.text(), kept_at, max) {
+            Some(v) => {
+                *cut = true;
+                std::borrow::Cow::Owned(v)
+            }
+            None => std::borrow::Cow::Borrowed(c.text()),
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// A value kept at the cell cap `kept_at`, cut to the lower cap `max`, or `None` where it fits.
+/// Paging with a lower cap than the query's showed every kept value whole: a host's
+/// `"max_cell_bytes": 16` got all 200 bytes of `repeat('x', 200)`, and no word of a cut (#18).
+///
+/// A value longer than `kept_at` was cut when it was kept, so it ends in the mark [`cut`]
+/// wrote, and what it says is missing counts against the value it was cut from, not against
+/// the mark. Without that mark it is not a value but benchy's own word about one, such as a
+/// type that is not rendered, which the query did not cut either.
+fn recut(v: &str, kept_at: usize, max: usize) -> Option<String> {
+    if v.len() <= max {
+        return None;
+    }
+    let (head, whole) = if v.len() > kept_at {
+        let rest = v.strip_suffix(" bytes]")?;
+        let at = rest.rfind("… [+")?;
+        let missing: usize = rest[at + "… [+".len()..].parse().ok()?;
+        (&v[..at], at + missing)
+    } else {
+        (v, v.len())
+    };
+    if head.len() <= max {
+        return None;
+    }
+    let mut end = max;
+    while !head.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}… [+{} bytes]", &head[..end], whole - end))
 }
 
 /// One page as rendered: its text, the wire bytes it takes, the rows it shows, and whether it is
@@ -193,6 +238,7 @@ fn render_page(
     let mut body = String::new();
     let mut shown = 0usize;
     let mut out_of_bytes = false;
+    let mut cut_here = false;
     if wire_len(&header) > room {
         header = format!(
             "{}\n",
@@ -206,12 +252,16 @@ fn render_page(
     } else {
         body.push_str(&header);
         for row in r.rows.iter().skip(offset).take(max_rows) {
-            let line = format!("{}\n", row_line(row));
+            let line = format!("{}\n", row_line(row, r.cell_cap, max_cell, &mut cut_here));
             let n = wire_len(&line);
             if used + n > room && shown == 0 {
                 // A single row wider than the whole response: show what fits of it rather than
                 // nothing, or paging would stall on it forever.
-                let line = cut_to_wire(&row_line(row), room.saturating_sub(used + 2), ROW_CUT);
+                let line = cut_to_wire(
+                    &row_line(row, r.cell_cap, max_cell, &mut cut_here),
+                    room.saturating_sub(used + 2),
+                    ROW_CUT,
+                );
                 body.push_str(&line);
                 body.push('\n');
                 used += wire_len(&line) + 2;
@@ -229,6 +279,7 @@ fn render_page(
         }
     }
 
+    let cut_values = r.cut_values || cut_here;
     let kept = r.rows.len();
     let first = offset + 1;
     let last = offset + shown;
@@ -248,7 +299,7 @@ fn render_page(
             "\nno rows at offset {offset}: result_id {} {held}.",
             r.result_id
         )
-    } else if complete && r.cut_values {
+    } else if complete && cut_values {
         format!(
             "\n{} row(s), result_id {} — TRUNCATED: some values were cut, and each says how much \
              is missing. Select a substring to read the rest.",
@@ -313,7 +364,7 @@ fn render_page(
         fit(&format!("{body}{footer}"), budget)
     };
     let truncated = not_shown
-        || r.cut_values
+        || cut_values
         || r.partial.is_some()
         || r.more
         || out_of_bytes
@@ -449,6 +500,7 @@ mod tests {
             note: None,
             cut_values: false,
             sql: None,
+            cell_cap: Caps::default().max_cell_bytes,
         }
     }
 

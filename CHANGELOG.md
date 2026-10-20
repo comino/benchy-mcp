@@ -88,6 +88,11 @@ Faster:
 
 Fixed:
 
+- **A page cuts values at its own cell cap** (#18). A host's `page` may lower `max_cell_bytes`
+  for the call, and that cap was applied to the column names alone: `SELECT repeat('x', 200)`
+  paged at 16 came back whole, without TRUNCATED. Each value is now cut to the page's cap, and
+  one cut already when it was kept says how much of the value is missing
+  (`a_page_cuts_values_at_its_own_cell_cap`).
 - **`page`'s `sql` keeps every string literal whole** (#16). Comments were stripped by a scan
   that knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
   `SELECT $$a`, and `SELECT $$a/*b*/c$$ AS x` as `SELECT $$a c$$ AS x`. The batch is now split

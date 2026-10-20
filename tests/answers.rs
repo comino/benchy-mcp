@@ -231,6 +231,45 @@ fn a_page_says_the_sql_of_its_result() {
 }
 
 #[test]
+fn a_page_cuts_values_at_its_own_cell_cap() {
+    // #18: caps may lower the session's limits for one call, `page` among them. A page with
+    // `max_cell_bytes` 16 showed all 200 bytes of a value kept at the query's 256, and did not
+    // say TRUNCATED. Now it cuts each value as a query at 16 would have, and a value cut once
+    // already when it was kept says what is missing of the value, not of the cut.
+    let mut h = Host::start(&[]);
+    let r = h.query(
+        "SELECT repeat('x', 200) AS short, repeat('y', 300) AS long, 'ok' AS small",
+        json!({}),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let id = r["result_ids"][0].clone();
+    let whole = text(&r);
+    assert!(whole.contains(&"x".repeat(200)), "{whole}");
+    assert!(whole.contains("[+44 bytes]"), "{whole}");
+
+    let p = h.call(
+        "page",
+        json!({"result_id": id, "caps": {"max_cell_bytes": 16}}),
+    );
+    assert_eq!(p["ok"], true, "{p}");
+    let page = text(&p);
+    let row = page.lines().nth(1).unwrap_or_else(|| panic!("{page}"));
+    assert_eq!(
+        row,
+        format!(
+            "{}… [+184 bytes] | {}… [+284 bytes] | ok",
+            "x".repeat(16),
+            "y".repeat(16)
+        ),
+        "{page}"
+    );
+    assert!(page.contains("TRUNCATED"), "{page}");
+    // The session's cap again: the result as it was kept.
+    let p = h.call("page", json!({"result_id": id}));
+    assert!(text(&p).contains(&"x".repeat(200)), "{p}");
+}
+
+#[test]
 fn page_sql_keeps_every_literal_whole() {
     // #16: a `--` or `/*` inside a string is the string's. Comments were found by a scan that
     // knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as
