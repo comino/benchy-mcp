@@ -393,6 +393,40 @@ Parquet file in either order (`bench/gen_data.py bytime bymeter`).
   repeated, is taken for a cut and the table is one series. The tests hold each guess to the
   profile reading the table gives.
 
+## The profile in microseconds (#15): nothing measurable, once times hash apart
+
+The profile read every time as epoch milliseconds, so rows 500 µs apart were described as a row
+every millisecond, half of them repeated, with the extent cut short. It now reads microseconds,
+as the bench holds them (REQ-14 `times_finer_than_a_millisecond_are_profiled_as_they_are`):
+`epoch_us` in place of `epoch_ms` in its SQL, and the watch keeps the microseconds it already
+computed rather than dividing them by 1,000. Measured with `bench/ingest.py`, five runs each, the
+least, the build before the change and after it run one after the other on a 4-core aarch64 box
+under load from other work:
+
+| scenario | instructions, before → after (spread) |
+|---|---:|
+| exec-1m | 2.125 → 2.107 G, −0.9% (1%, 2%) |
+| exec_series-1m | 2.293 → 2.316 G, +1.0% (2%, 1%) |
+| exec_mixed-1m | 2.305 → 2.298 G, −0.3% (1%, 1%) |
+| parquet_bymeter-1m | 2.805 → 2.788 G, −0.6% (1%, 1%) |
+| csv-1m | 5.448 → 5.458 G, +0.2% (0%, 6%) |
+| exec_series-10m | 18.64 → 18.63 G, −0.0% (0%, 0%) |
+
+- **A time's hash.** The first build of the change cost exec-1m 39 M instructions more (2.118 →
+  2.157 G, outside both spreads), in the watch's lookups of times (`Times::close`, and
+  `HashMap::insert` 0.16% → 1.03% of the samples). The tally's FxHash multiplies, and a multiply
+  keeps a key's trailing zero bits in the hash's low bits, which choose its bucket: a minute is
+  60,000,000 µs, eight trailing zeros where 60,000 ms had five, so the times of a minutely table
+  shared one bucket in 256 rather than one in 32. The hash is now rotated before it is used, as
+  rustc-hash 2 does, and the difference is gone.
+- **Exactness.** The first scan reads the extent as `BIGINT`, not as a double: a double holds
+  microseconds exactly only within 285 years of 1970, and a sentinel such as 9999-12-31 was
+  32 µs off.
+- **The checksums.** A series' sum of squared distances is a million times larger in
+  microseconds, and wraps an i128 at about a per-second series of 25 years. A series whose times
+  came in order is proven regular by its count, extent and phase alone, which it always was in
+  fact, so the sum is no longer read for it.
+
 ## Infinite timestamps kept on load: 21 instructions a row
 
 A zone-less timestamp is converted with `make_timestamptz(epoch_us(ts))` (src/canonical.rs),

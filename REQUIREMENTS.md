@@ -1211,6 +1211,16 @@ statement, and the agent made them.
   late start or early end are judged at its step too. Notes alike in several series are said
   once, by their keys (`1090–1099 (10 series): …`). Read at one step, every complete 10- and
   15-minute series was reported broken ("8735 gaps, 17470 rows missing", #50).
+- `times_finer_than_a_millisecond_are_profiled_as_they_are` — the profile reads times in
+  microseconds, as the bench holds them, from a table read back, from files watched as they are
+  written, and from a connector's stream: rows 500 µs apart are `a row every 500 microseconds`,
+  none repeated, the extent ends at `.0095`, and a missing row is a gap of 500 microseconds.
+  Read in milliseconds, they were a row every millisecond, half of them "a time already
+  present", and the extent ended at `.009` (#15).
+- `an_ordered_series_is_regular_however_its_checksums_wrap` — in microseconds the sum of a
+  series' squared distances can pass an i128 (a per-second series of about 25 years), and a
+  wrapped sum fit nothing. A series whose times came in order is proven regular by its count,
+  extent and phase alone, which need no sum.
 - `every_tables_shape_comes_before_any_tables_notes` — a table with more notes than the budget
   holds, beside a two-row table: every table's own lines get their room before any table's
   notes about single series, so the second table's shape is shown and the first's notes stop

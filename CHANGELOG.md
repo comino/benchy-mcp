@@ -113,6 +113,13 @@ Fixed:
   server closed the refused request's descriptor as it should. The read end that stayed open
   was a copy in a process another test of the same binary was starting, not yet exec'd. The
   check now runs while no test of that binary starts a process.
+- **`describe` reads times to the microsecond** (#15). The profile read them as milliseconds:
+  rows 500 µs apart were "a row every 1 millisecond", half of them "a time already present",
+  and the extent ended at `.009` where the last row was at `.0095`. Now they are `a row every
+  500 microseconds`, a duration under a millisecond is said in microseconds, and a far time
+  such as 9999-12-31 23:59:59.999999 is said exactly
+  (`times_finer_than_a_millisecond_are_profiled_as_they_are`). No measurable cost
+  (docs/PERFORMANCE.md).
 - **What an Arrow stream decodes to is one total against its byte bound** (#14). Its bodies,
   decompressed, and what its dictionary and view columns unpack to were each held to
   `attach_bytes` (or a connector's `max_bytes`) on its own, so a stream with some of each loaded
