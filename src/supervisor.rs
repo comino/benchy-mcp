@@ -24,7 +24,7 @@
 
 use crate::loader::{Done, Job};
 use crate::proto::{read_frame, write_frame, Reply, Request};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
@@ -623,10 +623,16 @@ pub struct Supervisor {
     channel_closed: Option<String>,
 }
 
-/// A request written to the engine, its reply still to come.
+/// What the engine's pipes come back as once a request has been written and its reply read.
+type Exchanged = (
+    Reply,
+    std::process::ChildStdin,
+    BufReader<std::process::ChildStdout>,
+);
+
+/// A request on its way to the engine, its reply still to come.
 struct Sent {
-    stdin: BufWriter<std::process::ChildStdin>,
-    reply: mpsc::Receiver<std::io::Result<(Reply, BufReader<std::process::ChildStdout>)>>,
+    reply: mpsc::Receiver<std::io::Result<Exchanged>>,
     reader: std::thread::JoinHandle<()>,
 }
 
@@ -1518,24 +1524,30 @@ impl Supervisor {
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Lost::Died("the engine's pipes are gone".into()));
         };
-        let mut stdin = BufWriter::new(stdin);
+        let mut stdin = stdin;
         let mut stdout = BufReader::new(stdout);
-        write_frame(&mut stdin, req)
+        let frame = crate::proto::frame(req)
             .map_err(|e| Lost::Died(format!("engine write failed: {e}")))?;
 
-        // Read on a worker thread so the deadline is ours, not the engine's. A blocked read on a
-        // process stuck in the planner would otherwise hang the server for as long as the
-        // planner felt like taking.
+        // Written and read on a worker thread, so the deadline is ours, not the engine's. A
+        // blocked read on a process stuck in the planner would otherwise hang the server for as
+        // long as the planner felt like taking; and so would a blocked write. A request larger
+        // than the pipe holds (64 KiB on Linux) to an engine that does not read it, stopped or
+        // wedged, left the server without a reply for as long as the engine stayed so: over 90 s
+        // past a 1 s deadline. The kill at the hard deadline ends the write with EPIPE, or the
+        // read with EOF, so the thread ends with the engine. One thread does both, as one did
+        // the read before: the engine reads the whole request before it answers.
+        // REQ-8 `a_request_the_engine_does_not_read_is_held_to_the_hard_deadline`.
         let (tx, rx) = mpsc::channel();
         let reader = std::thread::spawn(move || {
-            let r: std::io::Result<Reply> = read_frame(&mut stdout);
-            let _ = tx.send(r.map(|reply| (reply, stdout)));
+            let written = stdin
+                .write_all(&frame)
+                .and_then(|()| stdin.flush())
+                .map_err(|e| std::io::Error::new(e.kind(), format!("engine write failed: {e}")));
+            let r: std::io::Result<Reply> = written.and_then(|()| read_frame(&mut stdout));
+            let _ = tx.send(r.map(|reply| (reply, stdin, stdout)));
         });
-        Ok(Sent {
-            stdin,
-            reply: rx,
-            reader,
-        })
+        Ok(Sent { reply: rx, reader })
     }
 
     /// The reply to what `sent` wrote, within `hard`, from an engine that stays under the memory
@@ -1546,11 +1558,7 @@ impl Supervisor {
     /// planning, which nothing in DuckDB bounds, as much as executing
     /// (`an_engine_past_its_memory_ceiling_is_killed_even_while_planning`).
     fn receive(&mut self, sent: Sent, hard: Duration) -> Result<Reply, Lost> {
-        let Sent {
-            stdin,
-            reply: rx,
-            reader,
-        } = sent;
+        let Sent { reply: rx, reader } = sent;
         let until = Instant::now() + hard;
         let engine = self.child.as_ref().map(|c| c.id());
         let ceiling = self.spec.limits.memory_ceiling;
@@ -1566,7 +1574,7 @@ impl Supervisor {
             }
         };
         match got {
-            Ok(Ok((reply, stdout))) => {
+            Ok(Ok((reply, stdin, stdout))) => {
                 let _ = reader.join();
                 if let Some(why) = reply.rebuild {
                     return Err(Lost::Spoiled(why));
@@ -1583,7 +1591,7 @@ impl Supervisor {
                     return Err(Lost::Swollen { held, ceiling });
                 }
                 let child = self.child.as_mut().expect("still running");
-                child.stdin = Some(stdin.into_inner().map_err(|e| Lost::Died(e.to_string()))?);
+                child.stdin = Some(stdin);
                 child.stdout = Some(stdout.into_inner());
                 Ok(reply)
             }

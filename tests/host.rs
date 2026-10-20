@@ -1046,6 +1046,56 @@ fn a_reply_the_reader_cannot_write_ends_the_session() {
     );
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn a_request_the_engine_does_not_read_is_held_to_the_hard_deadline() {
+    // REQ-8: the hard deadline covers writing the request, not only waiting for the reply. A
+    // request larger than the engine's stdin pipe holds (64 KiB on Linux) blocks its writer
+    // until the engine reads it; an engine that never does — stopped here, wedged in the field —
+    // must still be killed at the hard deadline and rebuilt. Written on the calling thread, the
+    // request below left the host without a reply for as long as the engine stayed stopped
+    // (no reply after 90 s), and `ping` still answered.
+    let mut h = Host::start(&["--deadline", "1", "--hard-grace", "1"]);
+    let engine = common::engine_of(h.child.id());
+    // A stopped engine notices nothing, its server's end included: killed if the test fails
+    // before its server has, while the server still holds the pid.
+    struct Reap(Option<i32>);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+    let mut reap = Reap(Some(engine as i32));
+    assert_eq!(unsafe { libc::kill(engine as i32, libc::SIGSTOP) }, 0);
+    let sql = format!("SELECT 42 AS answer -- {}", "x".repeat(512 * 1024));
+    let asked = Instant::now();
+    h.send(&json!({"id": 1, "call": "query", "sql": sql}));
+    let mut stdout = std::mem::replace(&mut h.stdout, spare_stdout());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let reply: std::io::Result<Value> = read_frame(&mut stdout);
+        let _ = tx.send(reply.map(|r| (r, stdout)));
+    });
+    let (reply, stdout) = rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("an answer within the hard deadline, not a session stuck writing")
+        .expect("a reply");
+    h.stdout = stdout;
+    assert_eq!(reply["id"], 1, "{reply}");
+    assert_eq!(code(&reply), "E_REBUILT", "{reply}");
+    reap.0 = None;
+    // Deadline 1 s and grace 1 s: the kill comes at 2 s, then a rebuild of an empty bench.
+    assert!(
+        asked.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        asked.elapsed()
+    );
+    let r = h.call("query", json!({"sql": "SELECT 40 + 2 AS answer"}));
+    assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
+}
+
 /// Stand-ins for a Host's pipes, so the real ones can be closed while the Host lives on.
 fn spare_stdin() -> ChildStdin {
     let mut other = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();

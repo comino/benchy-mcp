@@ -56,6 +56,12 @@ Fixed:
   and ignored a failed write, so a host that had closed its end of the replies kept its
   session, engine and warden running for as long as its stdin stayed open. A second `hello`'s
   refusal counts too (`a_reply_the_reader_cannot_write_ends_the_session`).
+- **The hard deadline covers writing a request to the engine** (#10). A request larger than the
+  engine's stdin pipe holds (64 KiB on Linux) was written before the deadline started, so an
+  engine that did not read it, stopped or wedged, left a 512 KiB query without a reply after
+  90 s past a 1 s deadline. The request is now written on the thread that reads the reply, and
+  the engine is killed and rebuilt at the hard deadline as for any other request
+  (`a_request_the_engine_does_not_read_is_held_to_the_hard_deadline`).
 
 ## [0.2.0] — 2026-10-17
 

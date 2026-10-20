@@ -596,6 +596,10 @@ kill. So is one loader's: each is read the same way while it loads, with the con
 
 - `a_runaway_batch_loses_the_batch_not_the_bench` — a runaway is interrupted at its deadline and
   the agent's tables survive.
+- `a_request_the_engine_does_not_read_is_held_to_the_hard_deadline` — the hard deadline covers
+  writing the request too. A 512 KiB query to a stopped engine, more than its stdin pipe holds,
+  had no reply after 90 s past a 1 s deadline; it is answered `E_REBUILT` at the hard deadline,
+  and the bench serves again.
 - `planner_blowup_killed` — a query that takes seconds just to plan is stopped by killing the
   engine; the bench is rebuilt and the lost scratch is stated.
 - `an_engine_past_its_memory_ceiling_is_killed_even_while_planning` — a query whose planning
