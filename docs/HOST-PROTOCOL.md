@@ -302,7 +302,8 @@ Puts the file on the bench as table `name`, read-only, at any point in the sessi
   end-of-stream marker is mandatory — a stream cut at a message boundary parses as a valid, shorter
   one — and it must end the file: one stream per file, nothing after its marker. A body may be
   LZ4-compressed and a column dictionary-encoded or a view, and what the stream decodes to,
-  decompressed and unpacked, counts against `attach_bytes` as it is read; a zstd body is refused. Every column's type must be in the vocabulary (the "Types" table in
+  decompressed and unpacked, counts against `attach_bytes` as it is read, as one total: its
+  bodies and what its dictionary and view columns unpack to together; a zstd body is refused. Every column's type must be in the vocabulary (the "Types" table in
   [EXEC-CONNECTOR-PROTOCOL.md](EXEC-CONNECTOR-PROTOCOL.md)), and it is held in the bench's own
   types, the same as a file's or a connector's: a zone-less timestamp is read as UTC. No two
   columns may have names that differ only in case, which DuckDB does not tell apart.

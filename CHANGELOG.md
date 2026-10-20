@@ -39,6 +39,11 @@ Changed behaviour:
   reads a series again only when its longest run could be one to note
   (`a_stuck_value_inside_a_series_is_noted`, `the_pass_misses_no_value_held`). The line that
   lists what is noted is 58 bytes longer.
+- **An NDJSON/JSON file with `epoch` in a timestamp or date column is refused** (#37), as one
+  with `infinity` has been since 0.2.0. DuckDB's sniffed JSON read took `epoch` as
+  1900-01-01 00:00:00, where a CSV and a declared JSON column read it as 1970-01-01. Declare the
+  column's type in `[[source.schema]]` to load it as 1970
+  (`an_ndjson_epoch_is_refused_where_a_csv_reads_1970`).
 
 - **A helper macro may not read a table** (#58). DuckDB expands a macro inside the caller's
   query, where a CTE of the caller's named like a table the macro reads stands in for it; 0.2.0
@@ -149,6 +154,25 @@ Fixed:
   server closed the refused request's descriptor as it should. The read end that stayed open
   was a copy in a process another test of the same binary was starting, not yet exec'd. The
   check now runs while no test of that binary starts a process.
+- **`describe` reads times to the microsecond** (#15). The profile read them as milliseconds:
+  rows 500 µs apart were "a row every 1 millisecond", half of them "a time already present",
+  and the extent ended at `.009` where the last row was at `.0095`. Now they are `a row every
+  500 microseconds`, a duration under a millisecond is said in microseconds, and a far time
+  such as 9999-12-31 23:59:59.999999 is said exactly
+  (`times_finer_than_a_millisecond_are_profiled_as_they_are`). No measurable cost
+  (docs/PERFORMANCE.md).
+- **What an Arrow stream decodes to is one total against its byte bound** (#14). Its bodies,
+  decompressed, and what its dictionary and view columns unpack to were each held to
+  `attach_bytes` (or a connector's `max_bytes`) on its own, so a stream with some of each loaded
+  at up to twice the bound: 818 KB of plain text and 804 KB unpacked attached under 1 MiB. Now
+  they are added up, and such a stream is refused as `E_LIMIT`
+  (`an_attachments_plain_and_unpacked_bytes_share_one_bound`).
+- **An NDJSON infinity in a column renamed for case is refused** (#38). Of two keys that differ
+  only in case, DuckDB renames one (`Id_1`), and the check that refuses an infinity read as
+  1900-01-01 looked for a key of that name, found none, and let the file load
+  (`an_ndjson_infinity_is_refused_in_a_column_renamed_for_case`). JSON pages, decoded by
+  arrow-json, already refused an infinity or `epoch`, and now have a test that says so
+  (`a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900`).
 
 ## [0.2.0] — 2026-10-17
 

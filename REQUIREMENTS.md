@@ -1157,6 +1157,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   `E_LIMIT` before it is unpacked.
 - `a_view_attachment_is_unpacked_within_the_bound` — and so is a string or binary view column,
   counted by the lengths its views state: a file of 130 KB that unpacks to 275 MB is refused.
+- `an_attachments_plain_and_unpacked_bytes_share_one_bound` — what the bodies decode to and what
+  the dictionary and view columns unpack to are one total against `attach_bytes`. Each was
+  checked against it on its own, so a file of 818 KB of plain text that unpacked 804 KB more
+  attached under 1 MiB; it is refused as `E_LIMIT`, and loads under twice that.
 - `a_detach_brings_a_bench_that_could_not_rebuild_back` — rebuilds that keep failing stop being
   tried, but detaching the table that stops them earns a fresh try.
 - `a_killed_host_leaves_nothing_behind_even_without_an_engine` — after a rebuild that failed there
@@ -1252,6 +1256,16 @@ statement, and the agent made them.
   late start or early end are judged at its step too. Notes alike in several series are said
   once, by their keys (`1090–1099 (10 series): …`). Read at one step, every complete 10- and
   15-minute series was reported broken ("8735 gaps, 17470 rows missing", #50).
+- `times_finer_than_a_millisecond_are_profiled_as_they_are` — the profile reads times in
+  microseconds, as the bench holds them, from a table read back, from files watched as they are
+  written, and from a connector's stream: rows 500 µs apart are `a row every 500 microseconds`,
+  none repeated, the extent ends at `.0095`, and a missing row is a gap of 500 microseconds.
+  Read in milliseconds, they were a row every millisecond, half of them "a time already
+  present", and the extent ended at `.009` (#15).
+- `an_ordered_series_is_regular_however_its_checksums_wrap` — in microseconds the sum of a
+  series' squared distances can pass an i128 (a per-second series of about 25 years), and a
+  wrapped sum fit nothing. A series whose times came in order is proven regular by its count,
+  extent and phase alone, which need no sum.
 - `every_tables_shape_comes_before_any_tables_notes` — a table with more notes than the budget
   holds, beside a two-row table: every table's own lines get their room before any table's
   notes about single series, so the second table's shape is shown and the first's notes stop
@@ -1449,14 +1463,15 @@ memory).
   a space for the `T`, nulls, with an odd value past the sniffer's sample at a vector's first row
   and inside one. A value the cast does not take as the sniffer does — nanoseconds, seven digits,
   a date alone, `epoch`, a padded `infinity`, a two-digit year, 12-hour times, a number — has the
-  file read the sniffed way, to its table or its refusal (an infinity's,
-  `an_ndjson_infinity_is_refused`); never a null, never a rounded time. A
+  file read the sniffed way, to its table or its refusal (an infinity's or an `epoch`'s,
+  `an_ndjson_infinity_is_refused`, `an_ndjson_epoch_is_refused_where_a_csv_reads_1970`); never a
+  null, never a rounded time. A
   value the sniffer's formats refuse and the cast reads exactly — an offset in a vector that began
   without one — loads at that instant, where the sniffed read refused the file.
 - `an_ndjson_bodys_timestamps_read_as_text_load_as_the_sniffer_reads_them` — the same for an
   undeclared HTTP NDJSON body, spooled to a file and read as that file is, narrowed or not: its
-  timestamps read as text, or, for a value the cast does not take, the sniffed way, to the same
-  table.
+  timestamps read as text, or, for a value the cast does not take (a two-digit year past the
+  sample), the sniffed way, to the same table.
 - `a_json_file_whose_columns_the_text_read_would_change_is_read_as_it_was` — that read names the
   sniffed columns, which turns the sniffer off for more than the timestamps; a file it would read
   otherwise is read the sniffed way, once: one with a date (`26-01-02` would be the year 26), a
@@ -1496,6 +1511,18 @@ memory).
   file and the column and saying what to do: write the value as null or as a real timestamp,
   declare the column's type in `[[source.schema]]`, which reads it as itself, or use CSV or
   Parquet. A genuine 1900-01-01 loads, beside a text column that says `infinity` too.
+- `an_ndjson_infinity_is_refused_in_a_column_renamed_for_case` — of two keys that differ only in
+  case, DuckDB renames the later one by a suffix (`Id` beside `id` is `Id_1`, `A_1` beside `A` and
+  `a_1` is `A_1_2`), and the check above looked for that name among the file's keys and found
+  none, so an infinity there loaded as 1900-01-01. Each key the column could have been read from
+  is read now; a genuine 1900-01-01 still loads.
+- `an_ndjson_epoch_is_refused_where_a_csv_reads_1970` — `epoch` (any case, padded, in a timestamp,
+  a date or a list) is read as 1970-01-01 00:00:00 from a CSV and from a JSON column whose type
+  is declared, but DuckDB 1.5.5's sniffed JSON read takes it as 1900-01-01 00:00:00 too, and such
+  a file loaded with that time. It is refused as an infinity is, past the sniffer's sample and at
+  1 MiB or more as well, where the timestamps are read as text first; declared, the column reads
+  it as 1970. `now`, `today`, `yesterday`, `tomorrow` and `allballs` make the column text from a
+  CSV and a sniffed JSON file alike.
 - `clickhouse_looks_the_same_as_a_file` — ClickHouse's own `ArrowStream`, LZ4 bodies and zoned
   `DateTime64` included, fetched by `clickhouse local` as a connector, against the fixture as CSV.
   It needs the ClickHouse binary, named by `BENCHY_CLICKHOUSE_BIN` as for REQ-16's tests, and
@@ -1677,6 +1704,11 @@ other's (REQ-5).
 - `a_later_json_page_with_a_wider_type_fails_the_source` — an undeclared JSON source is typed by
   DuckDB's sniff of its first page; a later page that does not fit, `2.5` where the first held
   integers, fails naming the column rather than loading as another type, or as `2`.
+- `a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900` — JSON pages are decoded by
+  arrow-json, not DuckDB's JSON reader, which reads `infinity`, `-infinity` and `epoch` as
+  1900-01-01 (`an_ndjson_infinity_is_refused`): arrow-json reads none of them as a timestamp or a
+  date, so the source fails naming the column, on the first page or a later one. Two keys that
+  differ only in case fail the first page's sniff.
 - `json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order` — a paged JSON source's next
   page is asked for once a scan has read the page's cursor, while the page decodes on another
   thread, at most a few pages ahead; the rows enter the table in page order whichever page

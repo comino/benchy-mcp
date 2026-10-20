@@ -87,7 +87,11 @@ const STEP_SAMPLE_ROWS: u64 = 50_000;
 const SERIES_MAX: usize = 200_000;
 /// Values longer than this are cut where they appear in a line.
 const VALUE_MAX: usize = 64;
-const DAY_MS: i64 = 86_400_000;
+/// A day in microseconds, the unit every time here is read in: as the bench holds it. Read in
+/// milliseconds, as it was, rows 500 µs apart were "a row every 1 millisecond", half of them
+/// "a time already present", and the extent ended half a millisecond early (#15,
+/// `times_finer_than_a_millisecond_are_profiled_as_they_are`).
+const DAY_US: i64 = 86_400_000_000;
 /// Between the columns of a series key held as one text, and a null column's value in it.
 const KEY_SEP: char = '\u{1f}';
 const NULL_PART: &str = "\u{1e}";
@@ -404,16 +408,18 @@ fn temporal(k: Kind) -> bool {
     matches!(k, Kind::Date | Kind::Timestamp | Kind::TimestampTz)
 }
 
-/// A duration, in at most its two largest units: `15 minutes`, `13 days 15 minutes`.
-pub fn span(ms: i64) -> String {
+/// A duration in microseconds, in at most its two largest units: `15 minutes`,
+/// `13 days 15 minutes`, `500 microseconds`.
+pub fn span(us: i64) -> String {
     let units = [
-        (DAY_MS, "day"),
-        (3_600_000, "hour"),
-        (60_000, "minute"),
-        (1_000, "second"),
-        (1, "millisecond"),
+        (DAY_US, "day"),
+        (3_600_000_000, "hour"),
+        (60_000_000, "minute"),
+        (1_000_000, "second"),
+        (1_000, "millisecond"),
+        (1, "microsecond"),
     ];
-    let mut left = ms.max(0);
+    let mut left = us.max(0);
     let mut parts = Vec::new();
     for (size, name) in units {
         if parts.len() == 2 {
@@ -466,9 +472,9 @@ fn num(x: f64) -> String {
 struct Clock(Kind);
 
 impl Clock {
-    fn at(self, ms: i64) -> String {
-        let micros = ms.saturating_mul(1000);
-        let full = crate::result::timestamp_utc(micros); // `YYYY-MM-DD HH:MM:SS[.f]+00`
+    /// Time `us`, in microseconds since the epoch.
+    fn at(self, us: i64) -> String {
+        let full = crate::result::timestamp_utc(us); // `YYYY-MM-DD HH:MM:SS[.f]+00`
         let naive = full.trim_end_matches("+00");
         match self.0 {
             Kind::Date => naive[..10].to_string(),
@@ -494,8 +500,8 @@ impl Clock {
 /// A day on which clocks change, by the rules most meter data is recorded under, or `None`.
 /// A calendar fact, not a guess about the data: the profile reports it beside a moment every
 /// series shares, and the agent decides what it means.
-fn clock_change(ms: i64) -> Option<&'static str> {
-    let days = ms.div_euclid(DAY_MS);
+fn clock_change(us: i64) -> Option<&'static str> {
+    let days = us.div_euclid(DAY_US);
     let (_, m, d) = crate::result::civil_from_days(days);
     // 1970-01-01 was a Thursday.
     let sunday = (days + 4).rem_euclid(7) == 0;
@@ -637,8 +643,28 @@ impl Series {
     /// come in order ([`Series::ordered`]): as many distinct indices as the extent holds, each
     /// on the step, are every index once. Times that came in no order may still be regular,
     /// and only an exact count of their distinct times settles it (`settle`).
+    ///
+    /// Times in order need no checksum: each one later (or earlier) than the last, on one phase,
+    /// as many as the extent holds steps, are every step once. So the checksums are not read
+    /// for them, and cannot wrap for them. In microseconds a distance squared is a million
+    /// times what it was in milliseconds, and summed over a series it passes an i128's 1.7e38
+    /// at about `extent³ / (3 × step)`: a per-second series of 25 years, where milliseconds
+    /// took 2,500. The wrapped sum would have said "not regular" of a series that was, and sent
+    /// it to the gaps' window (#15, `an_ordered_series_is_regular_however_its_checksums_wrap`).
     fn regular(&self, step: i64, origin: i64) -> bool {
-        self.ordered && self.fits(step, origin)
+        self.ordered && self.spans(step, origin)
+    }
+
+    /// [`Series::fits`] but for the checksums: the count, the extent and the phase.
+    fn spans(&self, step: i64, origin: i64) -> bool {
+        let (Some(a), Some(b)) = (self.first, self.last) else {
+            return false;
+        };
+        if self.timed != self.rows || step <= 0 || self.phase.0 != self.phase.1 {
+            return false;
+        }
+        self.rows == 1
+            || ((b - origin) / step - (a - origin) / step) as i128 + 1 == self.rows as i128
     }
 
     /// What a row every step from first to last would give: the count, the extent, the phase
@@ -671,7 +697,7 @@ impl Series {
 struct Ctx<'a> {
     conn: &'a Connection,
     from: String,
-    /// The time column as epoch milliseconds.
+    /// The time column as epoch microseconds.
     t: String,
     /// The series key as text, never null, or a constant when there is none.
     k: String,
@@ -685,6 +711,34 @@ fn rows<T>(
     let mut st = conn.prepare(sql).map_err(|e| e.to_string())?;
     let r = st.query_map([], f).map_err(|e| e.to_string())?;
     r.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Where the first scan has the time column's extent ([`values_exact`]): after the rows, the
+/// timed rows and the distinct count.
+const EXTENT: [usize; 2] = [3, 4];
+
+/// [`values`], but the columns at `exact` read as integers, exactly, in place of doubles: the
+/// row as doubles, `None` at those places, and those columns' values in their order.
+#[allow(clippy::type_complexity)]
+fn values_exact(
+    conn: &Connection,
+    sql: &str,
+    exact: &[usize],
+) -> Option<(Vec<Option<f64>>, Vec<Option<i64>>)> {
+    conn.query_row(sql, [], |r| {
+        let mut row = Vec::new();
+        let mut ints = Vec::new();
+        for i in 0..r.as_ref().column_count() {
+            if exact.contains(&i) {
+                ints.push(r.get::<_, Option<i64>>(i)?);
+                row.push(None);
+            } else {
+                row.push(r.get::<_, Option<f64>>(i)?);
+            }
+        }
+        Ok((row, ints))
+    })
+    .ok()
 }
 
 /// One row of numbers, each read as a double: the shape of every scan here.
@@ -790,20 +844,23 @@ fn profile(
     // none is, or when there is no time column at all.
     let series_stated = !shape.series.is_empty();
     let tk = time_kind.unwrap_or(Kind::Timestamp);
-    let t_ms = time.as_ref().map(|t| match tk {
-        Kind::Date => format!("epoch_ms(CAST({} AS TIMESTAMP))", quote(t)),
-        _ => format!("epoch_ms({})", quote(t)),
+    // `epoch_us`, as the bench holds a time: an infinity is NULL, as it was in `epoch_ms`.
+    let t_us = time.as_ref().map(|t| match tk {
+        Kind::Date => format!("epoch_us(CAST({} AS TIMESTAMP))", quote(t)),
+        _ => format!("epoch_us({})", quote(t)),
     });
     let mut sel = vec!["count(*)::BIGINT".to_string()];
-    if let (Some(t), Some(ms)) = (&time, &t_ms) {
+    if let (Some(t), Some(us)) = (&time, &t_us) {
         sel.push(format!("count({})::BIGINT", quote(t)));
         sel.push(if series_stated {
             "NULL".to_string()
         } else {
             format!("approx_count_distinct({})::BIGINT", quote(t))
         });
-        sel.push(format!("min({ms})::DOUBLE"));
-        sel.push(format!("max({ms})::DOUBLE"));
+        // Read exactly ([`EXTENT`]): a double holds microseconds exactly only within 285 years
+        // of 1970, and a sentinel date such as 9999-12-31 is far past that.
+        sel.push(format!("min({us})::BIGINT"));
+        sel.push(format!("max({us})::BIGINT"));
     }
     let hll: Vec<String> = candidates
         .iter()
@@ -845,8 +902,9 @@ fn profile(
             if time.is_some() {
                 v.push(Some(s.timed as f64));
                 v.push((!series_stated).then_some(s.time_distinct as f64));
-                v.push(s.first.map(|t| t as f64));
-                v.push(s.last.map(|t| t as f64));
+                // The extent is taken exactly, below; these hold its places.
+                v.push(None);
+                v.push(None);
             } else {
                 v.extend(
                     s.candidate_distinct
@@ -864,12 +922,17 @@ fn profile(
             for n in &s.numbers {
                 v.extend([n.min, n.max, Some(n.nulls as f64), Some(n.zeros as f64)]);
             }
-            v
+            (v, vec![s.first, s.last])
         }
         None => crate::trace::span("profile.scan", || {
-            values(conn, &format!("SELECT {} FROM {from}", sel.join(", ")))
+            values_exact(
+                conn,
+                &format!("SELECT {} FROM {from}", sel.join(", ")),
+                if time.is_some() { &EXTENT } else { &[] },
+            )
         })?,
     };
+    let (scan, exact) = scan;
     let mut at = scan.into_iter();
     let mut next = || at.next().flatten();
     let total = next().unwrap_or(0.0) as i64;
@@ -877,12 +940,11 @@ fn profile(
         return Some(p);
     }
     let (timed, time_distinct, origin, end) = if time.is_some() {
-        (
-            next().unwrap_or(0.0) as i64,
-            next().unwrap_or(0.0) as i64,
-            next().unwrap_or(0.0) as i64,
-            next().unwrap_or(0.0) as i64,
-        )
+        let (timed, distinct) = (next().unwrap_or(0.0) as i64, next().unwrap_or(0.0) as i64);
+        let _ = (next(), next());
+        let first = exact.first().copied().flatten().unwrap_or(0);
+        let last = exact.get(1).copied().flatten().unwrap_or(0);
+        (timed, distinct, first, last)
     } else {
         (0, 0, 0, 0)
     };
@@ -954,7 +1016,7 @@ fn profile(
             if able.len() < 2 {
                 return Some(most);
             }
-            let (Some(t), Some(ms), Some(lit)) = (&time, &t_ms, &first_lit) else {
+            let (Some(t), Some(us), Some(lit)) = (&time, &t_us, &first_lit) else {
                 return Some(most);
             };
             let width = sample_width(origin, end, timed);
@@ -962,7 +1024,7 @@ fn profile(
                 .iter()
                 .map(|(n, _)| {
                     let sh = crate::trace::span("profile.key", || {
-                        step_share(conn, &from, &quote(n), ms, &quote(t), lit, width)
+                        step_share(conn, &from, &quote(n), us, &quote(t), lit, width)
                     });
                     (*n, sh.unwrap_or(0.0))
                 })
@@ -1020,7 +1082,7 @@ fn profile(
         return Some(p);
     };
     let clock = Clock(tk);
-    let t_ms = t_ms.unwrap_or_default();
+    let t_us = t_us.unwrap_or_default();
     // The key as one text: each column's value, a null as [`NULL_PART`], joined by
     // [`KEY_SEP`]. Both are control characters, so no printable value is mistaken for them, and
     // the key is split back into its values to be shown (`key_shown`).
@@ -1077,7 +1139,7 @@ fn profile(
     let cx = Ctx {
         conn,
         from: from.clone(),
-        t: t_ms,
+        t: t_us,
         k,
     };
     let measures: Vec<&Col> = cols
@@ -1101,7 +1163,7 @@ fn profile(
     // the moments every series shares are found ([`pass`]).
     let checked = step.filter(|s| *s > 0);
     let keyed = !series_cols.is_empty();
-    let per_time = keyed && checked.is_some_and(|st| st <= DAY_MS && DAY_MS % st == 0);
+    let per_time = keyed && checked.is_some_and(|st| st <= DAY_US && DAY_US % st == 0);
     let Pass {
         mut series,
         times,
@@ -1347,7 +1409,7 @@ fn profile(
     p.lines.extend(cols_lines(&cols, total));
 
     // Per series: what the GROUP BY alone shows, then what the bounded windows find.
-    let threshold = step.map(|s| (8 * s).max(DAY_MS));
+    let threshold = step.map(|s| (8 * s).max(DAY_US));
     for s in series.iter_mut() {
         let own = step.map(|_| s.step);
         note_extent(s, first, last, own, clock, keyed);
@@ -1412,7 +1474,7 @@ fn profile(
                 )
             };
         }
-        if keyed && series.len() >= 3 && st <= DAY_MS && DAY_MS % st == 0 {
+        if keyed && series.len() >= 3 && st <= DAY_US && DAY_US % st == 0 {
             p.events = crate::trace::span("profile.moments", || match &times {
                 Some(times) => times.moments(&measures, st, clock),
                 None => shared_moments(&cx, &measures, st, clock),
@@ -1686,8 +1748,13 @@ impl std::hash::Hasher for Fx {
     fn write_usize(&mut self, n: usize) {
         self.write_u64(n as u64);
     }
+    /// Rotated, as rustc-hash 2 does: a multiply leaves a key's trailing zero bits in the
+    /// hash's low bits, which choose its bucket. A time is a multiple of its step, and in
+    /// microseconds (#15) a minute's 60,000,000 has eight trailing zeros where 60,000 had five,
+    /// so every time of a minutely table fell into one bucket in 256: at exec-1m the watch's
+    /// lookups of times cost 40 M instructions more, measured (docs/PERFORMANCE.md).
     fn finish(&self) -> u64 {
-        self.0
+        self.0.rotate_left(26)
     }
 }
 
@@ -1854,8 +1921,8 @@ impl Times {
                 let (n, z) = (self.n[i], self.zeros[i * self.nm + j]);
                 let s = self.sum(i, j);
                 let (a, b) = (
-                    near(t.checked_sub(DAY_MS), j),
-                    near(t.checked_add(DAY_MS), j),
+                    near(t.checked_sub(DAY_US), j),
+                    near(t.checked_add(DAY_US), j),
                 );
                 let dead = z == n && n >= 3 && n * 2 >= most;
                 let odd = z < n
@@ -2328,7 +2395,7 @@ impl Tally {
                 || self.series[x].key.as_bytes()[16..] == key().as_bytes()[16..])
     }
 
-    /// `n` rows: each one's key, as text and as its [`Words`], its time in epoch milliseconds,
+    /// `n` rows: each one's key, as text and as its [`Words`], its time in epoch microseconds,
     /// and each measure's value. The text is read only to begin a series, or to compare a key
     /// longer than its words.
     ///
@@ -2866,7 +2933,7 @@ impl<'a> Held<'a> {
     /// `utc`. `None` for a column whose held values cannot be worked out here exactly as that SQL
     /// works them out, which leaves the profile to read the table: a zone-less timestamp read in
     /// a zone other than UTC (ICU's calendar), a decimal, and any type the profile does not
-    /// read. DuckDB's infinite timestamps and dates, which `epoch_ms` makes null, are found as
+    /// read. DuckDB's infinite timestamps and dates, which `epoch_us` makes null, are found as
     /// [`Watch::add`] reads them, and give up the same way.
     pub fn of(a: &'a duckdb::arrow::array::ArrayRef, held: &str, utc: bool) -> Option<Self> {
         use duckdb::arrow::array::{Array, ArrayRef, AsArray};
@@ -2906,7 +2973,7 @@ impl<'a> Held<'a> {
     }
 }
 
-/// A batch's times in epoch milliseconds, and which rows have one, as [`Tally::add`] reads them.
+/// A batch's times in epoch microseconds, and which rows have one, as [`Tally::add`] reads them.
 #[derive(Clone, Copy)]
 struct Stamps<'a> {
     v: &'a [i64],
@@ -3103,8 +3170,8 @@ pub struct Watch {
     /// row before's ([`Watch::times`]).
     repeating: bool,
     /// Buffers kept from batch to batch, so a batch allocates nothing: each row's time in epoch
-    /// milliseconds, and the numeric columns not sent as doubles.
-    ms: Vec<i64>,
+    /// microseconds, and the numeric columns not sent as doubles.
+    us: Vec<i64>,
     converted: Vec<Vec<f64>>,
 }
 
@@ -3316,7 +3383,7 @@ impl Watch {
             candidates,
             numeric,
             need,
-            ms: Vec::new(),
+            us: Vec::new(),
         }
     }
 
@@ -3347,10 +3414,10 @@ impl Watch {
             return;
         }
         self.total += n as i64;
-        // The time, in epoch milliseconds as `epoch_ms` says it: truncated toward zero. A row
-        // without one keeps a 0 in `ms`, never read: `tnulls` says it has none.
-        let mut ms = std::mem::take(&mut self.ms);
-        ms.clear();
+        // The time, in epoch microseconds as `epoch_us` says it. A row without one keeps a 0 in
+        // `us`, never read: `tnulls` says it has none.
+        let mut us = std::mem::take(&mut self.us);
+        us.clear();
         let tnulls = match self.time.and_then(|t| cols[t].as_ref()) {
             Some(Held {
                 values: Values::Time { raw, up, down },
@@ -3361,10 +3428,10 @@ impl Watch {
                 // multiplication's check and the division are left out of that loop.
                 let scaled = |x: i64| Some(x.checked_mul(up)? / down);
                 let kept = match ((up, down) == (1, 1), self.repeating) {
-                    (true, false) => self.times::<false>(&raw[..n], *nulls, &mut ms, Some),
-                    (true, true) => self.times::<true>(&raw[..n], *nulls, &mut ms, Some),
-                    (false, false) => self.times::<false>(&raw[..n], *nulls, &mut ms, scaled),
-                    (false, true) => self.times::<true>(&raw[..n], *nulls, &mut ms, scaled),
+                    (true, false) => self.times::<false>(&raw[..n], *nulls, &mut us, Some),
+                    (true, true) => self.times::<true>(&raw[..n], *nulls, &mut us, Some),
+                    (false, false) => self.times::<false>(&raw[..n], *nulls, &mut us, scaled),
+                    (false, true) => self.times::<true>(&raw[..n], *nulls, &mut us, scaled),
                 };
                 if !kept {
                     self.ok = false;
@@ -3378,16 +3445,21 @@ impl Watch {
             }) => {
                 for (i, d) in raw[..n].iter().enumerate() {
                     if !valid(*nulls, i) {
-                        ms.push(0);
+                        us.push(0);
                         continue;
                     }
                     if *d == i32::MAX || *d == -i32::MAX {
                         self.ok = false;
                         return;
                     }
+                    // A date past what a timestamp holds (294,247 years), which the table's
+                    // `epoch_us(CAST(d AS TIMESTAMP))` cannot read either: the table is read.
+                    let Some(t) = (*d as i64).checked_mul(DAY_US) else {
+                        self.ok = false;
+                        return;
+                    };
                     self.time_hll.insert(murmur(*d as u32 as u64));
-                    let t = *d as i64 * DAY_MS;
-                    ms.push(t);
+                    us.push(t);
                     self.timed += 1;
                     self.first = Some(self.first.map_or(t, |f| f.min(t)));
                     self.last = Some(self.last.map_or(t, |l| l.max(t)));
@@ -3401,7 +3473,7 @@ impl Watch {
             None => None,
         };
         let has_time = self.time.is_some();
-        let time = |i: usize| (has_time && valid(tnulls, i)).then(|| ms[i]);
+        let time = |i: usize| (has_time && valid(tnulls, i)).then(|| us[i]);
         if !self.chosen {
             // One tally, not all: on the first batch, times that repeat say the table will be cut
             // into series, if a candidate was tallied. Times that do not are left to `order`,
@@ -3565,7 +3637,7 @@ impl Watch {
         let mut from = vec![0; self.candidates.len()];
         let null = key_words(NULL_PART.as_bytes());
         let stamps = has_time.then(|| Stamps {
-            v: &ms[..n],
+            v: &us[..n],
             nulls: tnulls,
         });
         for (ki, (c, examined, tally)) in self.keyed.iter_mut().enumerate() {
@@ -3709,19 +3781,19 @@ impl Watch {
         }
         drop(doubles);
         self.converted = converted;
-        self.ms = ms;
+        self.us = us;
     }
 
     /// A batch's timestamps, `raw` with validity `nulls`, each made microseconds by `us`: their
-    /// distinct count, extent and number, and each one's epoch milliseconds into `ms` (0 where
+    /// distinct count, extent and number, and each one's epoch microseconds into `out` (0 where
     /// there is none). `false` when one cannot be read exactly: it overflows, or it is one of
-    /// DuckDB's infinities, which `epoch_ms` makes null.
+    /// DuckDB's infinities, which `epoch_us` makes null.
     #[inline]
     fn times<const REPEATING: bool>(
         &mut self,
         raw: &[i64],
         nulls: Option<&duckdb::arrow::buffer::NullBuffer>,
-        ms: &mut Vec<i64>,
+        out: &mut Vec<i64>,
         us: impl Fn(i64) -> Option<i64>,
     ) -> bool {
         // The extent kept in locals, folded in once: an `Option` updated per row was most of
@@ -3733,10 +3805,10 @@ impl Watch {
         // repeat, the check alone cost 7 a row, so it is not made. `i64::MAX` is never a time
         // here.
         let mut before = i64::MAX;
-        ms.reserve(raw.len());
+        out.reserve(raw.len());
         for (i, x) in raw.iter().enumerate() {
             if !valid(nulls, i) {
-                ms.push(0);
+                out.push(0);
                 continue;
             }
             if *x == i64::MAX || *x == -i64::MAX {
@@ -3749,12 +3821,10 @@ impl Watch {
                 self.time_hll.insert(murmur(us as u64));
                 before = us;
             }
-            // As `epoch_ms` says it: truncated toward zero.
-            let t = us / 1000;
-            ms.push(t);
+            out.push(us);
             timed += 1;
-            lo = lo.min(t);
-            hi = hi.max(t);
+            lo = lo.min(us);
+            hi = hi.max(us);
         }
         if timed > 0 {
             self.timed += timed;
@@ -4043,7 +4113,7 @@ fn measure_step(
         let sql = format!(
             "SELECT d, count(*) FROM (SELECT t - lag(t) OVER (PARTITION BY k ORDER BY t) AS d \
                FROM (SELECT {k} AS k, {t} AS t FROM {f} \
-                     WHERE {raw} < {first} + to_milliseconds({width}))) \
+                     WHERE {raw} < {first} + to_microseconds({width}))) \
              WHERE d > 0 GROUP BY d ORDER BY count(*) DESC, d LIMIT 1",
             k = cx.k,
             t = cx.t,
@@ -4066,7 +4136,7 @@ fn measure_step(
 }
 
 /// How much of the table's first slice of time holds about [`STEP_SAMPLE_ROWS`] rows, in
-/// milliseconds, if rows are spread evenly.
+/// microseconds, if rows are spread evenly.
 fn sample_width(origin: i64, end: i64, total: i64) -> i64 {
     ((end - origin) as i128 * STEP_SAMPLE_ROWS as i128 / total.max(1) as i128)
         .clamp(1, i64::MAX as i128) as i64
@@ -4105,7 +4175,7 @@ fn step_share(
         "SELECT max(n)::DOUBLE, sum(n)::DOUBLE FROM (SELECT d, count(*) AS n FROM \
            (SELECT t - lag(t) OVER (PARTITION BY k ORDER BY t) AS d \
             FROM (SELECT {col} AS k, {t} AS t FROM {from} \
-                  WHERE {raw} < {first} + to_milliseconds({width}))) \
+                  WHERE {raw} < {first} + to_microseconds({width}))) \
          WHERE d IS NOT NULL GROUP BY d)"
     );
     let v = values(conn, &sql)?;
@@ -4718,7 +4788,7 @@ fn shared_moments(cx: &Ctx, measures: &[&Col], step: i64, clock: Clock) -> Vec<S
              SELECT g.t, CASE WHEN g.z = g.n THEN 0 ELSE 1 END AS kind, \
                g.s / ((a.s + b.s) / 2) AS ratio, total.c \
              FROM g CROSS JOIN total \
-               LEFT JOIN g a ON a.t = g.t - {DAY_MS} LEFT JOIN g b ON b.t = g.t + {DAY_MS} \
+               LEFT JOIN g a ON a.t = g.t - {DAY_US} LEFT JOIN g b ON b.t = g.t + {DAY_US} \
              WHERE (g.z = g.n AND g.n >= 3 AND g.n * 2 >= total.most) \
                 OR (g.z < g.n AND a.s > 0 AND b.s > 0 AND g.s > 0 \
                     AND (g.s >= 1.8 * greatest(a.s, b.s) OR g.s * 1.8 <= least(a.s, b.s))) \
@@ -4792,7 +4862,7 @@ fn word_moments(
                 clock.range(a, b),
                 count(n as u64, "time", "times")
             );
-            if b - a < 2 * 3_600_000 {
+            if b - a < 2 * 3_600_000_000 {
                 if let Some(c) = clock_change(a) {
                     l.push_str(&format!(" — {}, {c}", clock.at(a).get(..10).unwrap_or("")));
                 }
@@ -4957,7 +5027,7 @@ mod tests {
         let cx = Ctx {
             conn: &conn,
             from: "\"r\"".into(),
-            t: "epoch_ms(\"ts\")".into(),
+            t: "epoch_us(\"ts\")".into(),
             k: "coalesce(CAST(\"meter\" AS VARCHAR), chr(30))".into(),
         };
         let col = Col {
@@ -4968,7 +5038,7 @@ mod tests {
             zeros: 0,
         };
         let origin: i64 = conn
-            .query_row("SELECT min(epoch_ms(ts)) FROM r", [], |r| r.get(0))
+            .query_row("SELECT min(epoch_us(ts)) FROM r", [], |r| r.get(0))
             .unwrap();
         let step = 900_000;
         let clock = Clock(Kind::TimestampTz);
@@ -4987,11 +5057,11 @@ mod tests {
         let keys: Vec<String> = series.iter().map(|s| literal(&s.key)).collect();
         let all: Vec<usize> = (0..series.len()).collect();
         let picked = vec![true; series.len()];
-        let from_pass = runs_of(&flat[0], &picked, &series, DAY_MS);
+        let from_pass = runs_of(&flat[0], &picked, &series, DAY_US);
         assert!(from_pass.len() >= 4, "{from_pass:?}");
         assert_eq!(
             from_pass,
-            runs_sql(&cx, &keys, &key_steps(&series, &all), "kw", DAY_MS)
+            runs_sql(&cx, &keys, &key_steps(&series, &all), "kw", DAY_US)
         );
     }
 
@@ -5019,7 +5089,7 @@ mod tests {
         let cx = Ctx {
             conn: &conn,
             from: "\"h\"".into(),
-            t: "epoch_ms(\"ts\")".into(),
+            t: "epoch_us(\"ts\")".into(),
             k: "coalesce(CAST(\"k\" AS VARCHAR), chr(30))".into(),
         };
         let col = Col {
@@ -5030,7 +5100,7 @@ mod tests {
             zeros: 0,
         };
         let origin: i64 = conn
-            .query_row("SELECT min(epoch_ms(ts)) FROM h", [], |r| r.get(0))
+            .query_row("SELECT min(epoch_us(ts)) FROM h", [], |r| r.get(0))
             .unwrap();
         let step = 900_000;
         let mut series = pass(&cx, &[&col], Some(step), origin, true, false)
@@ -5057,14 +5127,14 @@ mod tests {
         }
         let keys: Vec<String> = series.iter().map(|s| literal(&s.key)).collect();
         let all: Vec<usize> = (0..series.len()).collect();
-        let found = stuck_sql(&cx, &keys, &key_steps(&series, &all), "v", DAY_MS);
+        let found = stuck_sql(&cx, &keys, &key_steps(&series, &all), "v", DAY_US);
         let held: std::collections::HashSet<&str> = found.iter().map(|f| f.0.as_str()).collect();
         for s in &series {
             if held.contains(s.key.as_str()) {
-                assert!(could_hold(s, 0, DAY_MS), "{} holds a value", s.key);
+                assert!(could_hold(s, 0, DAY_US), "{} holds a value", s.key);
             }
         }
-        let could = series.iter().filter(|s| could_hold(s, 0, DAY_MS)).count();
+        let could = series.iter().filter(|s| could_hold(s, 0, DAY_US)).count();
         assert!(
             !held.is_empty() && could < series.len(),
             "{} of {could}",
@@ -5442,7 +5512,7 @@ mod tests {
             );
             let seen = w.finish().expect("kept");
             let (_, _, tally) = seen.keyed.into_iter().next().expect("tallied");
-            let p = tally.finish(Some(60_000), t0 / 1000);
+            let p = tally.finish(Some(60_000_000), t0);
             let keys: Vec<&str> = p.series.iter().map(|s| s.key.as_str()).collect();
             // In the order `ORDER BY` puts text: by its bytes.
             let mut want = want;
@@ -5450,6 +5520,30 @@ mod tests {
             assert_eq!(keys, want, "{ty}");
             assert!(p.series.iter().all(|s| s.rows == rounds as i64), "{ty}");
         }
+    }
+
+    #[test]
+    fn an_ordered_series_is_regular_however_its_checksums_wrap() {
+        // #15: in microseconds the sum of a series' squared distances passes an i128 sooner,
+        // and wraps. A series whose times came in order is proven regular without it: here
+        // 1,000,000 rows about 11.6 days apart, whose squares sum to about 3e41, a stand-in
+        // for a per-second series of decades.
+        let (n, step) = (1_000_000i64, 1_000_000_000_000i64);
+        let mut s = Series {
+            rows: n,
+            timed: n,
+            first: Some(0),
+            last: Some((n - 1) * step),
+            ..Series::default()
+        };
+        for i in 0..n {
+            s.note(i * step);
+        }
+        assert!(s.ordered);
+        judge(&mut s, step, 0);
+        assert!(s.regular(step, 0));
+        // And the checksums did wrap: they do not fit.
+        assert!(!s.fits(step, 0));
     }
 
     #[test]

@@ -67,6 +67,30 @@ impl Decoded {
         }
         Ok(())
     }
+
+    /// What a batch's dictionary-encoded and view columns unpack to (`crate::exec`'s
+    /// `unpacked_size`), counted against the same bound as the bodies, which already hold the
+    /// keys, the views and the dictionary itself. One total, not two: each counted against the
+    /// bound on its own, a stream of some of each was let through at up to twice it — 1,000 rows
+    /// of an 800-byte text beside a dictionary column picking one 800-byte value, 818 KB of
+    /// bodies and 804 KB unpacked, attached under 1 MiB, measured (#14; REQ-13
+    /// `an_attachments_plain_and_unpacked_bytes_share_one_bound`). A dictionary's keys are so
+    /// counted twice, as the body that sent them and as the offsets they unpack to: at most
+    /// eight bytes a row more than the table holds, and the bound errs toward refusing.
+    pub fn add_unpacked(&mut self, n: u64) -> Result<(), Fault> {
+        self.bytes = self.bytes.saturating_add(n);
+        if self.bytes > self.max {
+            return Err(Fault::host(
+                "E_HOST_OVERSIZE",
+                format!(
+                    "the stream decodes to more than {} bytes, its bodies decompressed and its \
+                     dictionary-encoded and view columns unpacked",
+                    self.max
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// An I/O error from below, as the reader that raised it meant it: a cap, a cancellation, or the

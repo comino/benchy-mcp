@@ -1151,3 +1151,161 @@ fn a_stuck_value_inside_a_series_is_noted() {
     assert_eq!(seen[0], seen[1]);
     assert_eq!(seen[0], seen[2]);
 }
+
+/// #15's tables as CSV text: `fast`, one series of 20 rows 500 µs apart from 2026-01-01; `pair`,
+/// meters `a` and `b` at those times, `b` without its eleventh.
+fn sub_ms_csv() -> (String, String) {
+    let at = |i: i64| format!("2026-01-01 00:00:00.{:06}", i * 500);
+    let mut fast = String::from("ts,kw\n");
+    let mut pair = String::from("ts,meter,kw\n");
+    for i in 0..20 {
+        fast.push_str(&format!("{},{i}.5\n", at(i)));
+        for m in ["a", "b"] {
+            if !(m == "b" && i == 10) {
+                pair.push_str(&format!("{},{m},{i}.5\n", at(i)));
+            }
+        }
+    }
+    (fast, pair)
+}
+
+/// `rows` as an Arrow stream file `name.arrows` in `dir`: each row's step from 2026-01-01 in
+/// 500 µs, and its meter where it has one.
+fn sub_ms_stream(dir: &Path, name: &str, rows: &[(i64, Option<&str>)]) {
+    use arrow::array::{
+        ArrayRef, Float64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+    };
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+    let base = 1_767_225_600_000_000i64; // 2026-01-01T00:00:00Z
+    let ts = TimestampMicrosecondArray::from_iter_values(rows.iter().map(|r| base + r.0 * 500))
+        .with_timezone("UTC");
+    let mut fields = vec![Field::new(
+        "ts",
+        arrow::array::Array::data_type(&ts).clone(),
+        false,
+    )];
+    let mut cols: Vec<ArrayRef> = vec![Arc::new(ts)];
+    if rows[0].1.is_some() {
+        fields.push(Field::new("meter", DataType::Utf8, false));
+        cols.push(Arc::new(StringArray::from_iter_values(
+            rows.iter().map(|r| r.1.unwrap()),
+        )));
+    }
+    fields.push(Field::new("kw", DataType::Float64, false));
+    cols.push(Arc::new(Float64Array::from_iter_values(
+        rows.iter().map(|r| r.0 as f64 + 0.5),
+    )));
+    let b = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+    let mut buf = Vec::new();
+    {
+        let mut w = arrow::ipc::writer::StreamWriter::try_new(&mut buf, &b.schema()).unwrap();
+        w.write(&b).unwrap();
+        w.finish().unwrap();
+    }
+    std::fs::write(dir.join(format!("{name}.arrows")), buf).unwrap();
+}
+
+#[test]
+fn times_finer_than_a_millisecond_are_profiled_as_they_are() {
+    // #15: the profile read every time as epoch milliseconds. Rows 500 µs apart were "a row
+    // every 1 millisecond", half of them "a time already present", and the extent ended at
+    // `.009` where the last row is at `.0095`: three false facts. The profile reads
+    // microseconds, as the bench holds them, from a table read back, from files watched as
+    // they are written, and from a connector's stream.
+    let (fast, pair) = sub_ms_csv();
+    let dir = common::unique("sub-ms");
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("fast.csv"), &fast).unwrap();
+    std::fs::write(data.join("pair.csv"), &pair).unwrap();
+    let check = |what: &str, d: &str| {
+        for want in [
+            "time column ts (looks like it): 2026-01-01 00:00:00+00 to \
+             2026-01-01 00:00:00.0095+00; most rows are 500 microseconds apart",
+            "a row every 500 microseconds from first to last, none missing or repeated",
+            "most series have a row every 500 microseconds",
+            "1 gap, 1 row missing in all; the longest 500 microseconds (no rows after \
+             2026-01-01 00:00:00.0045+00 until 2026-01-01 00:00:00.0055+00)",
+        ] {
+            assert!(d.contains(want), "{what}: expected {want:?} in:\n{d}");
+        }
+        assert!(
+            !d.contains("a time already present") && !d.contains("millisecond"),
+            "{what}:\n{d}"
+        );
+    };
+
+    // Read back: tables written by SQL, which no watch saw.
+    let sql = format!(
+        "CREATE TABLE fast AS SELECT CAST(ts AS TIMESTAMPTZ) AS ts, kw FROM read_csv('{}');
+         CREATE TABLE pair AS SELECT CAST(ts AS TIMESTAMPTZ) AS ts, meter, kw
+           FROM read_csv('{}');",
+        data.join("fast.csv").display(),
+        data.join("pair.csv").display()
+    );
+    check(
+        "read back",
+        &recorded(&sql, &["fast", "pair"]).describe(4096),
+    );
+    // A time far from 1970 is said to the microsecond too: as a double, 9999-12-31 is held to
+    // 32 µs, and the extent was read as one.
+    let far = recorded(
+        "CREATE TABLE far AS SELECT * FROM (VALUES
+           (TIMESTAMPTZ '2026-01-01 00:00:00+00', 1.0),
+           (TIMESTAMPTZ '9999-12-31 23:59:59.999999+00', 2.0)) v(ts, kw);",
+        &["far"],
+    )
+    .describe(4096);
+    assert!(
+        far.contains("2026-01-01 00:00:00+00 to 9999-12-31 23:59:59.999999+00"),
+        "{far}"
+    );
+
+    let described = |s: &mut common::Server| {
+        let v = s.call("tools/call", json!({"name": "describe", "arguments": {}}));
+        v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // A folder of CSV files, watched as each is written.
+    let mut files = common::Server::start(&data, &[]);
+    check("files", &described(&mut files));
+
+    // A connector's stream for each table.
+    let one: Vec<(i64, Option<&str>)> = (0..20).map(|i| (i, None)).collect();
+    let two: Vec<(i64, Option<&str>)> = (0..20)
+        .flat_map(|i| [(i, Some("a")), (i, Some("b"))])
+        .filter(|r| !(r.0 == 10 && r.1 == Some("b")))
+        .collect();
+    sub_ms_stream(&dir, "fast", &one);
+    sub_ms_stream(&dir, "pair", &two);
+    let mut cfg = String::new();
+    for (name, keyed) in [("fast", false), ("pair", true)] {
+        let c = dir.join(format!("{name}.sh"));
+        let body = format!(
+            "#!/bin/sh\ncat '{}'\n",
+            dir.join(format!("{name}.arrows")).display()
+        );
+        std::fs::write(&c, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&c, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let meter = if keyed {
+            "[[source.schema]]\nname = \"meter\"\ntype = \"string\"\nnullable = false\n"
+        } else {
+            ""
+        };
+        cfg.push_str(&format!(
+            "[[source]]\nname = \"{name}\"\ntype = \"exec\"\ncommand = \"./{name}.sh\"\n\
+             [[source.schema]]\nname = \"ts\"\ntype = \"timestamptz\"\nnullable = false\n\
+             {meter}[[source.schema]]\nname = \"kw\"\ntype = \"float64\"\nnullable = false\n"
+        ));
+    }
+    let toml = dir.join("benchy.toml");
+    std::fs::write(&toml, cfg).unwrap();
+    let mut connector = common::Server::launch(&["--config", toml.to_str().unwrap()], &[]);
+    check("connector", &described(&mut connector));
+    let _ = std::fs::remove_dir_all(&dir);
+}

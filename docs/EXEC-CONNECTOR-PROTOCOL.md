@@ -153,7 +153,7 @@ dropped and counted in the operator log. `columns` and `params` are not re-appli
 | Limit | Default | On breach |
 |---|---|---|
 | rows per fetch | 10,000,000 | the load is refused, never truncated |
-| bytes per fetch | 256 MiB | the load is refused once the stream passes it — or once what it decodes to does: a compressed body counts what it decompresses to (a buffer whose stated size is past what is left is refused before it is decompressed), and a dictionary-encoded or view column what it unpacks to |
+| bytes per fetch | 256 MiB | the load is refused once the stream passes it — or once what it decodes to does: a compressed body counts what it decompresses to (a buffer whose stated size is past what is left is refused before it is decompressed), and a dictionary-encoded or view column what it unpacks to, all of it one total |
 | one stderr line | 64 KiB | the rest of the line is read and dropped; the log keeps the first 64 KiB |
 | wall time per fetch | 300 s | the process group is sent `SIGTERM`, then `SIGKILL` after the grace |
 | `describe` or `estimate` | 5 s | the same |
@@ -228,7 +228,8 @@ where it came from.
 - **Nanoseconds** are accepted, and checked in the data: the bench holds microseconds, so a value
   with sub-microsecond digits is refused, naming the column, rather than rounded.
 - **A dictionary** is unpacked into its values, and its unpacked size counts against the byte
-  limit as it arrives: a few bytes of keys can each name a long value. A dictionary may be large
+  limit as it arrives, added to what the stream's bodies decode to: a few bytes of keys can each
+  name a long value. A dictionary may be large
   and sent once; each batch costs only the keys it carries.
 - **A view** (`Utf8View`, `BinaryView`) counts the length each view states against the byte limit
   as it arrives: a view is 16 bytes whatever it points at, and many views may point at the same
