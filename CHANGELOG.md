@@ -6,6 +6,32 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+## [0.3.0] — 2026-10-20
+
+Hardening of the SQL boundary, a `describe` that is right about mixed and series-sorted data,
+opt-in engine threads, and release metadata. Still an experimental prototype: **some of these
+change what a session refuses or what an operator's config may hold**, so read "Changed
+behaviour" before upgrading. The host protocol is now 7 (`limits.threads`); 1–6 still work.
+
+Most important:
+
+- **A table function that changes the engine is refused** (#49). `SELECT * FROM
+  enable_logging(storage='file', …)` broke the session for good; every table function DuckDB
+  ships is now classified, and `query()` and `json_execute_serialized_sql` are refused
+  everywhere.
+- **A helper macro may not read a table** (#58). Write it as a view; the CTE checks it needed are
+  gone, and with them the false refusal of `query (` inside a string (#35) and a check that let
+  a batch through unread (#36).
+- **A `SELECT` with no `LIMIT` reads only the rows it keeps** (#53): a `SELECT *` over 10M rows
+  costs 23 M instructions instead of 0.63 G, and no longer puts the engine past its ceiling.
+- **`describe` judges each series at its own step** (#50), says alike notes once, shows every
+  table's shape first, notes a value held too long (#51), and reads times to the microsecond
+  (#15).
+- **`--threads N`** runs agent SQL on more threads, started after the sandbox confines the
+  engine (#56).
+- **Each release has `compat.json`, `--version --json` and per-bundle SBOMs** (#57), and a host
+  can read the timeouts and `--print-limits` (#29).
+
 Changed behaviour:
 
 - **The agent is told times are UTC** (#52). The session is pinned to UTC, and neither the
