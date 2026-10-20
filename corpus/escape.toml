@@ -421,9 +421,8 @@ allowlist = "pass"
 engine = "error"
 
 # SQL run from a string: DuckDB parses it only when it runs, and the string can be built then,
-# so no look at the batch reads it. It runs on the locked engine all the same. With helper
-# macros these are refused outright (`sql_run_from_a_string_is_refused_beside_helper_macros`);
-# without them they reach nothing more than the SQL written out.
+# so no look at the batch reads it. It runs on the locked engine all the same, and reaches
+# nothing more than the SQL written out.
 [[case]]
 sql = "SELECT * FROM query('SELECT * FROM read_text(''{canary}'')')"
 category = "string to SQL"

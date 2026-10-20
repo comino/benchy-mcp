@@ -389,9 +389,10 @@ const CATALOG_VIEWS: &CStr = c"SELECT view_name, coalesce(sql, '') \
 /// `SUMMARIZE`, `DESCRIBE`, `SHOW` and a system macro's or view's body. Measured, none of those
 /// calls one refused here but `PRAGMA extension_versions`, which reads `duckdb_extensions()` and
 /// is refused by the lock, and a system view whose body calls one is refused by its name
-/// ([`REFUSED_VIEWS`]). So the check errs one way only: a refused name in a string literal or a
-/// comment is refused too, and a name joined to another by `$` or a non-ASCII letter, which
-/// DuckDB reads as one identifier, is read here as a word of its own.
+/// ([`REFUSED_VIEWS`]). A string literal's text is no call, and is not read ([`code`]): a
+/// refused name in one is only a string (#35). Elsewhere the check errs one way only: a refused
+/// name in a comment or a quoted name is refused too, and a name joined to another by `$` or a
+/// non-ASCII letter, which DuckDB reads as one identifier, is read here as a word of its own.
 pub struct Calls {
     /// Folded name to why.
     functions: std::collections::HashMap<String, &'static str>,
@@ -444,7 +445,7 @@ impl Calls {
             .iter()
             .filter_map(|(name, sql)| {
                 calls
-                    .first(&sql.to_ascii_lowercase())
+                    .first(&code(sql).to_ascii_lowercase())
                     .map(|(_, why)| (name.to_ascii_lowercase(), why))
             })
             .collect();
@@ -499,7 +500,7 @@ impl Calls {
                  no query. Nothing ran."
             ));
         }
-        let (name, why) = self.first(&sql.to_ascii_lowercase())?;
+        let (name, why) = self.first(&code(sql).to_ascii_lowercase())?;
         Some(if self.views.contains_key(&name) {
             format!("`{name}` is not available here: it {why}. Nothing ran.")
         } else {
@@ -539,6 +540,127 @@ impl Calls {
             }
         }
         None
+    }
+}
+
+/// `sql` with the text of each string literal blanked, as DuckDB 1.5.5's lexer reads them
+/// (`the_literals_the_check_skips_are_duckdbs`): `'…'`, where `''` is a quote and a backslash
+/// is itself; `E'…'`, where a backslash also escapes the character after it; and `$tag$…$tag$`,
+/// the tag empty or a name, its case kept. Each is found only where DuckDB would start one: not
+/// inside a comment (`--` to a line's end, `/* … */` nested) or a quoted name (`"…"`, `""` a
+/// quote), whose text is left to be read, and not within a word, which DuckDB continues with
+/// `$` (`x$a$` is a name) and in which a final `E` is no prefix (`xE'…'` is a plain string).
+///
+/// Wherever this could part from DuckDB it errs towards reading more: a word starting with a
+/// digit is read through any `$`, as a name is, so a dollar quote after a number is read as
+/// text; and a literal, a quoted name or a comment that does not end leaves everything from
+/// there on to be read, though DuckDB will not parse the batch at all. A literal is blanked to
+/// spaces, its quotes and prefix with it, so a name never runs into its neighbour.
+fn code(sql: &str) -> String {
+    let b = sql.as_bytes();
+    let mut out = b.to_vec();
+    // What continues a word in DuckDB's lexer.
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
+    let tag = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+    let at = |i: usize, s: &[u8]| b[i..].starts_with(s);
+    let mut i = 0;
+    while i < b.len() {
+        // Where a literal starts, and the quote that closes it.
+        let start = i;
+        let end = match b[i] {
+            b'-' if at(i, b"--") => {
+                match b[i..].iter().position(|c| matches!(c, b'\n' | b'\r')) {
+                    Some(n) => i += n,
+                    None => break,
+                }
+                continue;
+            }
+            b'/' if at(i, b"/*") => {
+                let mut depth = 0usize;
+                loop {
+                    if i >= b.len() {
+                        return String::from_utf8_lossy(&out).into_owned();
+                    }
+                    if at(i, b"/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if at(i, b"*/") {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            // To the next `"`: a `""` inside closes one quoted name and opens the next, which
+            // reads the same as one name holding a quote.
+            b'"' => match b[i + 1..].iter().position(|c| *c == b'"') {
+                Some(n) => {
+                    i += n + 2;
+                    continue;
+                }
+                None => break,
+            },
+            b'\'' => quoted(b, i + 1, false),
+            b'e' | b'E' if b.get(i + 1) == Some(&b'\'') => quoted(b, i + 2, true),
+            b'$' => {
+                let mut j = i + 1;
+                if b.get(j).is_some_and(|c| tag(*c) && !c.is_ascii_digit()) {
+                    while b.get(j).is_some_and(|c| tag(*c)) {
+                        j += 1;
+                    }
+                }
+                if b.get(j) != Some(&b'$') {
+                    i += 1;
+                    continue;
+                }
+                let delim = &b[i..=j];
+                let body = j + 1;
+                match b[body..].windows(delim.len()).position(|w| w == delim) {
+                    Some(n) => {
+                        let past = body + n + delim.len();
+                        out[i..past].fill(b' ');
+                        i = past;
+                        continue;
+                    }
+                    None => return String::from_utf8_lossy(&out).into_owned(),
+                }
+            }
+            c if word(c) => {
+                while b.get(i).is_some_and(|c| word(*c)) {
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let Some(end) = end else {
+            break;
+        };
+        out[start..=end].fill(b' ');
+        i = end + 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Where the `'…'` literal whose text starts at `from` closes: `''` is a quote, and with
+/// `escapes`, as in `E'…'`, a backslash takes the byte after it. `None` if it does not close.
+fn quoted(b: &[u8], from: usize, escapes: bool) -> Option<usize> {
+    let mut i = from;
+    loop {
+        match b.get(i)? {
+            b'\\' if escapes => i += 2,
+            b'\'' if b.get(i + 1) == Some(&b'\'') => i += 2,
+            b'\'' => return Some(i),
+            _ => i += 1,
+        }
     }
 }
 
@@ -612,7 +734,6 @@ mod tests {
             "PRAGMA json_execute_serialized_sql('{}')",
             "SELECT count(*) FROM duckdb_logs",
             "SELECT count(*) FROM system.main.\"DUCKDB_LOGS\"",
-            "SELECT 'checkpoint()'",
             "SELECT * FROM x$checkpoint()",
             "SELECT * FROM écheckpoint()",
             "SELECT * FROM checkpoint[1]",
@@ -685,6 +806,100 @@ mod tests {
         let unread = Calls::for_version("v9.9.9", || Err("no".into()));
         let e = unread.check("SELECT 1").expect("refused");
         assert!(e.contains("(no)") && e.contains("Nothing ran"), "{e}");
+    }
+
+    #[test]
+    fn a_refused_name_in_a_string_literal_is_only_a_string() {
+        // #35: a literal's text is no call. Each form as DuckDB 1.5.5 lexes it, measured
+        // (`the_literals_the_check_skips_are_duckdbs`).
+        let calls = Calls::measured();
+        for sql in [
+            "SELECT 'checkpoint()' AS v",
+            "SELECT 'it''s checkpoint()' AS v",
+            "SELECT 'duckdb_logs' AS v",
+            "SELECT x'41', 'a\\', 'checkpoint()' AS v",
+            "SELECT E'it\\'s checkpoint()' AS v",
+            "SELECT e'a''checkpoint() \\\\' AS v",
+            "SELECT E'\\\\\\' checkpoint()' AS v",
+            "SELECT $$checkpoint()$$ AS v",
+            "SELECT $$it's checkpoint()$$ AS v",
+            "SELECT $t$a$$checkpoint()$t$ AS v",
+            "SELECT $A$x$a$checkpoint()$A$ AS v",
+            "SELECT $é$checkpoint()$é$ AS v",
+            "SELECT $_1$checkpoint()$_1$ AS v",
+            "SELECT \"x\", $$checkpoint()$$, 'query(1)' AS v",
+            "SELECT 'a' AS \"it's\", 'checkpoint()' AS v",
+            "SELECT 1 -- it's\n, 'checkpoint()' AS v",
+            "SELECT 1 /* it's */, 'checkpoint()' AS v",
+            // a lone `-` or `/` starts no comment
+            "SELECT 'checkpoint()''' AS v",
+            "SELECT 1-1, 'checkpoint()' AS v",
+            "SELECT 4/2, 'checkpoint()' AS v",
+            // a dollar quote's text may start with what ends its tag
+            "SELECT $a$a$ checkpoint() $a$ AS v",
+            // in `E'…'`, a backslash after a `''` still escapes
+            "SELECT E'a''b\\'checkpoint()' AS v",
+        ] {
+            assert_eq!(calls.check(sql), None, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_refused_call_beside_a_literal_is_refused() {
+        // Where the text after a literal, or what only looks like one, is code, it is read; and
+        // what does not end is read to the end.
+        let calls = Calls::measured();
+        for sql in [
+            // right after each form
+            "SELECT 'a'||checkpoint()",
+            "SELECT 'it''s', checkpoint()",
+            "SELECT E'a\\'b', checkpoint()",
+            "SELECT E'a\\\\', checkpoint()",
+            "SELECT E'\\'', checkpoint(), 'x'",
+            // a refused call whose argument is a literal
+            "SELECT * FROM checkpoint('x')",
+            "SELECT * FROM checkpoint(E'x')",
+            "SELECT * FROM checkpoint($$x$$)",
+            "SELECT $$a$$, checkpoint()",
+            "SELECT $t$a$t$, checkpoint()",
+            // a backslash ends no plain literal, nor one whose `E` ends a word
+            "SELECT 'a\\', checkpoint(), 'b'",
+            "SELECT xE'a\\', checkpoint(), 'b'",
+            "SELECT 1E'a\\', checkpoint(), 'b'",
+            "SELECT éE'a\\', checkpoint(), 'b'",
+            // `$` inside a word, or after a number, starts no dollar quote
+            "SELECT 1 AS x$a$, checkpoint() AS y, 1 AS z$a$",
+            "SELECT 1 AS é$a$, checkpoint() AS y, 1 AS z$a$",
+            "SELECT 1$a$, checkpoint(), $a$",
+            "SELECT $1, checkpoint()",
+            "SELECT $1a$, checkpoint(), $1a$",
+            // a dollar tag keeps its case
+            "SELECT $A$a$a$, checkpoint()",
+            // a quote inside a comment or a quoted name opens no literal
+            "SELECT 1 -- it's\n, checkpoint() --'",
+            "SELECT 1 -- it's\r, checkpoint() --'",
+            "SELECT 1 /* it's */, checkpoint() /* ' */",
+            "SELECT 1 /* /* */ ' */, checkpoint() /* ' */",
+            "SELECT \"a'b\", checkpoint(), 'c'",
+            "SELECT \"a\"\"'\", checkpoint(), 'c'",
+            "SELECT \"$a$\", checkpoint(), '$a$'",
+            // a name in a comment or a quoted name is still read
+            "SELECT 1 /* checkpoint() */",
+            "SELECT 1 -- checkpoint()",
+            "SELECT 1 -- it's checkpoint() '",
+            // a word that only starts with `e` starts no `E'…'`
+            "SELECT 1 AS ex, checkpoint(), 'a'",
+            "SELECT \"checkpoint\"()",
+            // what does not end is read to the end
+            "SELECT 'checkpoint()",
+            "SELECT E'\\'checkpoint()",
+            "SELECT $$checkpoint()",
+            "SELECT $a$checkpoint()$A$",
+            "SELECT \"x, checkpoint()",
+            "SELECT 1 /* /* */ checkpoint()",
+        ] {
+            assert!(calls.check(sql).is_some(), "{sql:?}");
+        }
     }
 
     #[test]

@@ -1299,3 +1299,63 @@ fn the_table_function_allowlist_does_what_the_corpus_says() {
         "the corpus cases the table-function allowlist refuses"
     );
 }
+
+#[test]
+fn the_literals_the_check_skips_are_duckdbs() {
+    // REQ-2 and #35: the table-function check does not read a string literal's text
+    // (`guard::code`). Held to DuckDB 1.5.5's own parse: what it skips, DuckDB reads as a string
+    // and calls nothing in; what it reads after a literal, or after what only looks like one,
+    // DuckDB reads as a call. A form DuckDB does not parse at all runs nothing either way.
+    let c = locked_engine();
+    let parse = |sql: &str| -> String {
+        c.query_row("SELECT json_serialize_sql($1::VARCHAR)", [sql], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
+    };
+    let calls = benchy_mcp::guard::Calls::measured();
+    let call = "\"function_name\":\"checkpoint\"";
+    for sql in [
+        "SELECT 'it''s checkpoint()' AS v",
+        "SELECT 'a\\' AS w, 'checkpoint()' AS v",
+        "SELECT E'it\\'s checkpoint()' AS v",
+        "SELECT e'a''checkpoint() \\\\' AS v",
+        "SELECT $$it's checkpoint()$$ AS v",
+        "SELECT $t$a$$checkpoint()$t$ AS v",
+        "SELECT $A$x$a$checkpoint()$A$ AS v",
+        "SELECT $é$checkpoint()$é$ AS v",
+        "SELECT 1 -- it's\n, 'checkpoint()' AS v",
+        "SELECT 1 /* /* */ it's */, 'checkpoint()' AS v",
+        "SELECT 'checkpoint()''' AS v",
+        "SELECT 1-1 AS w, 4/2 AS x, 'checkpoint()' AS v",
+        "SELECT $a$a$ checkpoint() $a$ AS v",
+        "SELECT E'a''b\\'checkpoint()' AS v",
+    ] {
+        let j = parse(sql);
+        assert!(
+            j.starts_with("{\"error\":false") && j.contains("checkpoint()"),
+            "{sql}: {j}"
+        );
+        assert!(!j.contains(call), "{sql}: DuckDB reads a call: {j}");
+        assert_eq!(calls.check(sql), None, "{sql}");
+    }
+    for sql in [
+        "SELECT 'it''s' AS v, checkpoint() AS w",
+        "SELECT 'a\\' AS v, checkpoint() AS w, 'b' AS x",
+        "SELECT xE'a\\' AS v, checkpoint() AS w, 'b' AS x",
+        "SELECT E'a\\'b' AS v, checkpoint() AS w",
+        "SELECT E'\\'' AS v, checkpoint() AS w, 'x' AS y",
+        "SELECT 1 AS ex, checkpoint() AS w, 'a' AS y",
+        "SELECT $$a$$ AS v, checkpoint() AS w",
+        "SELECT 1 AS x$a$, checkpoint() AS y, 1 AS z$a$",
+        "SELECT 1 AS é$a$, checkpoint() AS y, 1 AS z$a$",
+        "SELECT 1 -- it's\n, checkpoint() --'",
+        "SELECT 1 -- it's\r, checkpoint() --'",
+        "SELECT 1 /* /* */ ' */, checkpoint() /* ' */",
+        "SELECT \"a'b\", checkpoint(), 'c' FROM (SELECT 1 AS \"a'b\")",
+    ] {
+        let j = parse(sql);
+        assert!(j.contains(call), "{sql}: DuckDB reads no call: {j}");
+        assert!(calls.check(sql).is_some(), "{sql}");
+    }
+}

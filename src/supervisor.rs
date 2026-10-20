@@ -612,9 +612,6 @@ pub struct Supervisor {
     /// (`the_tables_helpers_read_stay_taken_across_a_rebuild`), and never shrunk: a detach takes
     /// the table off the bench, not out of the helper's SQL.
     helper_reads: std::collections::BTreeSet<String>,
-    /// Of those, what a helper macro has read (`crate::helpers::Built::macro_reads`): names no
-    /// CTE of the agent's may take. Kept and never shrunk for the same reasons.
-    helper_macro_reads: std::collections::BTreeSet<String>,
     /// What the engine's texts call the agent's tools: a host's names, from its `hello`, sent
     /// with every request that makes text (`crate::tools`).
     tool_names: crate::tools::Names,
@@ -673,7 +670,6 @@ impl Supervisor {
             helpers: Vec::new(),
             helpers_built: None,
             helper_reads: Default::default(),
-            helper_macro_reads: Default::default(),
             tool_names: crate::tools::Names::new(),
             channel: None,
             channel_closed: None,
@@ -1069,8 +1065,6 @@ impl Supervisor {
             return Ok(built);
         };
         self.helper_reads.extend(built.reads.iter().cloned());
-        self.helper_macro_reads
-            .extend(built.macro_reads.iter().cloned());
         if let Err(e) = self.install_helpers(&stored, &built.shown) {
             let _ = std::fs::remove_file(&stored);
             return Err(e);
@@ -1098,7 +1092,6 @@ impl Supervisor {
             file: link.display().to_string(),
             shown: shown.to_vec(),
             reads: self.helper_reads.iter().cloned().collect(),
-            macro_reads: self.helper_macro_reads.iter().cloned().collect(),
         };
         let reply = self.exchange(&req, Duration::from_secs(60));
         let _ = std::fs::remove_file(&link);

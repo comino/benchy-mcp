@@ -35,7 +35,8 @@ Things worth asking an agent to try:
 
 [`benchy.toml`](benchy.toml) serves the same two files, the [`connectors/hello.sh`](connectors/hello.sh)
 connector as a third table, `readings`, and the SQL helpers in [`helpers.sql`](helpers.sql): an
-`hourly` view and the `dewpoint` and `hours_above` macros, which `describe` lists. The config
+`hourly` and `reading_spans` views and the `dewpoint` and `hours_of` macros, which `describe`
+lists. The config
 documents every key inline.
 
 ## A host

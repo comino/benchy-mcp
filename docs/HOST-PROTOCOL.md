@@ -637,7 +637,7 @@ yet, and fixed for the session:
   reading a file, the network or an extension, keeping an ENUM (the agent may keep none, for the
   memory DuckDB does not count), or not a view or a macro — stops startup, and the reason goes to
   stderr.
-- A helper, view or macro, that reads a table not attached yet **waits** for it. `describe`
+- A helper view that reads a table not attached yet **waits** for it. `describe`
   lists it with what it waits for, a query naming it says so (`E_SQL`), and the attach of that
   table makes it; the operator's log says what still waits.
 - **After a detach**, a helper made over that table stays made: `describe` lists it as before,
@@ -651,43 +651,18 @@ yet, and fixed for the session:
   lasts: the agent can give no table or view of its own that name, before the first attach or
   after a detach. So a helper never reads the agent's rows in place of the host's, and the
   host's attach of the table is never refused for an object of the agent's. The tables come
-  from DuckDB, not from benchy reading the SQL: a view's bound plan, a macro's body as DuckDB's
-  parser reads it, and the table a waiting helper waits for. So a helper names its tables in
-  FROM: one that reads a table named in a string (`query_table('readings')`, `query(…)`,
-  `pragma_table_info(…)`, `duckdb_table_sample(…)`) stops startup, except a view over `query` or
+  from DuckDB, not from benchy reading the SQL: a view's bound plan, and the table a waiting
+  helper waits for. So a view names its tables in FROM: one that reads a table named in a string
+  (`pragma_table_info(…)`, `duckdb_table_sample(…)`) stops startup, except a view over `query` or
   `query_table`, whose bound plan holds the table.
-- **No CTE of the agent's takes a table a helper macro reads.** DuckDB 1.5.5 expands a macro,
-  table or scalar, inside the caller's query, so a table its body names binds to a CTE of the
-  caller's of that name: `WITH readings AS (…) SELECT * FROM meter_rows('m1')` made the helper
-  read the CTE, with `ok: true`, and so did `MERGE … USING (WITH readings AS …)`. So a batch
-  that calls a helper macro, with a CTE named like a table or helper view that a helper macro
-  reads, ASCII case folded, is refused before anything runs (`E_SQL`), and says which call it is
-  and to pick another CTE name. A batch calls one when it names, as a word, a helper macro, a
-  macro of the agent's that calls one at any depth, or `view`, `macro` or `function`: a view or
-  macro whose body holds the CTE reads it through any macro the body calls, once that macro is
-  replaced by one that calls a helper
-  (`a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`). That holds at any
-  depth (nested, in a subquery, `WITH RECURSIVE`) and in every statement the agent may run: a
-  SELECT, PIVOT or UNPIVOT; a CREATE TABLE AS, CREATE VIEW or CREATE MACRO; an INSERT's query or
-  VALUES; an UPDATE's SET, FROM or WHERE; a DELETE's USING or WHERE; a MERGE's USING, ON,
-  conditions and actions; and a WITH ahead of an INSERT, UPDATE, DELETE, MERGE or PIVOT
-  (`a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads`,
-  `a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`). Every other CTE,
-  and every CTE of a batch that calls no helper macro, is the agent's (`WITH data AS`, `WITH
-  hourly AS`), and what only views read is not taken from a CTE: a view is bound in its own
-  context and reads the table. With helper macros, a batch that may call `query` or
-  `json_execute_serialized_sql` is refused (`E_SQL`): the SQL in their string is parsed only when
-  it runs, and can be built then, so it is read by nothing beforehand
-  (`sql_run_from_a_string_is_refused_beside_helper_macros`); `query_table` stays. The names come from
-  DuckDB's parser (`json_serialize_sql`), which serializes SELECTs alone: in a batch that also
-  holds another statement, benchy gives DuckDB the text from each WITH and cuts it where
-  DuckDB's syntax error says the query ends, or at a `;` or the statement keyword after the
-  CTEs. A whole WITH query written inside a string of such a statement, under one of those
-  names, is refused too, and a batch that would take more than 64 parses is refused with "send
-  it as several smaller batches" rather than let through unread. The cost is nothing without
-  helper macros; with them, a look at the batch's text for a WITH and one of those names, and
-  parses only when both are there (docs/PERFORMANCE.md, "A CTE named like a table a helper
-  macro reads").
+- **A helper macro reads no table.** DuckDB 1.5.5 expands a macro, table or scalar, inside the
+  caller's query, so a table its body names binds to a CTE of the caller's of that name, with
+  `ok: true`; a view is bound on its own and reads the table. So a helper macro whose body reads
+  a table, a helper view, or a table function other than `range`, `generate_series` and
+  `unnest`, or calls a helper macro that does, stops startup, and the reason says to write it as
+  a view (`a_helper_macro_that_reads_a_table_is_refused_at_startup`). The body is read as
+  DuckDB's parser serializes it, and what benchy cannot read counts as reading a table. No CTE of
+  the agent's, then, changes a helper's answer, and the agent's SQL is not looked at for one.
 - DuckDB names a waiting helper's missing tables **one at a time**: a view over `readings` and
   `weather` waits for `readings`, and says it reads `weather` only once `readings` is attached.
   `weather` is taken from then on. If the agent made a `weather` of its own before that, the

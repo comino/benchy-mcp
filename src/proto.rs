@@ -42,14 +42,11 @@ pub enum Request {
     /// engine unlinks it once attached. `shown` is every helper, made or waiting, as `describe`
     /// lists it: the file must hold exactly the ones made. `reads` is every table a helper has
     /// read this session (`crate::helpers::Built::reads`), which the agent may not name an
-    /// object of its own after, on the bench or not. `macro_reads` is what of it a helper macro
-    /// read (`crate::helpers::Built::macro_reads`), which no CTE of the agent's may be named.
+    /// object of its own after, on the bench or not.
     Helpers {
         file: String,
         shown: Vec<crate::helpers::Shown>,
         reads: Vec<String>,
-        #[serde(default)]
-        macro_reads: Vec<String>,
     },
     Describe {
         budget: usize,

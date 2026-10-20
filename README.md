@@ -249,8 +249,8 @@ A source that fails to load costs only its own table: the session starts with th
 
 **SQL helpers.** An operator, or an integrator deploying benchy for a host, can give the agent
 views and macros of its own, which it calls like built-ins: a `daily` view, `dewpoint(t, rh)`,
-`hours_above(series_id, threshold, start_at, end_at)`. They go in the config, for a server and
-for `host --config` alike, and are fixed for the session; no tool or protocol call adds one:
+`hours_of(start_at, end_at)`. They go in the config, for a server and for `host --config`
+alike, and are fixed for the session; no tool or protocol call adds one:
 
 ```toml
 [helpers]
@@ -260,8 +260,13 @@ file = "helpers.sql"     # CREATE VIEW and CREATE MACRO statements; or `sql = ""
 `describe` lists each with its signature and the `--` comment above it. The agent cannot drop,
 change or shadow one, nor give anything of its own the name of a table a helper reads, and a
 helper named like a built-in or a word DuckDB's parser reads itself, or one that reads a file
-or names a table in a string (`query_table('readings')`), stops startup. A helper over a table a host has not attached yet says so until it is.
-[`examples/helpers.sql`](examples/helpers.sql) has three for the bundled data, and
+or names a table in a string (`query_table('readings')`), stops startup. **A helper macro reads
+no table**: DuckDB expands a macro inside the caller's query, where a CTE of the caller's named
+like the table would stand in for it, so a macro whose body reads one stops startup too, and
+what reads a table is written as a view the agent filters. A macro computes from its arguments,
+with `range`, `generate_series`, `unnest` or VALUES for a table macro. A view over a table a
+host has not attached yet says so until it is.
+[`examples/helpers.sql`](examples/helpers.sql) has four for the bundled data, and
 [REQ-18](REQUIREMENTS.md#req-18--helpers-the-operator-provides) the rules.
 
 ## Contained

@@ -116,158 +116,6 @@ struct Taken {
     /// helper reads once the host's table is away. Not a host's to avoid: attaching one is how
     /// the helper gets its table.
     reads: std::collections::HashSet<String>,
-    /// What a helper macro reads (`crate::helpers::Built::macro_reads`), which no CTE of the
-    /// agent's may be named (`Workspace::cte_stands_in`). Empty without helper macros, and then
-    /// no query pays anything for it.
-    ctes: std::collections::HashSet<String>,
-    /// The agent's macros that call a helper macro, at any depth, by folded name, as last read
-    /// from the catalog (`Workspace::calls_a_helper`); `None` once a batch may have made or
-    /// dropped one, so the next look reads them again.
-    reaching: Option<std::collections::HashSet<String>>,
-    /// Whether a batch has come past the statement check on this engine: before one has, the
-    /// agent's catalog is the fresh one an engine starts with, and holds no macro.
-    worked: bool,
-}
-
-/// Whether the word `w` starts at byte `at` of `text`: not inside a name like `withdrawn` or
-/// `my_with`. In bytes, since `at` need not start a character. Only ASCII letters, digits and `_`
-/// continue a word here; DuckDB's lexer also continues one with `$` and non-ASCII bytes, so this
-/// finds a word wherever DuckDB would, and in a few places it would not.
-fn word_at(text: &str, at: usize, w: &str) -> bool {
-    let b = text.as_bytes();
-    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    b[at..].starts_with(w.as_bytes())
-        && (at == 0 || !ident(b[at - 1]))
-        && b.get(at + w.len()).is_none_or(|c| !ident(*c))
-}
-
-/// Whether the folded text `text` names `w` as a word anywhere.
-fn names_word(text: &str, w: &str) -> bool {
-    text.match_indices(w).any(|(at, _)| word_at(text, at, w))
-}
-
-/// Whether the folded text `text` may call the function `f`: `f` as a word, then, past a closing
-/// `"` and ASCII white space, a `(`. Whatever might hide the `(` from this look, a comment or a
-/// byte DuckDB reads differently, counts as a call; a call needs its name in the text, since
-/// DuckDB has no other spelling of an identifier (`U&"…"` is not implemented on 1.5.5).
-fn may_call(text: &str, f: &str) -> bool {
-    text.match_indices(f).any(|(at, _)| {
-        if !word_at(text, at, f) {
-            return false;
-        }
-        let rest = &text.as_bytes()[at + f.len()..];
-        let rest = rest.strip_prefix(b"\"").unwrap_or(rest);
-        match rest.iter().find(|c| !c.is_ascii_whitespace()) {
-            Some(c) => matches!(c, b'(' | b'/' | b'-') || !c.is_ascii(),
-            None => false,
-        }
-    })
-}
-
-/// DuckDB 1.5.5's table functions that run SQL given as a string, measured: `query('…')`, and
-/// `json_execute_serialized_sql(…)`, which runs what `json_serialize_sql` made and reaches a
-/// helper by its catalog's name. The string can be built while the batch runs, so no look at
-/// the batch beforehand reads it (`sql_run_from_a_string_is_refused_beside_helper_macros`).
-/// `query_table` is not among them: it reads a table the string names, never a query.
-const RUNS_A_STRING: &[&str] = &["query", "json_execute_serialized_sql"];
-
-/// The words that make a view or a macro, whose body keeps a CTE written in it: `CREATE [OR
-/// REPLACE] [TEMP] VIEW`, `CREATE MACRO` and its spelling `CREATE FUNCTION`. Nothing else the
-/// agent may write keeps a query: DuckDB 1.5.5 refuses a subquery, and with it a macro's, in a
-/// DEFAULT, a CHECK, a generated column and an index expression, measured.
-const KEEPS_A_BODY: &[&str] = &["view", "macro", "function"];
-
-/// The agent's macros, in any schema, and each body as DuckDB keeps it.
-const AGENT_MACRO_BODIES: &CStr = c"SELECT 0, function_name, coalesce(macro_definition, '') \
-      FROM system.main.duckdb_functions() WHERE database_name IN ('temp', 'memory')";
-
-/// The names of the CTEs in a statement DuckDB parsed (`json_serialize_sql`), at any depth: each
-/// `cte_map`'s keys, in a CTE, a subquery, an expression.
-fn cte_names(v: &serde_json::Value, out: &mut Vec<String>) {
-    match v {
-        serde_json::Value::Object(o) => {
-            if let Some(map) = o.get("cte_map").and_then(|m| m["map"].as_array()) {
-                out.extend(
-                    map.iter()
-                        .filter_map(|e| e["key"].as_str().map(str::to_string)),
-                );
-            }
-            o.values().for_each(|x| cte_names(x, out));
-        }
-        serde_json::Value::Array(a) => a.iter().for_each(|x| cte_names(x, out)),
-        _ => {}
-    }
-}
-
-/// The most parses one batch's CTE check asks of DuckDB (`Workspace::cte_stands_in`). A WITH
-/// takes one to three, and a parse is some tens of microseconds; a batch that needs more than
-/// this is refused, not let through unread
-/// (`a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`).
-const CTE_PARSES: u32 = 64;
-
-/// What DuckDB's parser made of a text given to `json_serialize_sql`.
-enum Parsed {
-    /// SELECTs, serialized.
-    Select(serde_json::Value),
-    /// A syntax error at this byte: the query DuckDB could read ends before it.
-    StopsAt(usize),
-    /// Statements DuckDB read whole, not all of them SELECTs.
-    NotSelect,
-    /// Anything else.
-    Fails,
-}
-
-/// A statement of one parameter prepared on a raw connection, destroyed when dropped.
-struct Prepared(ffi::duckdb_prepared_statement);
-
-impl Prepared {
-    fn new(con: ffi::duckdb_connection, sql: &CStr) -> Option<Prepared> {
-        let mut p: ffi::duckdb_prepared_statement = ptr::null_mut();
-        unsafe {
-            if ffi::duckdb_prepare(con, sql.as_ptr(), &mut p) != ffi::duckdb_state_DuckDBSuccess {
-                ffi::duckdb_destroy_prepare(&mut p);
-                return None;
-            }
-        }
-        Some(Prepared(p))
-    }
-
-    /// The first row's first value as text, `arg` bound to the parameter.
-    fn text_of(&self, arg: &str) -> Option<String> {
-        unsafe {
-            let bound = ffi::duckdb_bind_varchar_length(
-                self.0,
-                1,
-                arg.as_ptr() as *const std::os::raw::c_char,
-                arg.len() as ffi::idx_t,
-            );
-            if bound != ffi::duckdb_state_DuckDBSuccess {
-                return None;
-            }
-            let mut r: ffi::duckdb_result = std::mem::zeroed();
-            let ran =
-                ffi::duckdb_execute_prepared(self.0, &mut r) == ffi::duckdb_state_DuckDBSuccess;
-            let out = if ran
-                && ffi::duckdb_row_count(&mut r) > 0
-                && !ffi::duckdb_value_is_null(&mut r, 0, 0)
-            {
-                let v = ffi::duckdb_value_varchar(&mut r, 0, 0);
-                let s = CStr::from_ptr(v).to_string_lossy().into_owned();
-                ffi::duckdb_free(v as *mut std::ffi::c_void);
-                Some(s)
-            } else {
-                None
-            };
-            ffi::duckdb_destroy_result(&mut r);
-            out
-        }
-    }
-}
-
-impl Drop for Prepared {
-    fn drop(&mut self) {
-        unsafe { ffi::duckdb_destroy_prepare(&mut self.0) }
-    }
 }
 
 /// What DuckDB itself names in the function namespace (`Taken::builtin`).
@@ -1619,9 +1467,6 @@ impl Workspace {
             }
             Verdict::Allow(_) => {}
         }
-        if let Some(why) = self.cte_stands_in(sql) {
-            return Err(WorkError::Taken(why));
-        }
         // REQ-7: one watchdog for the whole batch. Proven in probe 2 — an execution-phase
         // runaway is cancelled and the workspace survives with its tables intact.
         // A condvar rather than a polling sleep, for two reasons.
@@ -1800,9 +1645,36 @@ impl Workspace {
                         break;
                     }
                 }
+                // REQ-10 `a_query_without_a_limit_reads_no_further_than_it_keeps`. A SELECT is
+                // streamed and read only as far as its rows are kept (`Keep`); its result is
+                // destroyed before the next statement, which ends its execution. Built whole,
+                // a `SELECT *` over 10,000,000 rows cost the result before 2,000 rows of it were
+                // kept: through MCP at `--memory 384MB`, 0.63 G instructions and 150 ms a call,
+                // and the engine's peak resident memory 45 → 402–424 MiB, at a ceiling of
+                // 622 MiB; streamed, 23 M and 7–18 ms, and 45 → 51–60 MiB
+                // (`a_query_without_a_limit_holds_no_more_than_it_keeps`).
+                //
+                // The price is that an error DuckDB would raise only in rows past the ones kept
+                // is never raised (`an_error_past_the_rows_kept_is_not_raised`): the answer is
+                // the rows kept, a prefix of what the query makes, and says more exist. Reading
+                // the rest within the deadline to find such an error was measured and not taken:
+                // fetched and dropped, the same query cost 0.88 G and 178 ms a call, more than
+                // building the result whole, for a query whose rows past the 2,000th the agent
+                // never sees; and a query over more rows than the deadline can read would have
+                // become a deadline error instead of an answer. An error in the rows that are
+                // read, or the watchdog's interrupt while they are, still fails the statement
+                // (`an_error_in_the_rows_kept_still_fails_the_query`,
+                // `a_deadline_while_rows_are_read_is_the_deadline`). Every other kind runs to
+                // completion as before: DML, a CREATE … AS, and the CREATE TYPE of a dynamic
+                // PIVOT have their effects in full.
+                let streamed = kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT
+                    && arrow_reads(self.agent, prep);
                 let mut r: ffi::duckdb_result = std::mem::zeroed();
-                let ok =
-                    ffi::duckdb_execute_prepared(prep, &mut r) == ffi::duckdb_state_DuckDBSuccess;
+                let ok = if streamed {
+                    ffi::duckdb_execute_prepared_streaming(prep, &mut r)
+                } else {
+                    ffi::duckdb_execute_prepared(prep, &mut r)
+                } == ffi::duckdb_state_DuckDBSuccess;
                 if !ok {
                     let e = ffi::duckdb_result_error(&mut r);
                     let msg = if e.is_null() {
@@ -1823,8 +1695,21 @@ impl Workspace {
                 }
                 let id = format!("{}{}", self.result_prefix, self.next_result_id);
                 let result = collect(&mut r, &id, cap);
+                // A streamed result stopped at the rows kept is destroyed here, before the next
+                // statement: that is what ends its execution.
                 ffi::duckdb_destroy_result(&mut r);
                 ffi::duckdb_destroy_prepare(&mut prep);
+                let result = match result {
+                    Ok(result) => result,
+                    // Only a streamed result fails here: its error, the watchdog's interrupt
+                    // among them, comes with the fetch of a chunk rather than the execution.
+                    // A SELECT is never in a transaction of benchy's, so there is none to settle.
+                    Err(msg) => {
+                        let timed_out = watchdog.take().is_some_and(|w| finish(&done, w));
+                        failure = Some(fault(self, timed_out, cap, mine, &msg, sql));
+                        break;
+                    }
+                };
                 if create || alter {
                     // Under the watchdog's lock, so it cannot fire into the check or the COMMIT:
                     // an interrupted COMMIT that had committed was reported as stopped by the
@@ -1976,7 +1861,6 @@ impl Workspace {
         file: &Path,
         shown: Vec<crate::helpers::Shown>,
         reads: &[String],
-        macro_reads: &[String],
     ) -> Result<(), WorkError> {
         let own = self.agent_rows(AGENT_RELATIONS).map_err(WorkError::Open)?;
         let alias = format!("benchy_{}", self.next_alias);
@@ -2015,255 +1899,8 @@ impl Workspace {
                 .filter(|r| !own.iter().any(|o| o.1.eq_ignore_ascii_case(r)))
                 .map(|r| r.to_ascii_lowercase()),
         );
-        self.taken
-            .ctes
-            .extend(macro_reads.iter().map(|r| r.to_ascii_lowercase()));
-        // Which of the agent's macros call a helper: none before its first batch, which is when
-        // the server puts the helpers on an engine, so the first look needs no costly listing.
-        self.taken.reaching = if self.taken.worked {
-            None
-        } else {
-            Some(Default::default())
-        };
         self.helpers = shown;
         Ok(())
-    }
-
-    /// REQ-18 `a_cte_cannot_stand_in_for_a_table_a_helper_macro_reads`,
-    /// `a_cte_in_any_statement_cannot_stand_in_for_a_table_a_helper_macro_reads`: why the batch
-    /// `sql` may not run, if it names a CTE like a table a helper macro reads.
-    ///
-    /// DuckDB 1.5.5 expands a macro, scalar or table, inside the caller's query, so a table its
-    /// body names binds to a CTE of the caller's of that name, measured: `WITH readings AS (…)
-    /// SELECT * FROM meter_rows('m')` made the helper count the CTE's rows, with no error, and so
-    /// did a CTE in a MERGE's USING, an UPDATE's SET, FROM or WHERE, a DELETE's USING or WHERE,
-    /// an INSERT's VALUES, a PIVOT's source, and a WITH ahead of an INSERT, UPDATE, DELETE, MERGE
-    /// or PIVOT. A view is bound in its own context and still reads the table, so only what a
-    /// macro reads is taken from a CTE.
-    ///
-    /// Without helper macros this is one test of an empty set. With them, the batch's text is
-    /// looked at first: a CTE needs a WITH, and a CTE named like one of these tables has its name
-    /// in the text, ASCII case folded (DuckDB folds nothing else, and has no other spelling of an
-    /// identifier: `U&"…"` is not implemented). Only a batch with both is parsed, by DuckDB
-    /// (`json_serialize_sql`), for the names of its CTEs at any depth: nested, in a subquery,
-    /// `WITH RECURSIVE`. That serializes SELECTs alone, so in a batch that also holds another
-    /// statement each WITH is given to DuckDB with the text after it, and DuckDB says where the
-    /// query it starts ends: a syntax error's position (`)` closing a subquery, `RETURNING`,
-    /// `ON CONFLICT`) is where benchy cuts it and asks again, and a text DuckDB reads whole but
-    /// not as SELECTs is cut at a `;` or ahead of the INSERT, UPDATE, DELETE, MERGE, PIVOT or
-    /// UNPIVOT a WITH may lead, which is read as the CTEs before ` SELECT 1`. Every cut DuckDB
-    /// parses from a WITH holds that WITH's whole CTE list, since the list comes before the query
-    /// it belongs to; a nested WITH is read from its own position. benchy chooses where DuckDB
-    /// starts and stops and reads only what DuckDB parsed. A WITH that starts no query (in a
-    /// string, `WITH ORDINALITY`) parses nowhere and names nothing, though a whole query with such
-    /// a CTE written inside a string of a statement other than SELECT is refused too. A batch that
-    /// would take more than [`CTE_PARSES`] parses is refused rather than let through unread.
-    ///
-    /// Only a batch that may expand a helper macro is parsed (REQ-18
-    /// `a_cte_named_like_a_helpers_table_is_refused_only_beside_a_helper_call`), as
-    /// [`Workspace::calls_a_helper`] says; every other CTE is the agent's, whatever its name. And
-    /// with helper macros on the bench, a batch that may run SQL from a string is refused
-    /// whatever it holds (`sql_run_from_a_string_is_refused_beside_helper_macros`): DuckDB parses
-    /// that SQL only when it runs, from a string that may be built then, so no look beforehand
-    /// can read it for a CTE or a call of a helper.
-    fn cte_stands_in(&mut self, sql: &str) -> Option<String> {
-        self.taken.worked = true;
-        if self.taken.ctes.is_empty() {
-            return None;
-        }
-        let folded = sql.to_ascii_lowercase();
-        // A batch that may make or drop a macro says so; what was read of the agent's macros
-        // before it may be wrong after it.
-        if names_word(&folded, "macro") || names_word(&folded, "function") {
-            self.taken.reaching = None;
-        }
-        if let Some(f) = RUNS_A_STRING.iter().find(|f| may_call(&folded, f)) {
-            return Some(format!(
-                "`{f}(…)` runs SQL from a string, which benchy cannot read before it runs: with \
-                 the operator's helper macros on this bench, a CTE in that SQL could stand in for \
-                 a table one of them reads. Nothing ran. Write the query out instead; \
-                 `query_table('name')` still reads a table named in a string."
-            ));
-        }
-        if !folded.contains("with") || !self.taken.ctes.iter().any(|t| folded.contains(t.as_str()))
-        {
-            return None;
-        }
-        let why = self.calls_a_helper(&folded)?;
-        // On the agent's own connection, as every catalog read of the agent's is; the text is a
-        // bound value, parsed and never run, and the function is named in the system catalog,
-        // where no object of the agent's can stand in for it.
-        let serializer = Prepared::new(
-            self.agent,
-            c"SELECT system.main.json_serialize_sql($1::VARCHAR)",
-        )?;
-        let mut tries = CTE_PARSES;
-        let mut parse = |text: &str| -> Result<Parsed, ()> {
-            if tries == 0 {
-                return Err(());
-            }
-            tries -= 1;
-            let v: Option<serde_json::Value> = serializer
-                .text_of(text)
-                .and_then(|j| serde_json::from_str(&j).ok());
-            Ok(match v {
-                Some(v) if v["error"] == serde_json::Value::Bool(false) => Parsed::Select(v),
-                // DuckDB's position counts characters (measured: `😀` and `é` are one each).
-                Some(v) if v["error_subtype"] == "SYNTAX_ERROR" => v["position"]
-                    .as_str()
-                    .and_then(|p| p.parse::<usize>().ok())
-                    .and_then(|p| text.char_indices().nth(p))
-                    .map_or(Parsed::Fails, |(at, _)| Parsed::StopsAt(at)),
-                Some(v) if v["error_type"] == "not implemented" => Parsed::NotSelect,
-                _ => Parsed::Fails,
-            })
-        };
-        let word = word_at;
-        let mut names = Vec::new();
-        let exhausted = (|| -> Result<(), ()> {
-            if let Parsed::Select(v) = parse(sql)? {
-                cte_names(&v, &mut names);
-                return Ok(());
-            }
-            for w in (0..folded.len()).filter(|&i| word(&folded, i, "with")) {
-                let mut t = &sql[w..];
-                loop {
-                    match parse(t)? {
-                        Parsed::Select(v) => cte_names(&v, &mut names),
-                        Parsed::StopsAt(at) if at > 0 => {
-                            t = &t[..at];
-                            continue;
-                        }
-                        Parsed::NotSelect => {
-                            let f = &folded[w..w + t.len()];
-                            for at in (1..f.len()).filter(|&i| {
-                                f.as_bytes()[i] == b';'
-                                    || ["insert", "update", "delete", "merge", "pivot", "unpivot"]
-                                        .iter()
-                                        .any(|k| word(f, i, k))
-                            }) {
-                                let cut = if f.as_bytes()[at] == b';' {
-                                    parse(&t[..at])?
-                                } else {
-                                    parse(&format!("{} SELECT 1", &t[..at]))?
-                                };
-                                if let Parsed::Select(v) = cut {
-                                    cte_names(&v, &mut names);
-                                    break;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    break;
-                }
-            }
-            Ok(())
-        })()
-        .is_err();
-        if exhausted {
-            return Some(format!(
-                "This batch has more WITH clauses than benchy reads to check its CTE names against \
-                 the tables a helper macro reads ({CTE_PARSES} parses). Nothing ran. Send it as \
-                 several smaller batches."
-            ));
-        }
-        let cte = names
-            .into_iter()
-            .find(|n| self.taken.ctes.contains(&n.to_ascii_lowercase()))?;
-        Some(format!(
-            "`{cte}` cannot name a CTE in this batch: it {why}, and a helper macro the operator \
-             provides reads a table named `{cte}`. DuckDB expands a macro inside your query, \
-             where your CTE would stand in for that table. Nothing ran. Give the CTE another \
-             name, such as `my_{cte}`; a CTE named `{cte}` is fine in a batch that calls no \
-             helper macro and makes no view or macro."
-        ))
-    }
-
-    /// Why the folded batch `folded` may expand a helper macro inside its own queries, where a
-    /// CTE of its could stand in for what the macro reads; `None` when it cannot. A macro is
-    /// expanded only where it is called, by its name, which is then in the text. So the batch
-    /// may if it names a helper macro, made or waiting; or one of the agent's macros that calls
-    /// one, at any depth, read from the catalog (DuckDB 1.5.5 expands the agent's macro, and the
-    /// helper's inside it, in the caller's query, measured); or a word that makes a view or a
-    /// macro ([`KEEPS_A_BODY`]), whose body would keep the CTE for whatever macro the body
-    /// calls, replaced later by one that calls a helper (measured: a view over the agent's macro
-    /// read its own CTE once that macro was replaced). A view called by the batch is not
-    /// counted: DuckDB binds it on its own, and a macro in it reads the table, measured.
-    ///
-    /// The agent's macros are read only for a batch that has passed every other test here, only
-    /// once it may have made one (`Taken::worked`), and kept until a batch names `macro` or
-    /// `function`: `duckdb_functions()` builds a row for each of DuckDB's built-ins first, about
-    /// 0.19 G instructions ([`Workspace::attach_all`]).
-    fn calls_a_helper(&mut self, folded: &str) -> Option<String> {
-        if let Some(h) = self
-            .helpers
-            .iter()
-            .filter(|h| h.what != "view")
-            .find(|h| names_word(folded, &h.name.to_ascii_lowercase()))
-        {
-            return Some(format!(
-                "calls `{}`, one of the operator's helper macros",
-                h.name
-            ));
-        }
-        if let Some(k) = KEEPS_A_BODY.iter().find(|k| names_word(folded, k)) {
-            return Some(format!(
-                "may make a view or macro (it says `{k}`), whose body would keep the CTE for \
-                 the macros it calls"
-            ));
-        }
-        if self.taken.reaching.is_none() {
-            match self.macros_reaching_a_helper() {
-                Ok(r) => self.taken.reaching = Some(r),
-                Err(_) => {
-                    return Some(
-                        "may call a macro of yours, and benchy could not read which of them \
-                         call a helper macro"
-                            .into(),
-                    )
-                }
-            }
-        }
-        let reaching = self.taken.reaching.as_ref()?;
-        let mut mine: Vec<&String> = reaching.iter().filter(|m| names_word(folded, m)).collect();
-        mine.sort();
-        mine.first().map(|m| {
-            format!("calls `{m}`, a macro of yours that calls one of the operator's helper macros")
-        })
-    }
-
-    /// The agent's macros that call a helper macro, at any depth, by folded name: a helper
-    /// macro's name, or the name of another of these, is a word of its body as DuckDB keeps it
-    /// (`macro_definition`).
-    fn macros_reaching_a_helper(&self) -> Result<std::collections::HashSet<String>, String> {
-        let mut reaching: std::collections::HashSet<String> = self
-            .helpers
-            .iter()
-            .filter(|h| h.what != "view")
-            .map(|h| h.name.to_ascii_lowercase())
-            .collect();
-        let rows = self.agent_rows(AGENT_MACRO_BODIES)?;
-        let bodies: Vec<(String, String)> = rows
-            .into_iter()
-            .map(|(_, name, body)| (name.to_ascii_lowercase(), body.to_ascii_lowercase()))
-            .collect();
-        loop {
-            let before = reaching.len();
-            for (name, body) in &bodies {
-                if !reaching.contains(name) && reaching.iter().any(|r| names_word(body, r)) {
-                    reaching.insert(name.clone());
-                }
-            }
-            if reaching.len() == before {
-                break;
-            }
-        }
-        Ok(bodies
-            .into_iter()
-            .map(|(n, _)| n)
-            .filter(|n| reaching.contains(n))
-            .collect())
     }
 
     /// The helpers' catalog holds the views and macros `shown` says were made, each under its
@@ -2856,13 +2493,69 @@ impl Drop for Alarm {
 ///
 /// Arrow is also the direction REQ-6 already points, and arrow-rs renders every type correctly
 /// rather than us hand-decoding two dozen physical layouts.
-unsafe fn collect(r: &mut ffi::duckdb_result, id: &str, cap: &crate::result::Caps) -> QueryResult {
+///
+/// `Err` is the error a streamed result raised as its rows were read (`Workspace::work`).
+unsafe fn collect(
+    r: &mut ffi::duckdb_result,
+    id: &str,
+    cap: &crate::result::Caps,
+) -> Result<QueryResult, String> {
     match collect_arrow(r, id, cap) {
         Some(q) => q,
+        // Never given a stream: a statement is streamed only once `arrow_reads` says this
+        // reader can read it. On DuckDB 1.5.5 the legacy reader builds a stream whole outside
+        // any `try`, and an error in building it is a C++ exception through the C API, which
+        // aborts the process: a test that handed it a stream that failed at row 2,500,000 was
+        // killed by SIGABRT ("Rust cannot catch foreign exceptions").
+        None if ffi::duckdb_result_is_streaming(*r) => {
+            Err("the result could not be read as Arrow".into())
+        }
         // Nothing has been fetched yet when this returns `None`, so the legacy path is still
         // usable. It renders less, but it renders.
-        None => collect_legacy(r, id, cap),
+        None => Ok(collect_legacy(r, id, cap)),
     }
+}
+
+/// Whether a prepared statement's result can be read as Arrow, decided from its column types
+/// before it runs, as `collect_arrow` decides from the result's: only such a statement is
+/// streamed, so the legacy reader is never handed a stream (`collect`). No SQL is known for
+/// which it cannot, as no SQL is known that sends a result to the legacy reader.
+unsafe fn arrow_reads(con: ffi::duckdb_connection, prep: ffi::duckdb_prepared_statement) -> bool {
+    use duckdb::arrow::ffi::FFI_ArrowSchema;
+    let cols = ffi::duckdb_prepared_statement_column_count(prep) as usize;
+    if cols == 0 {
+        return false;
+    }
+    let owned: Vec<CString> = (0..cols)
+        .map(|c| CString::new(format!("c{c}")).unwrap())
+        .collect();
+    let mut names: Vec<*const std::os::raw::c_char> = owned.iter().map(|n| n.as_ptr()).collect();
+    let mut types: Vec<ffi::duckdb_logical_type> = (0..cols)
+        .map(|c| ffi::duckdb_prepared_statement_column_logical_type(prep, c as u64))
+        .collect();
+    let mut opts: ffi::duckdb_arrow_options = ptr::null_mut();
+    ffi::duckdb_connection_get_arrow_options(con, &mut opts);
+    let mut schema = FFI_ArrowSchema::empty();
+    let failed = arrow_error(ffi::duckdb_to_arrow_schema(
+        opts,
+        types.as_mut_ptr(),
+        names.as_mut_ptr(),
+        cols as u64,
+        &mut schema as *mut FFI_ArrowSchema as *mut ffi::ArrowSchema,
+    ));
+    for t in &mut types {
+        ffi::duckdb_destroy_logical_type(t);
+    }
+    ffi::duckdb_destroy_arrow_options(&mut opts);
+    failed.is_none()
+}
+
+/// The error a result holds, if it holds one. A streamed result's fetch answers an error, the
+/// watchdog's interrupt among them, with no chunk, as it answers the end of the rows; this is
+/// what tells them apart (`an_error_in_the_rows_kept_still_fails_the_query`).
+unsafe fn result_error(r: &mut ffi::duckdb_result) -> Option<String> {
+    let e = ffi::duckdb_result_error(r);
+    (!e.is_null()).then(|| CStr::from_ptr(e).to_string_lossy().into_owned())
 }
 
 /// The retention rule, in one place, so the Arrow and legacy readers cannot drift apart on it:
@@ -2932,6 +2625,7 @@ unsafe fn collect_legacy(
     cap: &crate::result::Caps,
 ) -> QueryResult {
     let cols = ffi::duckdb_column_count(r) as usize;
+    // Never a stream (`collect`): of a stream, DuckDB 1.5.5 counts 0 rows.
     let rows = ffi::duckdb_row_count(r) as usize;
     let mut names = Vec::with_capacity(cols);
     for c in 0..cols {
@@ -3222,7 +2916,7 @@ unsafe fn collect_arrow(
     r: &mut ffi::duckdb_result,
     id: &str,
     cap: &crate::result::Caps,
-) -> Option<QueryResult> {
+) -> Option<Result<QueryResult, String>> {
     use duckdb::arrow::array::{Array, StructArray};
     use duckdb::arrow::ffi::{from_ffi, FFI_ArrowArray, FFI_ArrowSchema};
     use duckdb::arrow::util::display::{ArrayFormatter, ArrayFormatterFactory, FormatOptions};
@@ -3285,6 +2979,11 @@ unsafe fn collect_arrow(
     'chunks: loop {
         let mut chunk = ffi::duckdb_fetch_chunk(*r);
         if chunk.is_null() {
+            if let Some(e) = result_error(r) {
+                let mut opts = opts;
+                ffi::duckdb_destroy_arrow_options(&mut opts);
+                return Some(Err(e));
+            }
             break;
         }
         let mut array = FFI_ArrowArray::empty();
@@ -3347,7 +3046,7 @@ unsafe fn collect_arrow(
     let mut opts = opts;
     ffi::duckdb_destroy_arrow_options(&mut opts);
 
-    Some(QueryResult {
+    Some(Ok(QueryResult {
         result_id: id.to_string(),
         columns: column_names,
         rows: keep.rows,
@@ -3356,7 +3055,7 @@ unsafe fn collect_arrow(
         note: None,
         cut_values: keep.cut,
         sql: None,
-    })
+    }))
 }
 
 /// Dates and timestamps, rendered as DuckDB's own `::VARCHAR` renders them, at the top level of
@@ -3729,6 +3428,42 @@ mod tests {
         };
         assert_eq!(seen, "UTC", "a connection opened after the bench's");
         let _ = bench.finish();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_common_type_is_streamed() {
+        // A SELECT is streamed only where `arrow_reads` says its result reads as Arrow; one
+        // that does not is built whole, as every result was. So a type it wrongly turns away
+        // costs the whole result again (`a_query_without_a_limit_reads_no_further_than_it_keeps`).
+        // A sweep of the types `every_common_type_renders_as_something_a_reader_can_use` renders,
+        // and the three Arrow carries unfaithfully.
+        let dir = std::env::temp_dir().join(fresh_name("benchy-arrow-reads"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ws = Workspace::open_sealed(&dir, "1GB").unwrap();
+        for sql in [
+            c"SELECT 1::TINYINT, 1::SMALLINT, 1::INTEGER, 1::BIGINT, 1::HUGEINT, 1::UBIGINT, \
+              1::UHUGEINT, 1.5::FLOAT, 1.5::DOUBLE, 1.5::DECIMAL(18,3), 1.5::DECIMAL(38,3)",
+            c"SELECT 'x', 'x'::BLOB, true, NULL, uuid(), INTERVAL 1 DAY",
+            c"SELECT DATE '2026-01-01', TIME '01:02:03', TIMESTAMP '2026-01-01', \
+              TIMESTAMPTZ '2026-01-01 00:00:00+00', TIMESTAMP_S '2026-01-01', \
+              TIMESTAMP_MS '2026-01-01', TIMESTAMP_NS '2026-01-01'",
+            c"SELECT [1, 2], {'a': 1}, MAP {'k': 1}, [1, 2]::INTEGER[2], \
+              union_value(n := 1), 'a'::ENUM('a', 'b')",
+            c"SELECT '0101'::BIT, 1::BIGNUM, TIMETZ '01:02:03+01'",
+        ] {
+            let ok = unsafe {
+                let mut prep: ffi::duckdb_prepared_statement = ptr::null_mut();
+                let prepared = ffi::duckdb_prepare(ws.agent, sql.as_ptr(), &mut prep)
+                    == ffi::duckdb_state_DuckDBSuccess;
+                assert!(prepared, "{sql:?}");
+                let ok = arrow_reads(ws.agent, prep);
+                ffi::duckdb_destroy_prepare(&mut prep);
+                ok
+            };
+            assert!(ok, "{sql:?} is built whole");
+        }
+        drop(ws);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
