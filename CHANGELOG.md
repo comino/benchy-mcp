@@ -108,6 +108,12 @@ Fixed:
   server closed the refused request's descriptor as it should. The read end that stayed open
   was a copy in a process another test of the same binary was starting, not yet exec'd. The
   check now runs while no test of that binary starts a process.
+- **What an Arrow stream decodes to is one total against its byte bound** (#14). Its bodies,
+  decompressed, and what its dictionary and view columns unpack to were each held to
+  `attach_bytes` (or a connector's `max_bytes`) on its own, so a stream with some of each loaded
+  at up to twice the bound: 818 KB of plain text and 804 KB unpacked attached under 1 MiB. Now
+  they are added up, and such a stream is refused as `E_LIMIT`
+  (`an_attachments_plain_and_unpacked_bytes_share_one_bound`).
 
 ## [0.2.0] — 2026-10-17
 

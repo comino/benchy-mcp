@@ -898,6 +898,55 @@ fn a_view_attachment_is_unpacked_within_the_bound() {
 }
 
 #[test]
+fn an_attachments_plain_and_unpacked_bytes_share_one_bound() {
+    // #14: what a stream decodes to is one total. Its bodies were counted against `attach_bytes`
+    // and what its dictionary and view columns unpack to against it again, each on its own, so
+    // a stream with some of each attached at up to twice the bound. Measured before the fix:
+    // 1,000 rows of an 800-byte text and a dictionary column picking one 800-byte value, a file
+    // of 818 KB that unpacks 804 KB more, attached under an `attach_bytes` of 1 MiB.
+    use arrow::array::{Array, DictionaryArray, Int32Array};
+    let dir = unique("host-decoded-total");
+    let rows = 1000;
+    let keys = Int32Array::from(vec![0; rows]);
+    let values = Arc::new(StringArray::from(vec!["d".repeat(800)]));
+    let dict = DictionaryArray::try_new(keys, values).unwrap();
+    let plain = StringArray::from(vec!["p".repeat(800); rows]);
+    let schema = Schema::new(vec![
+        Field::new("note", DataType::Utf8, false),
+        Field::new("meter", dict.data_type().clone(), false),
+    ]);
+    let b = RecordBatch::try_new(
+        Arc::new(schema),
+        vec![Arc::new(plain) as ArrayRef, Arc::new(dict) as ArrayRef],
+    )
+    .unwrap();
+    let file = arrows(&dir.join("both.arrows"), &b, true);
+    let size = std::fs::metadata(&file).unwrap().len();
+    let unpacked = rows as u64 * (800 + 4);
+    let bound: u64 = 1024 * 1024;
+    // Each part on its own fits the bound; together they do not.
+    assert!(size < bound && unpacked < bound && size + unpacked > bound);
+    let mut h = Host::start(&["--attach-bytes", &bound.to_string()]);
+    let r = attach(&mut h, "readings", &file);
+    assert_eq!(code(&r), "E_LIMIT", "{r}");
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("unpack"), "{message}");
+
+    // Twice the bound holds both, and the same file loads whole.
+    let twice = (2 * bound).to_string();
+    let mut h = Host::start(&["--attach-bytes", &twice]);
+    let r = attach(&mut h, "readings", &file);
+    assert_eq!(r["ok"], true, "{r}");
+    let q = h.call(
+        "query",
+        json!({"sql": "SELECT count(*), sum(length(note) + length(meter)) FROM readings"}),
+    );
+    let text = q["text"].as_str().unwrap_or_default();
+    assert!(text.contains("1000") && text.contains("1600000"), "{q}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_session_that_does_not_open_properly_ends() {
     // Whatever is wrong with the first request — not a hello, no id, a field hello does not
     // take, a version list that is not a list — the session ends with a refusal: a host that

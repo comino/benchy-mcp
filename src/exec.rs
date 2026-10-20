@@ -1651,7 +1651,6 @@ impl HostStream {
                     *opened,
                     Some(&self.declared),
                     max_rows,
-                    max_bytes,
                     &mut 0,
                     sink,
                     nothing_after_the_marker,
@@ -1770,7 +1769,8 @@ pub fn read_arrow<R: Read>(
 /// a long value, so its unpacked size is counted as each batch arrives — the sum of the value
 /// lengths its keys pick or its views state, and an offset per row — and the stream refused once
 /// that passes the bound. 1,000,000 `int32` keys into one 1 KiB value are a 4 MB stream and 1 GB
-/// unpacked ([`unpacked_size`]).
+/// unpacked ([`unpacked_size`]). What they unpack to and what the bodies decode to are one total
+/// against the bound, not two ([`crate::ipc::Decoded::add_unpacked`]).
 ///
 /// `rows` counts the rows read, refused or not: a fetch that fails still cost its source them.
 /// Each batch goes to `sink` once it has passed every check, before the next is read, and a
@@ -1788,16 +1788,7 @@ fn read_stream<R: Read>(
     on: &str,
 ) -> Result<Stream, Fault> {
     let opened = open_stream(r, max_decoded, on)?;
-    read_opened(
-        r,
-        opened,
-        declared,
-        max_rows,
-        max_decoded,
-        rows,
-        sink,
-        after_marker,
-    )
+    read_opened(r, opened, declared, max_rows, rows, sink, after_marker)
 }
 
 /// [`read_stream`] from its first batch on, the schema already read by [`open_stream`].
@@ -1807,7 +1798,6 @@ fn read_opened<R: Read>(
     (schema, mut decoder, mut decoded): Opened,
     declared: Option<&Schema>,
     max_rows: u64,
-    max_decoded: u64,
     rows: &mut u64,
     sink: &mut Sink,
     after_marker: impl FnOnce(&mut R) -> Result<(), Fault>,
@@ -1828,7 +1818,6 @@ fn read_opened<R: Read>(
     };
 
     let mut batches = 0u64;
-    let mut unpacked = 0u64;
     let bad = |e: arrow::error::ArrowError| {
         Fault::host("E_HOST_PROTOCOL", format!("bad Arrow stream: {e}"))
     };
@@ -1848,16 +1837,8 @@ fn read_opened<R: Read>(
         }
         for batch in got {
             check_nullability(&batch, declared)?;
-            unpacked = unpacked.saturating_add(unpacked_size(&batch));
-            if unpacked > max_decoded {
-                return Err(Fault::host(
-                    "E_HOST_OVERSIZE",
-                    format!(
-                        "its dictionary-encoded and view columns unpack to more than \
-                         {max_decoded} bytes"
-                    ),
-                ));
-            }
+            // Into the same total as the bodies (#14).
+            decoded.add_unpacked(unpacked_size(&batch))?;
             *rows += batch.num_rows() as u64;
             if *rows > max_rows {
                 // Never truncate. A load that silently stops at the cap hands the model a table

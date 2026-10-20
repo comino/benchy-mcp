@@ -1112,6 +1112,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   `E_LIMIT` before it is unpacked.
 - `a_view_attachment_is_unpacked_within_the_bound` — and so is a string or binary view column,
   counted by the lengths its views state: a file of 130 KB that unpacks to 275 MB is refused.
+- `an_attachments_plain_and_unpacked_bytes_share_one_bound` — what the bodies decode to and what
+  the dictionary and view columns unpack to are one total against `attach_bytes`. Each was
+  checked against it on its own, so a file of 818 KB of plain text that unpacked 804 KB more
+  attached under 1 MiB; it is refused as `E_LIMIT`, and loads under twice that.
 - `a_detach_brings_a_bench_that_could_not_rebuild_back` — rebuilds that keep failing stop being
   tried, but detaching the table that stops them earns a fresh try.
 - `a_killed_host_leaves_nothing_behind_even_without_an_engine` — after a rebuild that failed there
