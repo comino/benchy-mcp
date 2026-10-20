@@ -21,6 +21,10 @@ profile cuts the table into 500 series, as a table of many meters is cut.
 `intkey` writes readings-intkey.arrows: `series`' rows with `meter` an int64, 1000 + i % 500,
 so the profile tallies an integer key (R3-10).
 
+`mixed` writes readings-mixed.arrows: 150 meters 'm000' … 'm149' at three cadences, as a table of
+mixed sensors has them (#50): m000–m049 every minute, m050–m099 every 2 minutes and m100–m149
+every 3, every one complete, in time order; `kw` as above.
+
 `lz4` writes readings-lz4.arrows: the rows of readings.arrows, each batch's buffers compressed
 with LZ4 as Arrow IPC allows, which is how ClickHouse's `ArrowStream` sends them by default.
 """
@@ -49,6 +53,20 @@ def chunk(start, n, series=False, intkey=False):
     return pa.table({"ts": ts, "meter": meter, "kw": kw})
 
 
+# `mixed`'s six minutes, which repeat: each row's minute in them and its meter.
+MIXED = [(m, s) for m in range(6) for s in range(150) if m % (1 + s // 50) == 0]
+
+
+def mixed_chunk(start, n):
+    rows = range(start, start + n)
+    minute = [i // len(MIXED) * 6 + MIXED[i % len(MIXED)][0] for i in rows]
+    ts = pc.add(pc.multiply(pa.array(minute, pa.int64()), 60_000_000), BASE_US).cast(
+        pa.timestamp("us", tz="UTC"))
+    meter = pa.array([f"m{MIXED[i % len(MIXED)][1]:03d}" for i in rows], pa.string())
+    kw = pa.array([(k % 997) * 1.5 for k in rows], pa.float64())
+    return pa.table({"ts": ts, "meter": meter, "kw": kw})
+
+
 def main(out, rows):
     d = os.path.join(out, str(rows))
     paths = {
@@ -59,6 +77,7 @@ def main(out, rows):
         "series": os.path.join(d, "readings-series.arrows"),
         "lz4": os.path.join(d, "readings-lz4.arrows"),
         "intkey": os.path.join(d, "readings-intkey.arrows"),
+        "mixed": os.path.join(d, "readings-mixed.arrows"),
     }
     want = [k for k in sys.argv[3:]] or list(paths)
     todo = {k: p for k, p in paths.items() if k in want and not os.path.exists(p)}
@@ -80,6 +99,8 @@ def main(out, rows):
     lz4_sink = pa.OSFile(tmp["lz4"], "wb") if "lz4" in tmp else None
     lz4_w = pa.ipc.new_stream(lz4_sink, schema, options=pa.ipc.IpcWriteOptions(
         compression="lz4")) if lz4_sink else None
+    mixed_sink = pa.OSFile(tmp["mixed"], "wb") if "mixed" in tmp else None
+    mixed_w = pa.ipc.new_stream(mixed_sink, schema) if mixed_sink else None
     for start in range(0, rows, CHUNK):
         t = chunk(start, min(CHUNK, rows - start))
         if csv_w:
@@ -105,10 +126,13 @@ def main(out, rows):
             for b in chunk(start, min(CHUNK, rows - start), True, True).to_batches(
                     max_chunksize=65_536):
                 int_w.write_batch(b)
-    for w in (csv_w, pq_w, ipc_w, series_w, lz4_w, int_w):
+        if mixed_w:
+            for b in mixed_chunk(start, min(CHUNK, rows - start)).to_batches(max_chunksize=65_536):
+                mixed_w.write_batch(b)
+    for w in (csv_w, pq_w, ipc_w, series_w, lz4_w, int_w, mixed_w):
         if w:
             w.close()
-    for sink in (ipc_sink, series_sink, lz4_sink, int_sink):
+    for sink in (ipc_sink, series_sink, lz4_sink, int_sink, mixed_sink):
         if sink:
             sink.close()
     if js:
