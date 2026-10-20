@@ -30,6 +30,11 @@ Changed behaviour:
   reads a series again only when its longest run could be one to note
   (`a_stuck_value_inside_a_series_is_noted`, `the_pass_misses_no_value_held`). The line that
   lists what is noted is 58 bytes longer.
+- **An NDJSON/JSON file with `epoch` in a timestamp or date column is refused** (#37), as one
+  with `infinity` has been since 0.2.0. DuckDB's sniffed JSON read took `epoch` as
+  1900-01-01 00:00:00, where a CSV and a declared JSON column read it as 1970-01-01. Declare the
+  column's type in `[[source.schema]]` to load it as 1970
+  (`an_ndjson_epoch_is_refused_where_a_csv_reads_1970`).
 
 - **A helper macro may not read a table** (#58). DuckDB expands a macro inside the caller's
   query, where a CTE of the caller's named like a table the macro reads stands in for it; 0.2.0

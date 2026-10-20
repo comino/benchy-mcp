@@ -1408,14 +1408,15 @@ memory).
   a space for the `T`, nulls, with an odd value past the sniffer's sample at a vector's first row
   and inside one. A value the cast does not take as the sniffer does — nanoseconds, seven digits,
   a date alone, `epoch`, a padded `infinity`, a two-digit year, 12-hour times, a number — has the
-  file read the sniffed way, to its table or its refusal (an infinity's,
-  `an_ndjson_infinity_is_refused`); never a null, never a rounded time. A
+  file read the sniffed way, to its table or its refusal (an infinity's or an `epoch`'s,
+  `an_ndjson_infinity_is_refused`, `an_ndjson_epoch_is_refused_where_a_csv_reads_1970`); never a
+  null, never a rounded time. A
   value the sniffer's formats refuse and the cast reads exactly — an offset in a vector that began
   without one — loads at that instant, where the sniffed read refused the file.
 - `an_ndjson_bodys_timestamps_read_as_text_load_as_the_sniffer_reads_them` — the same for an
   undeclared HTTP NDJSON body, spooled to a file and read as that file is, narrowed or not: its
-  timestamps read as text, or, for a value the cast does not take, the sniffed way, to the same
-  table.
+  timestamps read as text, or, for a value the cast does not take (a two-digit year past the
+  sample), the sniffed way, to the same table.
 - `a_json_file_whose_columns_the_text_read_would_change_is_read_as_it_was` — that read names the
   sniffed columns, which turns the sniffer off for more than the timestamps; a file it would read
   otherwise is read the sniffed way, once: one with a date (`26-01-02` would be the year 26), a
@@ -1455,6 +1456,13 @@ memory).
   file and the column and saying what to do: write the value as null or as a real timestamp,
   declare the column's type in `[[source.schema]]`, which reads it as itself, or use CSV or
   Parquet. A genuine 1900-01-01 loads, beside a text column that says `infinity` too.
+- `an_ndjson_epoch_is_refused_where_a_csv_reads_1970` — `epoch` (any case, padded, in a timestamp,
+  a date or a list) is read as 1970-01-01 00:00:00 from a CSV and from a JSON column whose type
+  is declared, but DuckDB 1.5.5's sniffed JSON read takes it as 1900-01-01 00:00:00 too, and such
+  a file loaded with that time. It is refused as an infinity is, past the sniffer's sample and at
+  1 MiB or more as well, where the timestamps are read as text first; declared, the column reads
+  it as 1970. `now`, `today`, `yesterday`, `tomorrow` and `allballs` make the column text from a
+  CSV and a sniffed JSON file alike.
 - `clickhouse_looks_the_same_as_a_file` — ClickHouse's own `ArrowStream`, LZ4 bodies and zoned
   `DateTime64` included, fetched by `clickhouse local` as a connector, against the fixture as CSV.
   It needs the ClickHouse binary, named by `BENCHY_CLICKHOUSE_BIN` as for REQ-16's tests, and

@@ -341,8 +341,8 @@ fn write_stamps_as_text(
 }
 
 /// REQ-15 `an_ndjson_infinity_is_refused`: `written`, unless the JSON file `reader` read the
-/// sniffed way held `infinity` or `-infinity` in a column it typed as a timestamp or a date,
-/// which then is dropped and refused, naming the column.
+/// sniffed way held `infinity`, `-infinity` or `epoch` in a column it typed as a timestamp or a
+/// date, which then is dropped and refused, naming the column.
 ///
 /// DuckDB 1.5.5's JSON reader parses such a column with the `strptime` format its sniffer chose,
 /// which takes `infinity` and `-infinity` — any case, padded, escaped — and `epoch` as special
@@ -351,8 +351,14 @@ fn write_stamps_as_text(
 /// source). A JSON file whose column holds 1900-01-01 is rare, so the check is in two steps:
 /// whether the table holds that time, which row groups' statistics answer without reading a
 /// timestamp of another century; and, only where it does, whether the file's text says
-/// `infinity` there, in a second read of the file, so a genuine 1900-01-01 loads. `epoch` is
-/// left as it was read (`a_json_files_timestamps_read_as_text_load_as_the_sniffer_reads_them`).
+/// `infinity` there, in a second read of the file, so a genuine 1900-01-01 loads.
+///
+/// `epoch` is refused the same way (#37, `an_ndjson_epoch_is_refused_where_a_csv_reads_1970`):
+/// a CSV reads it as 1970-01-01, as does a JSON column whose type is named, so loading it as
+/// 1900 told a JSON file from a CSV of the same rows by a value 70 years off. Loading it as 1970
+/// instead would take reading the file with its columns named, which reads other values
+/// otherwise than the sniffed read does ([`text_timestamps`]); refusing it, with the way to read
+/// it as 1970, is what the infinities have.
 fn no_infinity_read_as_1900(
     conn: &duckdb::Connection,
     name: &str,
@@ -412,11 +418,12 @@ fn no_infinity_read_as_1900(
         let said = if ty.contains('[') || ty.contains('(') {
             format!(
                 "regexp_matches(CAST(json_extract(json, {pointer}) AS VARCHAR), \
-                 '(?i)\"\\s*-?infinity\\s*\"')"
+                 '(?i)\"\\s*(-?infinity|epoch)\\s*\"')"
             )
         } else {
             format!(
-                "lower(trim(json_extract_string(json, {pointer}))) IN ('infinity', '-infinity')"
+                "lower(trim(json_extract_string(json, {pointer}))) \
+                 IN ('infinity', '-infinity', 'epoch')"
             )
         };
         if !ask(&format!(
@@ -428,10 +435,11 @@ fn no_infinity_read_as_1900(
         return Err(Staged::Refused(crate::exec::Fault::host(
             "E_SCHEMA",
             format!(
-                "column `{column}` holds `infinity` or `-infinity`, which DuckDB's JSON reader \
-                 reads as 1900-01-01 00:00:00, not as itself; refused rather than loaded as that \
-                 time. Write it as null or as a real timestamp, declare the column's type in \
-                 `[[source.schema]]`, which keeps it, or use CSV or Parquet"
+                "column `{column}` holds `infinity`, `-infinity` or `epoch`, which DuckDB's JSON \
+                 reader reads as 1900-01-01 00:00:00, not as itself (`epoch` is \
+                 1970-01-01 00:00:00); refused rather than loaded as that time. Write it as null \
+                 or as a real timestamp, declare the column's type in `[[source.schema]]`, which \
+                 reads it as itself, or use CSV or Parquet"
             ),
         )));
     }
@@ -4084,7 +4092,8 @@ mod tests {
                 Sniffed,
             ),
             // The sniffed read takes each of these, and not as the cast does.
-            ("epoch", Box::new(iso), Some("\"epoch\""), Sniffed),
+            // As 1900-01-01, which is refused (`an_ndjson_epoch_is_refused_where_a_csv_reads_1970`).
+            ("epoch", Box::new(iso), Some("\"epoch\""), Refused),
             // As 1900-01-01, which is refused.
             (
                 "infinity, padded",
@@ -4384,16 +4393,124 @@ mod tests {
     }
 
     #[test]
+    fn an_ndjson_epoch_is_refused_where_a_csv_reads_1970() {
+        // #37: DuckDB 1.5.5 reads `epoch` — any case, padded — as 1970-01-01 00:00:00 from a
+        // CSV, and from a JSON column whose type is named, but its sniffed JSON read takes it
+        // as 1900-01-01 00:00:00, as it does an infinity. An NDJSON file with one loaded with
+        // that time. It is refused as an infinity is (`an_ndjson_infinity_is_refused`), so no
+        // source loads `epoch` as another time than 1970; declared, the column reads it so.
+        // `now`, `today`, `yesterday`, `tomorrow` and `allballs` make the column text in a
+        // CSV and in a sniffed JSON file alike, and need nothing here.
+        let iso = |i: usize| format!("\"2026-01-01T00:{:02}:{:02}Z\"", (i / 60) % 60, i % 60);
+        let ndjson = |rows: usize, row: &dyn Fn(usize) -> String, last: &str| {
+            let mut b: String = (0..rows).map(|i| format!("{}\n", row(i))).collect();
+            b.push_str(last);
+            b.push('\n');
+            b
+        };
+        let ts = |i: usize| format!("{{\"i\":{i},\"ts\":{}}}", iso(i));
+        let date = |i: usize| format!("{{\"i\":{i},\"d\":\"2026-01-01\"}}");
+        // (what, body, the column refused)
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "epoch",
+                ndjson(10, &ts, "{\"i\":-1,\"ts\":\"epoch\"}"),
+                "ts",
+            ),
+            (
+                "EPOCH",
+                ndjson(10, &ts, "{\"i\":-1,\"ts\":\"EPOCH\"}"),
+                "ts",
+            ),
+            (
+                "padded",
+                ndjson(10, &ts, "{\"i\":-1,\"ts\":\"  epoch \"}"),
+                "ts",
+            ),
+            // Past the sample and at 1 MiB or more, where the timestamps are read as text
+            // first (R3-1): `epoch` is under 19 bytes, so the file is read the sniffed way.
+            (
+                "past the sample",
+                ndjson(30_000, &ts, "{\"i\":-1,\"ts\":\"Epoch\"}"),
+                "ts",
+            ),
+            (
+                "a date",
+                ndjson(10, &date, "{\"i\":-1,\"d\":\"epoch\"}"),
+                "d",
+            ),
+            (
+                "in a list",
+                ndjson(
+                    10,
+                    &|i| format!("{{\"i\":{i},\"l\":[{}]}}", iso(i)),
+                    "{\"i\":-1,\"l\":[\"2026-01-01T00:00:00Z\",\"epoch\"]}",
+                ),
+                "l",
+            ),
+        ];
+        for (what, body, column) in &cases {
+            let mut tb = TestBench::new("ndjson-epoch");
+            let path = tb.1.join("t.ndjson");
+            std::fs::write(&path, body).unwrap();
+            let bench = tb.0.as_mut().unwrap();
+            let e = load_file_in(bench, "t", &path, "UTC")
+                .expect_err(what)
+                .to_string();
+            for said in [
+                &format!("column `{column}`"),
+                "epoch",
+                "1900-01-01",
+                "1970-01-01",
+            ] {
+                assert!(e.contains(said), "{what}: `{said}` not in: {e}");
+            }
+            assert!(columns_of(bench.connection(), "t").unwrap().is_empty());
+        }
+
+        // A CSV reads it as 1970-01-01, and so does the NDJSON file with its column declared.
+        let at_1970 = |bench: &Bench| -> bool {
+            bench
+                .connection()
+                .query_row(
+                    "SELECT ts = TIMESTAMPTZ '1970-01-01 00:00:00+00' FROM t WHERE i = -1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let mut tb = TestBench::new("csv-epoch");
+        let path = tb.1.join("t.csv");
+        std::fs::write(&path, "i,ts\n1,2026-01-01 00:00:00\n-1,epoch\n").unwrap();
+        let bench = tb.0.as_mut().unwrap();
+        load_file_in(bench, "t", &path, "UTC").unwrap();
+        assert!(at_1970(bench), "a CSV's epoch");
+        let mut tb = TestBench::new("ndjson-epoch-declared");
+        let path = tb.1.join("t.ndjson");
+        std::fs::write(&path, &cases[0].1).unwrap();
+        let declared = [("i", "int64"), ("ts", "timestamp")].map(|(n, t)| crate::exec::FieldDecl {
+            name: n.into(),
+            ty: t.into(),
+            nullable: true,
+        });
+        let bench = tb.0.as_mut().unwrap();
+        load_file_declared(bench, "t", &path, "UTC", &declared, None).unwrap();
+        assert!(at_1970(bench), "a declared NDJSON column's epoch");
+    }
+
+    #[test]
     fn an_ndjson_bodys_timestamps_read_as_text_load_as_the_sniffer_reads_them() {
         // R3-1 for an HTTP NDJSON body, spooled to a file and read as that file is (R3-3),
         // held to its narrowing: its timestamps are read as text, and the table is the sniffed
-        // read's; an `epoch` past the sample has it read the sniffed way, to the same table.
+        // read's; a two-digit year past the sample, which the cast does not take and the
+        // sniffer's formats do, has it read the sniffed way, to the same table. (This was an
+        // `epoch`, which is refused now: `an_ndjson_epoch_is_refused_where_a_csv_reads_1970`.)
         let none = crate::exec::Narrowing::default();
         let narrowed = crate::exec::Narrowing {
             entities: Some(("m".into(), vec!["m1".into(), "m3".into()])),
             ..Default::default()
         };
-        for (odd, read_as_text) in [(None, true), (Some("\"epoch\""), false)] {
+        for (odd, read_as_text) in [(None, true), (Some("\"26-01-02 03:04:05\""), false)] {
             for narrowing in [&none, &narrowed] {
                 let mut body = String::new();
                 for i in 0..30_000 {
