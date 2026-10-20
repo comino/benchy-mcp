@@ -26,7 +26,10 @@ Scenarios: csv-1m, parquet-1m, ndjson-1m (a folder), exec-1m, exec-10m (an exec 
 `cat`s an Arrow stream, so the connector costs next to nothing and the time is benchy's),
 exec_series-1m, exec_series-10m (the same, with 500 meters reading every minute, so the times
 repeat and the profile cuts the table into series), exec_intkey-1m, exec_intkey-10m
-(exec_series' rows with `meter` an int64, so the key tallied is an integer, R3-10), exec_lz4-1m,
+(exec_series' rows with `meter` an int64, so the key tallied is an integer, R3-10),
+parquet_bytime-1m, parquet_bytime-10m, parquet_bymeter-1m, parquet_bymeter-10m (exec_series'
+rows as a Parquet folder: bytime in its order, every meter at each minute, and bymeter sorted by
+meter, then time, as a per-device export is, #54), exec_lz4-1m,
 exec_lz4-10m (exec's rows with
 each batch's buffers LZ4-compressed, as ClickHouse's `ArrowStream` sends them by default),
 ch-1m, ch-10m (the built-in ClickHouse source, against a server this script starts on port 8133,
@@ -76,7 +79,8 @@ CH_HTTP, CH_TCP = 8133, 9033  # --ch-port moves both: the TCP port is HTTP's + 9
 PERIOD = 1_000_000
 SCENARIOS = ["csv-1m", "parquet-1m", "ndjson-1m", "exec-1m", "exec-10m", "ch-1m", "ch-10m",
              "host-1m", "http-csv-1m", "http-parquet-1m", "http-ndjson-1m", "http-arrow-1m",
-             "http-json-1m", "exec_series-1m", "exec_series-10m"]
+             "http-json-1m", "exec_series-1m", "exec_series-10m", "parquet_bytime-10m",
+             "parquet_bymeter-10m"]
 PAGE_ROWS = 10_000
 # hostspool, hoststream and hostchannel: the host's fetch, paced to this many MB/s (--host-fetch-mbps); as fast
 # as the page cache gives it when 0.
@@ -100,7 +104,9 @@ def data(rows, kind):
             "series": os.path.join(d, "readings-series.arrows"),
             "lz4": os.path.join(d, "readings-lz4.arrows"),
             "intkey": os.path.join(d, "readings-intkey.arrows")}.get(kind, os.path.join(d, kind))
-    probe = path if kind in STREAMS else os.path.join(path, f"readings.{kind}")
+    # bytime and bymeter are Parquet folders of their own.
+    ext = "parquet" if kind in ("bytime", "bymeter") else kind
+    probe = path if kind in STREAMS else os.path.join(path, f"readings.{ext}")
     if not os.path.exists(probe):
         print(f"  making {probe} …", file=sys.stderr)
         subprocess.run(["uv", "run", "--no-project", "--with", PYARROW, "python",
@@ -261,6 +267,8 @@ def scenario_args(name, work, ch):
     rows = ROWS[size]
     if kind in ("csv", "parquet", "ndjson"):
         return [data(rows, kind)]
+    if kind in ("parquet_bytime", "parquet_bymeter"):
+        return [data(rows, kind[len("parquet_"):])]
     if kind in ("csvdecl", "ndjsondecl"):
         fmt = kind[:-len("decl")]
         # Each declared as its sniffer types it: `ts` is TIMESTAMPTZ to the CSV sniffer, and a

@@ -1222,8 +1222,17 @@ statement, and the agent made them.
   as they went in gives the profile reading the table gives, byte for byte: one series and many,
   an integer key, a float, an unsigned counter, times before 1970 and a date for time, NaN, a
   negative zero and nulls, a stated key, and the cuts no tally was kept for, which are read; a
-  first batch whose times do not repeat before batches whose times do, whose key is chosen from
-  counts read from the table; and one series' runs of 0 and of null, kept without a query.
+  first batch whose times do not repeat and whose key changes every row, before batches whose
+  times do, whose key is chosen from counts read from the table and whose pass is read; and one
+  series' runs of 0 and of null, kept without a query.
+- `a_stream_sorted_by_series_is_tallied_by_its_key` — rows sorted by series, then time, whose
+  first batches hold one series and no repeated time, are tallied by their key, not read back
+  (#54): text and integer keys, each series oldest or newest first, a series that starts late,
+  and a Parquet file watched a DuckDB vector at a time. Until a candidate's value changes both
+  tallies are kept, so a table that is one series, a key that never changes, and times alone
+  keep the one series; a label that changes as time goes on is one series too. A key that goes
+  back in time between another's times, none repeated, is a guess the table belies: that pass
+  is read. Each gives the profile reading the table gives, byte for byte.
 - `a_files_profile_is_kept_from_one_scan_and_is_the_profile_of_the_table` — a Parquet, CSV and
   NDJSON file of seven meters, with a dead one, a late start, a stop into nulls, a pause, an hour
   all 0, NaN, an integer and a date: the scan's aggregates and the pass are kept from one Arrow

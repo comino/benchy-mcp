@@ -3107,6 +3107,280 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_sorted_by_series_is_tallied_by_its_key() {
+        // #54: rows sorted by series, then time, as most per-device exports are, show their
+        // first batches as one series whose times do not repeat. The watch keeps the keyed
+        // tally beside the one series while every candidate holds one value, and chooses at the
+        // first key that changes: a series that begins back in time, after runs whose times
+        // kept one direction, is a cut into series. Either way the profile is the one reading
+        // the table gives, and a guess the rest of the stream belies is read from the table.
+        let mut tb = TestBench::new("sorted");
+        let no = crate::profile::Shape::default();
+        const M: i64 = 60_000_000;
+        let t0 = 1_767_225_600_000_000i64;
+        let kw = |n: usize| -> ArrayRef {
+            Arc::new(Float64Array::from_iter((0..n).map(|i| match i % 1_009 {
+                0..=20 => Some(0.0),
+                21 => None,
+                k => Some(k as f64 * 0.5),
+            })))
+        };
+        let bench = tb.bench();
+
+        // Four meters of 30,000 minutes each over the same days, a meter at a time: the first
+        // batches are one meter's, which reads one minute twice. For an hour every meter but
+        // that one reads 0, which only the totals per time kept while it waited tell from all
+        // of them reading 0.
+        let (s, per) = (4usize, 30_000usize);
+        let n = s * per;
+        // Meter 0's 5,000th minute is its 4,999th again.
+        let minute = |i: usize| i % per - usize::from(i == 5_000);
+        let a = stream(
+            bench,
+            "a",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us((0..n).map(|i| Some(t0 + minute(i) as i64 * M)).collect()),
+                ),
+                (
+                    "meter",
+                    "string",
+                    Arc::new(StringArray::from_iter_values(
+                        (0..n).map(|i| format!("m{}", i / per)),
+                    )),
+                ),
+                (
+                    "kw",
+                    "float64",
+                    Arc::new(Float64Array::from_iter((0..n).map(|i| {
+                        match (i / per, i % per, i % 1_009) {
+                            (1.., 100..160, _) | (_, _, 0..=20) => Some(0.0),
+                            (_, _, 21) => None,
+                            (_, _, k) => Some(k as f64 * 0.5),
+                        }
+                    }))),
+                ),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &a, &no), (true, true), "by meter, then time");
+        // The key's distinct count, the one value it held while it waited included.
+        let duck: i64 = bench
+            .connection()
+            .query_row("SELECT approx_count_distinct(meter) FROM a", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            a.seen.as_ref().unwrap().candidate_distinct(),
+            Some(&[duck][..])
+        );
+
+        // An integer key, each meter's rows newest first, one meter starting a day late; the
+        // first meter, the one that waits, reads 0 throughout and one minute twice.
+        let b = stream(
+            bench,
+            "b",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us(
+                        (0..n)
+                            .map(|i| {
+                                let late = if i / per == 2 { 1_440 } else { 0 };
+                                Some(t0 + (late + per - 1 - minute(i)) as i64 * M)
+                            })
+                            .collect(),
+                    ),
+                ),
+                (
+                    "sensor",
+                    "int64",
+                    Arc::new(Int64Array::from_iter_values(
+                        (0..n).map(|i| 40 + (i / per) as i64),
+                    )),
+                ),
+                (
+                    "kw",
+                    "float64",
+                    Arc::new(Float64Array::from_iter_values(
+                        (0..n).map(|i| if i < per { 0.0 } else { (i % 97) as f64 }),
+                    )),
+                ),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &b, &no), (true, true), "newest first");
+
+        // One series that is one: a key that never changes, to the end.
+        let n = 60_000usize;
+        let c = stream(
+            bench,
+            "c",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us((0..n).map(|i| Some(t0 + i as i64 * M)).collect()),
+                ),
+                (
+                    "site",
+                    "string",
+                    Arc::new(StringArray::from_iter_values((0..n).map(|_| "plant"))),
+                ),
+                ("kw", "float64", kw(n)),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &c, &no), (true, true), "one site");
+        // Stated as the key, the one series is the one its tally kept.
+        let site = crate::profile::Shape {
+            time_column: Some("ts".into()),
+            series: vec!["site".into()],
+        };
+        assert_eq!(both(bench, &c, &site), (true, true), "one site, stated");
+
+        // One series whose label changes as time goes on: it never goes back, so it is one.
+        let d = stream(
+            bench,
+            "d",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us((0..n).map(|i| Some(t0 + i as i64 * M)).collect()),
+                ),
+                (
+                    "mode",
+                    "string",
+                    Arc::new(StringArray::from_iter_values(
+                        (0..n).map(|i| if i < 40_000 { "day" } else { "night" }),
+                    )),
+                ),
+                ("kw", "float64", kw(n)),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &d, &no), (true, true), "a label");
+
+        // A guess the stream belies: the second meter goes back in time, but between the first
+        // one's minutes, so no time repeats and the table is one series. That pass is read.
+        let e = stream(
+            bench,
+            "e",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us(
+                        (0..n)
+                            .map(|i| Some(t0 + (2 * (i % 30_000) + i / 30_000) as i64 * M))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "meter",
+                    "string",
+                    Arc::new(StringArray::from_iter_values(
+                        (0..n).map(|i| format!("m{}", i / 30_000)),
+                    )),
+                ),
+                ("kw", "float64", kw(n)),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &e, &no), (true, false), "belied");
+
+        // One series in no order beside an integer reading that changes every row: it goes back
+        // at changes too, but in runs of one row, so it is not taken for a key.
+        let g = stream(
+            bench,
+            "g",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us((0..n).map(|i| Some(t0 + ((i * 7_919) % n) as i64 * M)).collect()),
+                ),
+                (
+                    "reading",
+                    "int64",
+                    Arc::new(Int64Array::from_iter_values((0..n).map(|i| (i % 7) as i64))),
+                ),
+                ("kw", "float64", kw(n)),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &g, &no), (true, true), "no order");
+
+        // A key that never changes, beside times in no order: no series is in time order, so the
+        // one series is chosen there and then, and the keyed tally and the key's distinct count
+        // are not kept to the end, as they are for one site in order.
+        let h = stream(
+            bench,
+            "h",
+            vec![
+                (
+                    "ts",
+                    "timestamptz",
+                    ts_us((0..n).map(|i| Some(t0 + ((i * 7_919) % n) as i64 * M)).collect()),
+                ),
+                (
+                    "site",
+                    "string",
+                    Arc::new(StringArray::from_iter_values((0..n).map(|_| "plant"))),
+                ),
+                ("kw", "float64", kw(n)),
+            ],
+            16_384,
+        );
+        assert_eq!(both(bench, &h, &no), (true, true), "one site, no order");
+        let counted = |t: &LoadedTable| t.seen.as_ref().unwrap().candidate_distinct().is_some();
+        assert!(!counted(&h), "one site in no order was kept as if it could be cut");
+        assert!(counted(&c), "one site in order was not kept as if it could be cut");
+
+        // Times alone, which repeat only after many batches.
+        let f = stream(
+            bench,
+            "f",
+            vec![(
+                "ts",
+                "timestamptz",
+                ts_us((0..n).map(|i| Some(t0 + (i % 20_000) as i64 * M)).collect()),
+            )],
+            16_384,
+        );
+        assert_eq!(both(bench, &f, &no), (true, true), "times alone");
+
+        // The issue's shape: a Parquet file sorted by meter, then time, watched a DuckDB vector
+        // at a time.
+        let path = tb.1.join("sorted.parquet");
+        tb.bench()
+            .connection()
+            .execute_batch(&format!(
+                "COPY (SELECT TIMESTAMPTZ '2026-01-01 00:00:00+00' + to_minutes(i % 10_000) AS ts, \
+                 'm' || (i // 10_000) AS meter, (i % 97)::DOUBLE AS kw \
+                 FROM range(30_000) r(i) ORDER BY i) TO {} (FORMAT parquet)",
+                literal(&path.to_string_lossy())
+            ))
+            .unwrap();
+        let bench = tb.0.as_mut().unwrap();
+        crate::profile::SEEN_USED.with(|u| u.set((0, 0)));
+        let t = load_file(bench, "sorted", &path).unwrap();
+        assert_eq!(
+            crate::profile::SEEN_USED.with(|u| u.get()),
+            (1, 1),
+            "the profile read the sorted file back"
+        );
+        let mut kept = t.clone();
+        kept.seen = watched(bench.connection(), &t.name, &t.columns);
+        assert_eq!(both(bench, &kept, &no), (true, true), "the file");
+    }
+
+    #[test]
     fn a_kept_distinct_count_of_a_tallied_key_is_duckdbs() {
         // A key a tally keeps series for is hashed once per series, not once per row: a value
         // counted twice changes nothing. What is counted must still be what DuckDB counts: a

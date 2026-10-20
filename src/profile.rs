@@ -1499,6 +1499,13 @@ impl Times {
             if r == t {
                 return Some(i);
             }
+            // #54: rows sorted by series, then time, bring each series' times in the order the
+            // first series gave them their slots, so a time is most often the one in the slot
+            // after the last time's: a compare, where it was a lookup a row.
+            if self.t.get(i + 1) == Some(&t) {
+                self.recent = Some((t, i + 1));
+                return Some(i + 1);
+            }
         }
         let i = self.find(t)?;
         self.recent = Some((t, i));
@@ -2126,7 +2133,15 @@ impl Tally {
         if self.flat_rows > self.flat_max {
             self.flat = None;
         }
-        let (Some(tm), Some(ts)) = (self.times.as_mut(), time) else {
+        if let Some(ts) = time {
+            self.add_times(rows, ts, values);
+        }
+    }
+
+    /// Rows `rows`' times and values, into the totals per time.
+    #[inline(always)]
+    fn add_times(&mut self, rows: std::ops::Range<usize>, ts: Stamps, values: &[Doubles]) {
+        let Some(tm) = self.times.as_mut() else {
             return;
         };
         for (i, t) in rows.clone().zip(&ts.v[rows]) {
@@ -2152,6 +2167,52 @@ impl Tally {
                 r.summed[j] = true;
             }
         }
+    }
+
+    /// #54: `n` rows of a tally that waits to begin ([`Watch::begin`]): their totals per time
+    /// alone, which nothing else keeps.
+    fn wait(&mut self, n: usize, time: Option<Stamps>, values: &[Doubles]) {
+        if let Some(ts) = time {
+            self.add_times(0..n, ts, values);
+        }
+    }
+
+    /// #54: begin a tally that waited, with its one series keyed `key` (words `w`) as `one`
+    /// kept it of every row so far ([`Series::note`]): `rows` rows, `timed` of them with a time
+    /// from `first` to `last`, and its measures and rows of 0 or null. A row adds the same to
+    /// either, so the series is the one the tally would have kept
+    /// (`a_stream_sorted_by_series_is_tallied_by_its_key`).
+    fn begin(
+        &mut self,
+        (key, w): (&str, Words),
+        rows: i64,
+        (timed, first, last): (i64, Option<i64>, Option<i64>),
+        one: &Series,
+        measures: &[HotMeasure],
+        flat: Option<Vec<Vec<(u32, i64, bool)>>>,
+    ) {
+        let Found::At(x) = self.find(key, w) else {
+            self.alive = false;
+            return;
+        };
+        let h = &mut self.hot[x];
+        h.rows = rows;
+        if timed > 0 {
+            h.timed = timed;
+            h.first = first.unwrap_or(i64::MAX);
+            h.last = last.unwrap_or(i64::MIN);
+            h.t0 = one.t0.unwrap_or(0);
+            h.gcd = one.gcd;
+            h.sum_d = one.sum_d;
+            h.sum_d2 = one.sum_d2;
+            h.rising = one.rising;
+            h.falling = one.falling;
+        }
+        let nm = self.nm;
+        self.measures[x * nm..(x + 1) * nm].copy_from_slice(measures);
+        self.flat_rows = flat.as_ref().map_or(0, |f| f.iter().map(Vec::len).sum());
+        self.flat = flat.filter(|_| self.flat_rows <= self.flat_max);
+        self.last = Some(x);
     }
 
     /// The series keyed `key`, by lookup, or begun.
@@ -2535,16 +2596,111 @@ const WATCH_FLAT_MAX: usize = 500_000;
 /// few, since each costs a lookup a row.
 const WATCH_KEYS_MAX: usize = 2;
 
+/// #54: how a candidate's series and the times have followed one another, row after row, while
+/// the watch has not chosen between the one series and the keyed tallies ([`Watch::add`]). Rows
+/// sorted by series, then time, as most per-device exports are, show their first batches as one
+/// series whose times do not repeat, which once chose the one series: the table's pass was then
+/// read again on one thread, 250–307 ms of a 0.90–1.07 s load of 10,000,000 rows of 150 series
+/// from Parquet, where the same rows sorted by time took 6–16 ms of 0.59–0.64 s.
+///
+/// Only rows with a time are counted, each against the one with a time before it.
+#[derive(Clone, Copy, Default)]
+struct Order {
+    /// The row before's series ([`Tally`]'s index) and time.
+    before: Option<(u32, i64)>,
+    rows: i64,
+    /// Rows whose series is not the row before's.
+    changes: i64,
+    /// Rows of the row before's series earlier than it, and later.
+    earlier: i64,
+    later: i64,
+    /// Rows beginning another series no later than the row before, and no earlier.
+    back: i64,
+    ahead: i64,
+}
+
+/// The one value a candidate has held while its tally waits ([`Watch::begin`]).
+#[derive(Clone)]
+enum Wait {
+    /// No row yet.
+    Unset,
+    Null,
+    Text(String),
+    Int(i128),
+}
+
+/// What an [`Order`] says of its candidate so far.
+#[derive(PartialEq)]
+enum Sorted {
+    /// One value yet, in times that kept one direction: one series, or the first of several.
+    Waiting,
+    /// Runs of its values, each in time order, and a value that began back in time: rows sorted
+    /// by series, then time, whose times will repeat.
+    Series,
+    /// Neither.
+    No,
+}
+
+impl Order {
+    /// The rows of a batch: each one's series, `xs`, and its time.
+    #[inline(always)]
+    fn see(&mut self, xs: impl Iterator<Item = u32>, time: Stamps) {
+        let mut o = *self;
+        for (i, (x, t)) in xs.zip(time.v).enumerate() {
+            if !time.valid(i) {
+                continue;
+            }
+            let t = *t;
+            o.rows += 1;
+            if let Some((bx, bt)) = o.before {
+                if x == bx {
+                    o.earlier += i64::from(t < bt);
+                    o.later += i64::from(t > bt);
+                } else {
+                    o.changes += 1;
+                    o.back += i64::from(t <= bt);
+                    o.ahead += i64::from(t >= bt);
+                }
+            }
+            o.before = Some((x, t));
+        }
+        *self = o;
+    }
+
+    fn sorted(&self) -> Sorted {
+        // Within a series, times that go both ways are not a series' in order.
+        if self.earlier > 0 && self.later > 0 {
+            return Sorted::No;
+        }
+        if self.changes == 0 {
+            return Sorted::Waiting;
+        }
+        // Runs of ten rows on average at least, as the profile asks of a key's series: a
+        // reading that changes every row, beside times in no order, also goes back at changes.
+        if self.changes * 10 > self.rows {
+            return Sorted::No;
+        }
+        if (self.earlier == 0 && self.back > 0) || (self.later == 0 && self.ahead > 0) {
+            Sorted::Series
+        } else {
+            Sorted::No
+        }
+    }
+}
+
 /// The profile's first scan and its pass, worked out from a stream's batches as they go into the
 /// table ([`crate::source::Ingest`]), so the table is not read back for them.
 ///
 /// The first scan's aggregates are kept for every column it would ask about. Its distinct counts
 /// are DuckDB's own `approx_count_distinct`, the same HyperLogLog over the same hashes ([`Hll`]),
 /// so the same rows choose the same way whichever way they were counted
-/// (`a_kept_distinct_count_is_duckdbs`). The pass is kept one way, chosen on the first batch: by
-/// each candidate column, when there are at most [`WATCH_KEYS_MAX`] and that batch's times repeat;
-/// else as one series. A cut the profile then makes that was not kept, or whose tally gave up, is
-/// read from the table as before, and says the same.
+/// (`a_kept_distinct_count_is_duckdbs`). The pass is kept one way: by each candidate column, when
+/// there are at most [`WATCH_KEYS_MAX`] and the first batch's times repeat, or once a candidate's
+/// values and the times follow one another as rows sorted by series, then time ([`Order`]); else
+/// as one series. Until one of those is known both are kept, so a stream sorted by series is
+/// tallied by its key (`a_stream_sorted_by_series_is_tallied_by_its_key`). A cut the profile
+/// then makes that was not kept, or whose tally gave up, is read from the table as before, and
+/// says the same.
 ///
 /// Measured with bench/ingest.py (docs/PERFORMANCE.md, 2026-10-11): a 10,000,000-row stream of
 /// one series, 12.8% fewer instructions in all (exec) and 12.5% (ClickHouse); of 500 series
@@ -2585,8 +2741,15 @@ pub struct Watch {
     one_flat_rows: usize,
     /// Per candidate column guessed as the key: the numeric columns it examines, and its tally.
     keyed: Vec<(usize, Vec<usize>, Tally)>,
-    /// Whether the first batch has chosen between `one` and `keyed`.
+    /// Whether the first batch has been seen: it chooses between `one` and `keyed`, or leaves
+    /// the choice to `order`.
     chosen: bool,
+    /// #54: per tally in `keyed`, how its series and the times have followed one another, while
+    /// both `one` and `keyed` are kept; `None` once one of them is chosen.
+    order: Option<Vec<Order>>,
+    /// #54: per tally in `keyed`, the one value its candidate has held, while the tallies wait
+    /// to begin ([`Watch::begin`]); `None` once they have.
+    waits: Option<Vec<Wait>>,
     /// Whether the first batch's times repeat: then a time is hashed only when it is not the
     /// row before's ([`Watch::times`]).
     repeating: bool,
@@ -2691,6 +2854,51 @@ macro_rules! with_keys {
     };
 }
 
+/// Whether each of `n` rows of candidate column `col` holds `w`, which the first row sets when it
+/// is not set yet. A value this cannot compare is a change.
+fn holds(col: &Held, n: usize, w: &mut Wait) -> bool {
+    if n == 0 {
+        return true;
+    }
+    let nulls = col.nulls;
+    match &col.values {
+        Values::Text(keys) => with_keys!(keys, |a| {
+            if matches!(w, Wait::Unset) {
+                *w = if valid(nulls, 0) {
+                    Wait::Text(a.value(0).to_string())
+                } else {
+                    Wait::Null
+                };
+            }
+            match w {
+                Wait::Text(s) => (0..n).all(|i| valid(nulls, i) && a.value(i) == s.as_str()),
+                Wait::Null => (0..n).all(|i| !valid(nulls, i)),
+                _ => false,
+            }
+        }),
+        Values::Int(v) => {
+            if matches!(w, Wait::Unset) {
+                *w = if valid(nulls, 0) {
+                    Wait::Int(v.get(0))
+                } else {
+                    Wait::Null
+                };
+            }
+            let mut same = true;
+            match w {
+                Wait::Int(x) => {
+                    let x = *x;
+                    v.each(n, |i, y| same &= valid(nulls, i) && y == x);
+                }
+                Wait::Null => same = (0..n).all(|i| !valid(nulls, i)),
+                _ => same = false,
+            }
+            same
+        }
+        _ => false,
+    }
+}
+
 impl Watch {
     /// Keep the profile of a table whose columns are `columns`, name and DuckDB type, as the
     /// bench holds them.
@@ -2752,6 +2960,8 @@ impl Watch {
             one_flat_rows: 0,
             keyed,
             chosen: false,
+            order: None,
+            waits: None,
             repeating: false,
             converted: vec![Vec::new(); numeric.len()],
             candidates,
@@ -2772,6 +2982,53 @@ impl Watch {
         self.ok = false;
     }
 
+    /// #54: begin the tallies that waited, each with the one series `one` and the scan's
+    /// aggregates kept of the rows so far, `rows` (rows, timed, first, last), before any later
+    /// row is added to those: the measures from the scan's, each column's own, and the rows of 0
+    /// or null from `one`'s where it examines the same columns. With none so far, each begins
+    /// empty.
+    fn begin(&mut self, (rows, timed, first, last): (i64, i64, Option<i64>, Option<i64>)) {
+        let Some(waits) = self.waits.take() else {
+            return;
+        };
+        if rows == 0 {
+            return;
+        }
+        let Some(one) = self.one.as_ref() else {
+            self.keyed.clear();
+            return;
+        };
+        let at = |c: usize| self.numeric.iter().position(|n| *n == c).expect("numeric");
+        let one_cols = &self.numeric[..self.one_nm];
+        let null = key_words(NULL_PART.as_bytes());
+        for ((_, examined, tally), w) in self.keyed.iter_mut().zip(&waits) {
+            let key = match w {
+                Wait::Text(s) => (s.as_str(), key_words(s.as_bytes())),
+                Wait::Int(x) => ("", int_words(*x)),
+                Wait::Null | Wait::Unset => (NULL_PART, null),
+            };
+            let measures: Vec<HotMeasure> = examined
+                .iter()
+                .map(|e| {
+                    let m = &self.numbers[at(*e)];
+                    HotMeasure {
+                        nulls: m.nulls,
+                        zeros: m.zeros,
+                        min: m.min.unwrap_or(f64::NAN),
+                        max: m.max.unwrap_or(f64::NEG_INFINITY),
+                    }
+                })
+                .collect();
+            let flat = self.one_flat.as_ref().and_then(|f| {
+                examined
+                    .iter()
+                    .map(|e| Some(f[one_cols.iter().position(|c| c == e)?].clone()))
+                    .collect::<Option<Vec<_>>>()
+            });
+            tally.begin(key, rows, (timed, first, last), one, &measures, flat);
+        }
+    }
+
     /// `n` rows, in the order they went into the table: `cols[i]` is column `i`
     /// ([`Held::of`]), for every column [`Watch::needs`].
     pub fn add(&mut self, n: usize, cols: &[Option<Held>]) {
@@ -2787,6 +3044,8 @@ impl Watch {
             self.ok = false;
             return;
         }
+        // What the batches before this one came to, should a waiting tally be begun from them.
+        let before = (self.total, self.timed, self.first, self.last);
         self.total += n as i64;
         // The time, in epoch milliseconds as `epoch_ms` says it: truncated toward zero. A row
         // without one keeps a 0 in `ms`, never read: `tnulls` says it has none.
@@ -2845,9 +3104,11 @@ impl Watch {
         let time = |i: usize| (has_time && valid(tnulls, i)).then(|| ms[i]);
         if !self.chosen {
             // One tally, not all: on the first batch, times that repeat say the table will be cut
-            // into series, if a candidate was tallied, and times that do not say it will be one.
-            // The tally not kept is the pass the profile reads from the table, should the rest of
-            // the stream say otherwise.
+            // into series, if a candidate was tallied. Times that do not are left to `order`,
+            // with both kept until it says which (#54): rows sorted by series show their first
+            // batches as one series, and a reading that changes every row beside times that
+            // never go back says one series at once. The tally not kept is the pass the profile
+            // reads from the table, should the rest of the stream say otherwise.
             self.chosen = true;
             // Counted exactly, once: 64 registers are too few to tell one batch's times apart.
             let mut first: Vec<i64> = (0..n).filter_map(time).collect();
@@ -2857,6 +3118,9 @@ impl Watch {
             self.repeating = repeats;
             if repeats && !self.keyed.is_empty() {
                 self.one = None;
+            } else if has_time && !self.keyed.is_empty() {
+                self.order = Some(vec![Order::default(); self.keyed.len()]);
+                self.waits = Some(vec![Wait::Unset; self.keyed.len()]);
             } else {
                 self.keyed.clear();
             }
@@ -2865,9 +3129,29 @@ impl Watch {
             // say they will not be asked for: they are not kept, and should the rest of the
             // stream repeat its times after all, the profile counts them from the table
             // (`profile.distinct`), as it would have read the pass. A one-series stream's
-            // text column cost 66 of its 164 instructions a row (R2-2).
-            if has_time && !repeats {
+            // text column cost 66 of its 164 instructions a row (R2-2). While `order` waits they
+            // are kept, as the keyed tallies are.
+            if has_time && !repeats && self.order.is_none() {
                 self.candidate_hll = None;
+            }
+        }
+        // #54: while every candidate holds the one value it began with, its tally would hold
+        // one series, the one `one` keeps, and is not run: only its totals per time are kept,
+        // which `one` does not keep. At the first batch where one changes, every tally begins
+        // from what `one` and the scan's aggregates kept of the batches before
+        // ([`Watch::begin`]), before this batch is added to them. Run all along, the waiting
+        // tally cost a 10,000,000-row Parquet table of one series beside a constant text column
+        // 2.2 G instructions (+9.9%) and 300 ms of the watch's CPU.
+        let mut waiting = false;
+        if self.waits.is_some() {
+            let waits = self.waits.as_mut().expect("waiting");
+            waiting = self
+                .keyed
+                .iter()
+                .zip(waits.iter_mut())
+                .all(|((c, _, _), w)| holds(cols[*c].as_ref().expect("needed"), n, w));
+            if !waiting {
+                self.begin(before);
             }
         }
         // Each numeric column as a double: the cast is monotone, so the range of the doubles is
@@ -2981,7 +3265,7 @@ impl Watch {
             v: &ms[..n],
             nulls: tnulls,
         });
-        for (c, examined, tally) in self.keyed.iter_mut() {
+        for (ki, (c, examined, tally)) in self.keyed.iter_mut().enumerate() {
             if !tally.alive {
                 continue;
             }
@@ -2994,6 +3278,20 @@ impl Watch {
                 .position(|x| x == c)
                 .expect("a candidate");
             let mut h = self.candidate_hll.as_mut().map(|v| &mut v[k]);
+            if waiting {
+                // The one value, counted once: counting it again changes nothing.
+                let w = &self.waits.as_ref().expect("waiting")[ki];
+                if let Some(h) = h.as_mut() {
+                    match w {
+                        Wait::Text(s) => h.insert(hash_bytes(s.as_bytes())),
+                        Wait::Int(x) => h.insert(int_hash(*x, self.columns[*c].1 == "HUGEINT")),
+                        Wait::Null | Wait::Unset => {}
+                    }
+                }
+                tally.wait(n, stamps, &m);
+                from[k] = n;
+                continue;
+            }
             let took = match &col.values {
                 Values::Text(keys) => with_keys!(keys, |a| tally.add(
                     n,
@@ -3073,6 +3371,38 @@ impl Watch {
                 }
             }
         }
+        // #54: while both are kept, the batch's order chooses, once a candidate says it can:
+        // the keyed tallies at the first that reads as rows sorted by series, the one series
+        // once none can. A tally that gave up says nothing more; one that held every row of the
+        // batch has each row's series in `xs`, since a watch's tally is never cut.
+        if let (Some(order), Some(st)) = (self.order.as_mut(), stamps) {
+            let (mut series, mut more) = (false, false);
+            for ((_, _, tally), o) in self.keyed.iter().zip(order.iter_mut()) {
+                if waiting {
+                    // Every row is the one series'.
+                    o.see(std::iter::repeat(0), st);
+                } else if tally.alive && tally.xs.len() == n {
+                    o.see(tally.xs.iter().copied(), st);
+                } else {
+                    continue;
+                }
+                match o.sorted() {
+                    Sorted::Series => series = true,
+                    Sorted::Waiting => more = true,
+                    Sorted::No => {}
+                }
+            }
+            if series {
+                self.one = None;
+                self.one_flat = None;
+                self.order = None;
+            } else if !more {
+                self.keyed.clear();
+                self.candidate_hll = None;
+                self.order = None;
+                self.waits = None;
+            }
+        }
         drop(doubles);
         self.converted = converted;
         self.ms = ms;
@@ -3131,10 +3461,13 @@ impl Watch {
     }
 
     /// What was seen, or `None` if it cannot stand for the table.
-    pub fn finish(self) -> Option<Seen> {
+    pub fn finish(mut self) -> Option<Seen> {
         if !self.ok {
             return None;
         }
+        // Tallies that waited to the end hold one series each, begun here so that each says
+        // what it would have, should the profile ask for its cut.
+        self.begin((self.total, self.timed, self.first, self.last));
         let name = |c: usize| self.columns[c].0.clone();
         let flat = self.one_flat;
         let one = self.one.map(|mut s| {

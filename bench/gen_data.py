@@ -21,6 +21,11 @@ profile cuts the table into 500 series, as a table of many meters is cut.
 `intkey` writes readings-intkey.arrows: `series`' rows with `meter` an int64, 1000 + i % 500,
 so the profile tallies an integer key (R3-10).
 
+`bytime` and `bymeter` write `series`' rows as Parquet, in bytime/ and bymeter/ (readings.parquet
+each): bytime in `series`' order, every meter at each minute; bymeter sorted by meter, then time,
+each meter's minutes in turn, as a per-device export is. The same table, so only the order
+differs (#54: the watch once saw bymeter's first batches as one series).
+
 `lz4` writes readings-lz4.arrows: the rows of readings.arrows, each batch's buffers compressed
 with LZ4 as Arrow IPC allows, which is how ClickHouse's `ArrowStream` sends them by default.
 """
@@ -36,16 +41,20 @@ CHUNK = 1_000_000
 BASE_US = 1767225600 * 1_000_000  # 2026-01-01T00:00:00Z
 
 
-def chunk(start, n, series=False, intkey=False):
-    i = pa.array(range(start, start + n), pa.int64())
+def chunk(start, n, series=False, intkey=False, per=None):
+    keys = range(start, start + n)
+    if per:
+        # Sorted by meter, then time: row j is meter j // per's (j % per)-th minute.
+        keys = [(j % per) * 500 + j // per for j in keys]
+    i = pa.array(keys, pa.int64())
     if series:
         i = pc.divide(i, 500)
     ts = pc.add(pc.multiply(i, 60_000_000), BASE_US).cast(pa.timestamp("us", tz="UTC"))
     if intkey:
-        meter = pa.array([1000 + k % 500 for k in range(start, start + n)], pa.int64())
+        meter = pa.array([1000 + k % 500 for k in keys], pa.int64())
     else:
-        meter = pa.array([f"m{k % 500:03d}" for k in range(start, start + n)], pa.string())
-    kw = pa.array([(k % 997) * 1.5 for k in range(start, start + n)], pa.float64())
+        meter = pa.array([f"m{k % 500:03d}" for k in keys], pa.string())
+    kw = pa.array([(k % 997) * 1.5 for k in keys], pa.float64())
     return pa.table({"ts": ts, "meter": meter, "kw": kw})
 
 
@@ -59,6 +68,8 @@ def main(out, rows):
         "series": os.path.join(d, "readings-series.arrows"),
         "lz4": os.path.join(d, "readings-lz4.arrows"),
         "intkey": os.path.join(d, "readings-intkey.arrows"),
+        "bytime": os.path.join(d, "bytime", "readings.parquet"),
+        "bymeter": os.path.join(d, "bymeter", "readings.parquet"),
     }
     want = [k for k in sys.argv[3:]] or list(paths)
     todo = {k: p for k, p in paths.items() if k in want and not os.path.exists(p)}
@@ -77,6 +88,8 @@ def main(out, rows):
     series_w = pa.ipc.new_stream(series_sink, schema) if series_sink else None
     int_sink = pa.OSFile(tmp["intkey"], "wb") if "intkey" in tmp else None
     int_w = pa.ipc.new_stream(int_sink, chunk(0, 1, True, True).schema) if int_sink else None
+    bytime_w = pq.ParquetWriter(tmp["bytime"], schema) if "bytime" in tmp else None
+    bymeter_w = pq.ParquetWriter(tmp["bymeter"], schema) if "bymeter" in tmp else None
     lz4_sink = pa.OSFile(tmp["lz4"], "wb") if "lz4" in tmp else None
     lz4_w = pa.ipc.new_stream(lz4_sink, schema, options=pa.ipc.IpcWriteOptions(
         compression="lz4")) if lz4_sink else None
@@ -101,11 +114,16 @@ def main(out, rows):
             for b in chunk(start, min(CHUNK, rows - start), series=True).to_batches(
                     max_chunksize=65_536):
                 series_w.write_batch(b)
+        if bytime_w:
+            bytime_w.write_table(chunk(start, min(CHUNK, rows - start), series=True))
+        if bymeter_w:
+            bymeter_w.write_table(chunk(start, min(CHUNK, rows - start), series=True,
+                                        per=rows // 500))
         if int_w:
             for b in chunk(start, min(CHUNK, rows - start), True, True).to_batches(
                     max_chunksize=65_536):
                 int_w.write_batch(b)
-    for w in (csv_w, pq_w, ipc_w, series_w, lz4_w, int_w):
+    for w in (csv_w, pq_w, ipc_w, series_w, lz4_w, int_w, bytime_w, bymeter_w):
         if w:
             w.close()
     for sink in (ipc_sink, series_sink, lz4_sink, int_sink):
