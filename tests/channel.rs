@@ -658,6 +658,18 @@ fn a_stream_channel_is_one_the_operator_names() {
             .stderr(std::process::Stdio::piped());
         if let Some(fd) = &fd3 {
             common::streamed::inherit_as(&mut cmd, fd, 3);
+        } else {
+            // "No descriptor 3" has to be made, not assumed: under cargo-mutants the test
+            // process inherits cargo's jobserver pipe, and the binary took that as a channel and
+            // started, which failed the weekly run's baseline before any mutant was tested.
+            use std::os::unix::process::CommandExt;
+            // SAFETY: close is async-signal-safe; EBADF, when there is no descriptor 3, is fine.
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::close(3);
+                    Ok(())
+                });
+            }
         }
         cmd.output().unwrap()
     };
