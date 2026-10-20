@@ -8,6 +8,29 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 Changed behaviour:
 
+- **`describe` judges each series at its own step** (#50). On a table of series every 5, 10
+  and 15 minutes, every complete 10- and 15-minute series was read at the table's 5 minutes and
+  reported broken ("1014: 8735 gaps, 17470 rows missing"). A series is now judged at the step
+  its times keep — the common divisor of their distances, or, where it breaks that, the distance
+  at least half its rows keep — and its gaps, runs of 0 and late start or early end at that step.
+  The time column's line says how many series keep each step (`series have a row every 5 minutes
+  (52 series), 10 minutes (49) or 15 minutes (48)`), the line on regular series how many of each
+  are regular, and a series off the most common step says its own. One cadence reads as before.
+  (`each_series_is_judged_at_its_own_step`)
+- **Alike notes are said once** (#50): series whose notes are the same are one line, by their
+  keys, an integer key's consecutive values as a range (`1090–1099 (10 series): kw is 0 in every
+  row`). And every table's own lines — time column, key, cadence, columns — get the `describe`
+  budget before any table's notes about single series, so a small table beside one with many
+  notes keeps its shape (`every_tables_shape_comes_before_any_tables_notes`).
+- **A value held too long is noted** (#51): `'r1': temp is 21.5 from … to … (21 days)`, for a
+  run of one value, not 0 or null, lasting a day or more by the same rule as a run of 0 (a gap
+  breaks it) and holding ten times as many rows as the series' runs of one value do on average,
+  so a status code or a setpoint that holds each value for days is not noted. Only tables with a
+  series key are examined. No configuration. The loader's pass counts the runs as it goes, and
+  reads a series again only when its longest run could be one to note
+  (`a_stuck_value_inside_a_series_is_noted`, `the_pass_misses_no_value_held`). The line that
+  lists what is noted is 58 bytes longer.
+
 - **A helper macro may not read a table** (#58). DuckDB expands a macro inside the caller's
   query, where a CTE of the caller's named like a table the macro reads stands in for it; 0.2.0
   guarded that by reading every batch for such a CTE. Now a helper macro whose body reads a

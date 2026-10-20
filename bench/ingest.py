@@ -26,7 +26,9 @@ Scenarios: csv-1m, parquet-1m, ndjson-1m (a folder), exec-1m, exec-10m (an exec 
 `cat`s an Arrow stream, so the connector costs next to nothing and the time is benchy's),
 exec_series-1m, exec_series-10m (the same, with 500 meters reading every minute, so the times
 repeat and the profile cuts the table into series), exec_intkey-1m, exec_intkey-10m
-(exec_series' rows with `meter` an int64, so the key tallied is an integer, R3-10), exec_lz4-1m,
+(exec_series' rows with `meter` an int64, so the key tallied is an integer, R3-10), exec_mixed-1m,
+exec_mixed-10m (150 meters reading every 1, 2 or 3 minutes, each judged at its own step, #50),
+exec_lz4-1m,
 exec_lz4-10m (exec's rows with
 each batch's buffers LZ4-compressed, as ClickHouse's `ArrowStream` sends them by default),
 ch-1m, ch-10m (the built-in ClickHouse source, against a server this script starts on port 8133,
@@ -86,7 +88,7 @@ FETCH_MBPS = 0
 # the engine's open, the attach check.
 ROWS = {"1k": 1_000, "1m": 1_000_000, "10m": 10_000_000}
 # The kinds bench/gen_data.py writes as one Arrow IPC stream file, rather than a folder.
-STREAMS = ("arrows", "series", "lz4", "intkey")
+STREAMS = ("arrows", "series", "lz4", "intkey", "mixed")
 # Caps raised so 10,000,000 rows fit: the defaults are 10,000,000 rows and 256 MiB per fetch.
 CAPS = "max_rows = 20_000_000\nmax_bytes = 4_294_967_296\n"
 BUDGET = "[budget]\nrows = 100_000_000\nbytes = 8_589_934_592\n"
@@ -99,7 +101,8 @@ def data(rows, kind):
     path = {"arrows": os.path.join(d, "readings.arrows"),
             "series": os.path.join(d, "readings-series.arrows"),
             "lz4": os.path.join(d, "readings-lz4.arrows"),
-            "intkey": os.path.join(d, "readings-intkey.arrows")}.get(kind, os.path.join(d, kind))
+            "intkey": os.path.join(d, "readings-intkey.arrows"),
+            "mixed": os.path.join(d, "readings-mixed.arrows")}.get(kind, os.path.join(d, kind))
     probe = path if kind in STREAMS else os.path.join(path, f"readings.{kind}")
     if not os.path.exists(probe):
         print(f"  making {probe} …", file=sys.stderr)
@@ -274,9 +277,9 @@ def scenario_args(name, work, ch):
                      "  [[source.schema]]\n  name = \"meter\"\n  type = \"string\"\n"
                      "  [[source.schema]]\n  name = \"kw\"\n  type = \"float64\"\n")
         return ["--config", cfg]
-    if kind in ("exec", "exec_series", "exec_lz4", "exec_intkey"):
+    if kind in ("exec", "exec_series", "exec_lz4", "exec_intkey", "exec_mixed"):
         stream = data(rows, {"exec": "arrows", "exec_series": "series", "exec_lz4": "lz4",
-                             "exec_intkey": "intkey"}[kind])
+                             "exec_intkey": "intkey", "exec_mixed": "mixed"}[kind])
         connector = os.path.join(work, "cat.sh")
         with open(connector, "w") as fh:
             fh.write("#!/bin/sh\n# fetch: the stream as it is; anything else: not implemented\n"

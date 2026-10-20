@@ -2795,17 +2795,21 @@ impl Workspace {
                 + crate::result::wire_len(&helpers),
         );
         left = left.saturating_sub(shown_parts);
+        // Every table's own lines before any table's notes about single series
+        // (`every_tables_shape_comes_before_any_tables_notes`).
+        let profiles: Vec<&crate::profile::Profile> = parts
+            .iter()
+            .filter_map(|(i, _)| self.loaded[*i].profile.as_ref())
+            .collect();
+        let mut rendered = crate::profile::render_all(&profiles, left).into_iter();
         let mut unshown = 0;
         for (i, part) in &parts {
             s.push_str(part);
             let Some(p) = &self.loaded[*i].profile else {
                 continue;
             };
-            match p.render(left) {
-                Some(r) => {
-                    left = left.saturating_sub(crate::result::wire_len(&r));
-                    s.push_str(&r);
-                }
+            match rendered.next().flatten() {
+                Some(r) => s.push_str(&r),
                 None if p.lines.is_empty() => {}
                 None => unshown += 1,
             }

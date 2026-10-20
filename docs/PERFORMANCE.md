@@ -302,6 +302,54 @@ aarch64 box under load 4–8 from other work. Whole sessions (load, profile, one
 - **`profile.gaps`** counts per series in DuckDB rather than listing the anomalies in order:
   the same window, one aggregate over its anomalous rows.
 
+## Each series at its own step, and a value held: what it costs
+
+`describe` judges each series at its own step (#50) and notes a value held far longer than its
+series otherwise holds one (#51), REQ-14 `each_series_is_judged_at_its_own_step` and
+`a_stuck_value_inside_a_series_is_noted`. Measured with `bench/ingest.py`, five runs each, the
+least, against the previous commit (`1741193`) on a 4-core aarch64 box under load 2.7–3.9 from
+other work. `exec_mixed` is new: 150 meters every 1, 2 or 3 minutes, each complete
+(`bench/gen_data.py mixed`).
+
+| scenario | instructions, before → after (spread) | `stream.watch` CPU | first `describe` |
+|---|---:|---:|---:|
+| exec_series-1m | 2.272 → 2.292 G, +0.8% (3%, 2%) | 49 → 55 ms | 566 → 561 ms |
+| exec_intkey-1m | 1.569 → 1.603 G, +2.2% (2%, 3%) | 52 → 52 ms | 473 → 484 ms |
+| exec_series-10m | 18.36 → 18.60 G, +1.3% (0%, 0%) | 494 → 530 ms | 3,189 → 3,350 ms |
+| exec_mixed-1m | 7.089 → 2.304 G, −67.5% (4%, 1%) | 46 → 54 ms | 739 → 562 ms |
+| csv-1m | 5.445 → 5.453 G, +0.1% (1%, 0%) | — | 723 → 717 ms |
+
+- **The runs of one value, counted in the pass.** Each examined measure of each row compares
+  its value with the row before's in its series and, when it changed, closes a run and keeps
+  the longest by time and by rows. About 24 instructions a row at exec_series-10m (+0.24 G, its
+  spread 0%), where every row's value differs from its series' last; at 1M rows the difference
+  is inside the spread. It runs on the watch thread, beside an insert four times its CPU, so
+  the first `describe` waits on it only as much as the watch was already close to the insert.
+  A series is read again for its runs only when its longest could be one to note
+  (`the_pass_misses_no_value_held`): no bench scenario has one, and `profile.runs` stays at
+  0 ms. A series whose times came in no order is read by the query, as `profile.settle`
+  already reads it. A table without a series key — csv-1m, exec-10m — is not examined for
+  it and costs nothing more.
+- **Each series at its own step.** Judging a series at the common divisor of its times'
+  distances costs a placement per series. On exec_mixed the 100 slower meters were read at
+  the 1-minute step, failed it, and went to `profile.gaps`'s window: 688 ms of CPU and 4.8 G
+  instructions for notes that were false. Now they are regular at 2 and 3 minutes and nothing
+  is read. A series that breaks its step is judged at the distance most of its rows keep, one
+  more `GROUP BY` over the rows `profile.gaps` already reads, and only for those series.
+- **Alike notes said once, and every table's lines first,** are rendering: microseconds.
+
+**The rule for a value held, on real data.** The public meter data the eval cuts from
+(ElectricityLoadDiagrams20112014: 370 meters, 2011–2014, every 15 minutes, 140,256 rows each)
+has 74 runs of one non-zero value lasting a day or more, in six meters, each of them a reading
+repeated to fourteen digits for 1 to 10 days: frozen readings. Every one holds at least ten
+times its meter's average run, so the rule keeps all 74. Twenty times would have kept 16 and
+fifty times 5; an average of only the runs shorter than a day kept no more at ten times and
+lost fewer at twenty (43). A low-resolution reading still says a value was held when it was:
+rounded to 10 kW the same meters have 1,084 day-long runs in 48 meters and the rule keeps 789
+in 44, rounded to 50 kW 5,888 in 173 and it keeps 2,461 in 147. What it leaves out is a column
+whose runs are all long, as a mode or a status code's are: in the test's, each value held
+about five days, none is ten times the average.
+
 ## Infinite timestamps kept on load: 21 instructions a row
 
 A zone-less timestamp is converted with `make_timestamptz(epoch_us(ts))` (src/canonical.rs),
