@@ -411,10 +411,42 @@ fn no_infinity_read_as_1900(
         ))? {
             continue;
         }
-        let pointer = literal(&format!(
-            "/{}",
-            column.replace('~', "~0").replace('/', "~1")
-        ));
+        // #38: of two keys that differ only in case, the reader renames the later one by a
+        // suffix, `Id` beside `id` to `Id_1`, and, where that is taken too, `A_1` to `A_1_2`:
+        // no key is named as the column then. Which key it was depends on the order the reader
+        // met them in, so every key it could have been is read — the column's own name, and,
+        // for a column `base_N` beside another whose name is `base` in another case, each key
+        // that is `base` in any case — and an infinity in any of them refuses the file. A key
+        // that is not the column's, holding the word as text beside a genuine 1900-01-01 in
+        // the column, refuses it too: rare, and refused rather than loaded wrong
+        // (`an_ndjson_infinity_is_refused_in_a_column_renamed_for_case`).
+        let base = column.rsplit_once('_').and_then(|(base, n)| {
+            (!n.is_empty()
+                && n.bytes().all(|b| b.is_ascii_digit())
+                && written
+                    .1
+                    .iter()
+                    .any(|(o, _)| o != column && o.eq_ignore_ascii_case(base)))
+            .then_some(base)
+        });
+        let (from, pointer) = match base {
+            None => (
+                objects.clone(),
+                literal(&format!(
+                    "/{}",
+                    column.replace('~', "~0").replace('/', "~1")
+                )),
+            ),
+            Some(base) => (
+                format!(
+                    "(SELECT json, k FROM (SELECT json, unnest(json_keys(json)) AS k \
+                     FROM {objects}) WHERE k = {} OR lower(k) = lower({}))",
+                    literal(column),
+                    literal(base)
+                ),
+                "'/' || replace(replace(k, '~', '~0'), '/', '~1')".to_string(),
+            ),
+        };
         let said = if ty.contains('[') || ty.contains('(') {
             format!(
                 "regexp_matches(CAST(json_extract(json, {pointer}) AS VARCHAR), \
@@ -427,7 +459,7 @@ fn no_infinity_read_as_1900(
             )
         };
         if !ask(&format!(
-            "SELECT EXISTS (SELECT 1 FROM {objects} WHERE {said})"
+            "SELECT EXISTS (SELECT 1 FROM {from} WHERE {said})"
         ))? {
             continue;
         }
@@ -4390,6 +4422,70 @@ mod tests {
             )
             .unwrap();
         assert!(infinite);
+    }
+
+    #[test]
+    fn an_ndjson_infinity_is_refused_in_a_column_renamed_for_case() {
+        // #38: of two keys that differ only in case, DuckDB 1.5.5's JSON reader renames the
+        // later one by a suffix, `Id` beside `id` to `Id_1`, `A_1` beside `A` and `a_1` to
+        // `A_1_2`. The check for an infinity read as 1900-01-01 looked for the column's text by
+        // its name in the table, found no key `Id_1`, and let the file load with that time.
+        let iso = |i: usize| format!("\"2026-01-01T00:{:02}:{:02}Z\"", (i / 60) % 60, i % 60);
+        let ndjson = |row: &dyn Fn(usize) -> String, last: &str| {
+            let mut b: String = (0..10).map(|i| format!("{}\n", row(i))).collect();
+            b.push_str(last);
+            b.push('\n');
+            b
+        };
+        let clash = |i: usize| format!("{{\"id\":{i},\"Id\":{}}}", iso(i));
+        let twice = |i: usize| format!("{{\"a\":{i},\"A\":{i},\"a_1\":{i},\"A_1\":{}}}", iso(i));
+        // The renamed key first in the file: `Ts`, then `ts`, which is `ts_1`.
+        let later = |i: usize| format!("{{\"Ts\":{},\"ts\":{i}}}", iso(i));
+        // (what, body, the column refused, or `None` where it loads)
+        let cases: Vec<(&str, String, Option<&str>)> = vec![
+            (
+                "infinity",
+                ndjson(&clash, "{\"id\":99,\"Id\":\"infinity\"}"),
+                Some("Id_1"),
+            ),
+            (
+                "epoch",
+                ndjson(&clash, "{\"id\":99,\"Id\":\"epoch\"}"),
+                Some("Id_1"),
+            ),
+            (
+                "renamed twice",
+                ndjson(&twice, "{\"a\":99,\"A\":1,\"a_1\":2,\"A_1\":\"-infinity\"}"),
+                Some("A_1_2"),
+            ),
+            (
+                "the first key",
+                ndjson(&later, "{\"Ts\":\"Infinity\",\"ts\":99}"),
+                Some("Ts"),
+            ),
+            (
+                "a genuine 1900-01-01",
+                ndjson(&clash, "{\"id\":99,\"Id\":\"1900-01-01T00:00:00Z\"}"),
+                None,
+            ),
+        ];
+        for (what, body, refused) in &cases {
+            let mut tb = TestBench::new("ndjson-infinity-case");
+            let path = tb.1.join("t.ndjson");
+            std::fs::write(&path, body).unwrap();
+            let bench = tb.0.as_mut().unwrap();
+            let loaded = load_file_in(bench, "t", &path, "UTC");
+            match refused {
+                Some(column) => {
+                    let e = loaded.expect_err(what).to_string();
+                    assert!(e.contains(&format!("column `{column}`")), "{what}: {e}");
+                    assert!(columns_of(bench.connection(), "t").unwrap().is_empty());
+                }
+                None => {
+                    loaded.unwrap_or_else(|e| panic!("{what}: {e}"));
+                }
+            }
+        }
     }
 
     #[test]

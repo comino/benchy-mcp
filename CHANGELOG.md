@@ -119,6 +119,12 @@ Fixed:
   at up to twice the bound: 818 KB of plain text and 804 KB unpacked attached under 1 MiB. Now
   they are added up, and such a stream is refused as `E_LIMIT`
   (`an_attachments_plain_and_unpacked_bytes_share_one_bound`).
+- **An NDJSON infinity in a column renamed for case is refused** (#38). Of two keys that differ
+  only in case, DuckDB renames one (`Id_1`), and the check that refuses an infinity read as
+  1900-01-01 looked for a key of that name, found none, and let the file load
+  (`an_ndjson_infinity_is_refused_in_a_column_renamed_for_case`). JSON pages, decoded by
+  arrow-json, already refused an infinity or `epoch`, and now have a test that says so
+  (`a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900`).
 
 ## [0.2.0] — 2026-10-17
 

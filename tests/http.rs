@@ -1133,6 +1133,58 @@ fn json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order() {
 }
 
 #[test]
+fn a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900() {
+    // #38: an NDJSON body is read by DuckDB's JSON reader, which takes `infinity`, `-infinity`
+    // and `epoch` in a timestamp or date column as 1900-01-01, and is refused for it
+    // (`an_ndjson_infinity_is_refused`). JSON pages are typed by DuckDB's sniff of the first
+    // page but decoded by arrow-json, which reads none of the three as a timestamp or a date:
+    // the source fails, naming the column, on the first page or a later one, never with a time
+    // in no row. Two keys that differ only in case, which the NDJSON reader renames, fail the
+    // first page's sniff.
+    let row = |i: usize| {
+        format!(
+            "{{\"i\": {i}, \"ts\": \"2026-01-01T00:{:02}:00Z\", \"d\": \"2026-01-{:02}\"}}",
+            i % 60,
+            1 + i % 28
+        )
+    };
+    let page = |from: usize| (from..from + 10).map(row).collect::<Vec<_>>().join(",");
+    for odd in ["infinity", "-infinity", "epoch", " Epoch ", "Infinity"] {
+        for (column, other) in [("ts", "d"), ("d", "ts")] {
+            for at in [0, 1] {
+                let what = format!("{odd:?} in `{column}` on page {}", at + 1);
+                let fine = if other == "d" {
+                    "\"d\": \"2026-01-01\""
+                } else {
+                    "\"ts\": \"2026-01-01T00:00:00Z\""
+                };
+                let mut pages = vec![page(0), page(10)];
+                pages[at] = format!(
+                    "{},{{\"i\": 99, \"{column}\": \"{odd}\", {fine}}}",
+                    pages[at]
+                );
+                let api = cursor_api(pages, None);
+                let (r, bench) = load(&source(&format!("{}/api", api.url), CURSOR));
+                let f = refused(r);
+                assert_eq!(f.code, "E_SCHEMA", "{what}: {}", f.detail);
+                assert!(
+                    f.detail.contains(&format!("column `{column}`")),
+                    "{what}: {}",
+                    f.detail
+                );
+                assert!(!has_table(&bench, "readings"), "{what}");
+            }
+        }
+    }
+    let clash = "{\"id\": 1, \"Id\": \"2026-01-01T00:00:00Z\"},{\"id\": 2, \"Id\": \"infinity\"}";
+    let api = cursor_api(vec![clash.to_string()], None);
+    let (r, bench) = load(&source(&format!("{}/api", api.url), CURSOR));
+    let f = refused(r);
+    assert!(f.detail.contains("Duplicate name"), "{}", f.detail);
+    assert!(!has_table(&bench, "readings"));
+}
+
+#[test]
 fn every_paging_style_loads_every_page() {
     // 250 rows, 100 to a page, five ways of saying where the next page is. Offset and page
     // number end only at an empty page (decision 5), so they ask once more than the others.

@@ -1456,6 +1456,11 @@ memory).
   file and the column and saying what to do: write the value as null or as a real timestamp,
   declare the column's type in `[[source.schema]]`, which reads it as itself, or use CSV or
   Parquet. A genuine 1900-01-01 loads, beside a text column that says `infinity` too.
+- `an_ndjson_infinity_is_refused_in_a_column_renamed_for_case` — of two keys that differ only in
+  case, DuckDB renames the later one by a suffix (`Id` beside `id` is `Id_1`, `A_1` beside `A` and
+  `a_1` is `A_1_2`), and the check above looked for that name among the file's keys and found
+  none, so an infinity there loaded as 1900-01-01. Each key the column could have been read from
+  is read now; a genuine 1900-01-01 still loads.
 - `an_ndjson_epoch_is_refused_where_a_csv_reads_1970` — `epoch` (any case, padded, in a timestamp,
   a date or a list) is read as 1970-01-01 00:00:00 from a CSV and from a JSON column whose type
   is declared, but DuckDB 1.5.5's sniffed JSON read takes it as 1900-01-01 00:00:00 too, and such
@@ -1644,6 +1649,11 @@ other's (REQ-5).
 - `a_later_json_page_with_a_wider_type_fails_the_source` — an undeclared JSON source is typed by
   DuckDB's sniff of its first page; a later page that does not fit, `2.5` where the first held
   integers, fails naming the column rather than loading as another type, or as `2`.
+- `a_json_pages_infinity_or_epoch_is_refused_not_read_as_1900` — JSON pages are decoded by
+  arrow-json, not DuckDB's JSON reader, which reads `infinity`, `-infinity` and `epoch` as
+  1900-01-01 (`an_ndjson_infinity_is_refused`): arrow-json reads none of them as a timestamp or a
+  date, so the source fails naming the column, on the first page or a later one. Two keys that
+  differ only in case fail the first page's sniff.
 - `json_pages_are_fetched_ahead_of_their_decode_and_enter_in_order` — a paged JSON source's next
   page is asked for once a scan has read the page's cursor, while the page decodes on another
   thread, at most a few pages ahead; the rows enter the table in page order whichever page
