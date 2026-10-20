@@ -77,6 +77,32 @@ pub fn unique(tag: &str) -> std::path::PathBuf {
     ))
 }
 
+/// Held to read by every process start in [`spawn`], and to write by [`no_forks`].
+static FORKS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Start `cmd`, unless a test holds [`no_forks`]; then once it lets go.
+pub fn spawn(cmd: &mut Command) -> std::io::Result<Child> {
+    let _starting = FORKS.read().unwrap_or_else(|p| p.into_inner());
+    // `spawn` returns once the child has exec'd, so no copy of this process's descriptors is
+    // left in a child that has not.
+    cmd.spawn()
+}
+
+/// No process is started by this test binary while the guard is held, by [`spawn`].
+///
+/// A test that proves a descriptor is closed everywhere — a pipe's writer told nobody reads —
+/// needs this. libtest runs a binary's tests on threads of one process, and a process start on
+/// any of them copies every descriptor of the process into the child, close-on-exec or not, and
+/// holds the copies until the child execs. A pipe's read end copied so was what kept
+/// `a_descriptor_is_taken_only_by_a_streamed_attach` writable now and then (#48): with another
+/// thread starting processes, the only other holder of the read end was a child of the test
+/// binary not yet exec'd, still running the test binary, `O_RDONLY|O_CLOEXEC`; the server and
+/// its children held none. On macOS, where a pipe is made close-on-exec only after it is made, a
+/// process started between the two keeps its copy for good.
+pub fn no_forks() -> std::sync::RwLockWriteGuard<'static, ()> {
+    FORKS.write().unwrap_or_else(|p| p.into_inner())
+}
+
 pub fn data_dir() -> std::path::PathBuf {
     let d = unique("ceil-data");
     std::fs::create_dir_all(&d).unwrap();
@@ -128,15 +154,16 @@ impl Server {
         envs: &[(&str, &std::path::Path)],
         log: impl Into<Stdio>,
     ) -> Server {
-        let mut child = Command::new(BIN)
-            .args(args)
-            .args(PLATFORM)
-            .envs(envs.iter().map(|(k, v)| (*k, *v)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(log)
-            .spawn()
-            .expect("the binary starts");
+        let mut child = spawn(
+            Command::new(BIN)
+                .args(args)
+                .args(PLATFORM)
+                .envs(envs.iter().map(|(k, v)| (*k, *v)))
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(log),
+        )
+        .expect("the binary starts");
         let stdin = Some(child.stdin.take().unwrap());
         let out = BufReader::new(child.stdout.take().unwrap());
         let mut s = Server {
@@ -179,11 +206,12 @@ impl Server {
 
     /// Send a signal, as a client or a supervisor does when it stops a server.
     pub fn signal(&mut self, sig: &str) {
-        let ok = Command::new("kill")
-            .args([&format!("-{sig}"), &self.child.id().to_string()])
-            .status()
-            .unwrap()
-            .success();
+        let ok =
+            spawn(Command::new("kill").args([&format!("-{sig}"), &self.child.id().to_string()]))
+                .unwrap()
+                .wait()
+                .unwrap()
+                .success();
         assert!(ok, "kill -{sig}");
         let _ = self.child.wait();
     }

@@ -295,6 +295,10 @@ fn a_descriptor_is_taken_only_by_a_streamed_attach() {
     use std::io::Write;
     // Bounded: a descriptor taken by mistake would wait for a writer that never comes.
     let mut s = Streamer::start(&["--load-timeout", "5"], V3);
+    // From before the pipe is made until its writer is told: no other test of this binary starts
+    // a process meanwhile, which would hold a copy of the read end until it execs (#48,
+    // `common::no_forks`). Every process start in this binary goes through `common::spawn`.
+    let quiet = common::no_forks();
     let (read, mut write) = pipe();
     let r = s.call("ping", json!({}), &[read.as_raw_fd()]);
     assert_eq!(code(&r), "E_REQUEST", "a ping takes no descriptor: {r}");
@@ -303,6 +307,7 @@ fn a_descriptor_is_taken_only_by_a_streamed_attach() {
         write.write_all(b"x").is_err(),
         "the descriptor it brought was closed"
     );
+    drop(quiet);
     let r = s.call("attach", json!({"name": "a", "stream": true}), &[]);
     assert_eq!(code(&r), "E_REQUEST", "a stream needs its descriptor: {r}");
     let (read, _write) = pipe();
@@ -359,14 +364,15 @@ fn a_stream_needs_a_socket_to_come_over() {
     // On pipes there is no way to pass a descriptor: a streamed attach is refused, saying so.
     use benchy_mcp::proto::{read_frame, write_frame};
     use std::process::{Command, Stdio};
-    let mut child = Command::new(common::BIN)
-        .arg("host")
-        .args(common::PLATFORM)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = common::spawn(
+        Command::new(common::BIN)
+            .arg("host")
+            .args(common::PLATFORM)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = child.stdout.take().unwrap();
     write_frame(

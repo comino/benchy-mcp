@@ -68,6 +68,10 @@ Fixed:
   `c` while the writer was blocked on `b`'s full pipe, until the load timeout (300 s by
   default) failed `c` and closed the channel. The tables now load in the order of the list
   (`a_channel_and_a_descriptor_load_in_request_order_on_one_cpu`).
+- `a_descriptor_is_taken_only_by_a_streamed_attach` no longer fails now and then (#48). The
+  server closed the refused request's descriptor as it should. The read end that stayed open
+  was a copy in a process another test of the same binary was starting, not yet exec'd. The
+  check now runs while no test of that binary starts a process.
 
 ## [0.2.0] — 2026-10-17
 

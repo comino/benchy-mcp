@@ -134,7 +134,7 @@ impl Streamer {
         if let Some(fd) = &channel {
             inherit_as(&mut cmd, fd, CHANNEL_FD);
         }
-        let child = cmd.spawn().unwrap();
+        let child = super::spawn(&mut cmd).unwrap();
         drop(channel);
         Streamer {
             child,
@@ -275,7 +275,7 @@ impl Channeled {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         inherit_as(&mut cmd, &read, CHANNEL_FD);
-        let mut child = cmd.spawn().unwrap();
+        let mut child = super::spawn(&mut cmd).unwrap();
         drop(read);
         Channeled {
             stdin: child.stdin.take().unwrap(),

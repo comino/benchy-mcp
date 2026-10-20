@@ -1007,7 +1007,9 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_descriptor_is_taken_only_by_a_streamed_attach` — a descriptor on any other request, a stream
   without one, more than one a stream, a stream beside a path, `stream` not `true`: refused as
   `E_REQUEST`, every descriptor closed before the answer; a descriptor that is not a pipe, a
-  socket or a file is `E_DATA`; protocol 2 has no `stream`.
+  socket or a file is `E_DATA`; protocol 2 has no `stream`. Closed is proven by the writer being
+  told nobody reads, so no other test of the binary starts a process meanwhile: one not yet
+  exec'd held a copy of the read end, and the write went through now and then.
 - `a_stream_needs_a_socket_to_come_over` — on pipes no descriptor can come, and a streamed attach
   is refused saying so.
 - `a_host_streams_tables_back_to_back_over_one_channel` — in protocol 5, a session started with
