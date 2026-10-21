@@ -307,7 +307,8 @@ pub const UTC: &str = "Times are UTC. For local calendar periods, convert first,
 pub fn sets_time_zone(statement: &str) -> bool {
     use crate::guard::Part;
     let mut words = Vec::new();
-    for (part, r) in crate::guard::lex(statement) {
+    // A scan that stops (`guard::Stuck`) reads no word, and so no SET.
+    for (part, r) in crate::guard::lex(statement).unwrap_or_default() {
         let text = &statement[r];
         match part {
             Part::Code => words.extend(
@@ -350,7 +351,8 @@ pub fn statements(sql: &str) -> Vec<String> {
     use crate::guard::Part;
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
-    for (part, r) in crate::guard::lex(sql) {
+    // A scan that stops (`guard::Stuck`) finds no statement, so no result is given SQL.
+    for (part, r) in crate::guard::lex(sql).unwrap_or_default() {
         let text = &sql[r];
         match part {
             Part::Code => {

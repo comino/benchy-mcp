@@ -233,6 +233,44 @@ mod tests {
     }
 
     #[test]
+    fn a_host_may_ask_for_exactly_what_it_has() {
+        // A host that hands back the limits `hello` reported lowers nothing, and is not refused
+        // for raising them: never raised is `n > current`, not `n >= current`.
+        let ask = |v: serde_json::Value| HostLimits::default().lowered(v.as_object().unwrap());
+        let had = HostLimits::default();
+        let asked = ask(serde_json::json!({
+            "attach_rows": had.attach_rows,
+            "threads": had.threads,
+            "memory_ceiling": had.memory_ceiling,
+        }));
+        assert_eq!(asked, Ok(had));
+        assert!(ask(serde_json::json!({"attach_rows": had.attach_rows + 1})).is_err());
+        assert_eq!(
+            ask(serde_json::json!({"attach_rows": had.attach_rows - 1}))
+                .unwrap()
+                .attach_rows,
+            had.attach_rows - 1
+        );
+    }
+
+    #[test]
+    fn the_memory_ceiling_may_be_lowered_to_duckdbs_own_budget_and_no_further() {
+        // At DuckDB's own budget the engine refuses a query as out of memory before the ceiling
+        // kills it; a byte under, it would be killed first.
+        let ask = |n: u64| {
+            HostLimits::default().lowered(
+                serde_json::json!({"memory_ceiling": n})
+                    .as_object()
+                    .unwrap(),
+            )
+        };
+        let memory = HostLimits::default().memory;
+        assert_eq!(ask(memory).unwrap().memory_ceiling, memory);
+        let e = ask(memory - 1).unwrap_err();
+        assert!(e.contains("DuckDB's own memory budget"), "{e}");
+    }
+
+    #[test]
     fn spending_past_the_budget_saturates_rather_than_wrapping() {
         let b = Budget {
             max_rows: 10,

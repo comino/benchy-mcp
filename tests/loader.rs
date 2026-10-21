@@ -212,6 +212,46 @@ fn a_host_attach_stops_at_the_budget_not_after_reading_it_all() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// Linux only: the helpers job runs confined, which takes Landlock.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_helpers_job_reports_ok_only_when_every_helper_was_made() {
+    // REQ-18: the job's report is ok when every helper is made, and not when one is broken, with
+    // what was made either way.
+    let dir = unique("helpers-job");
+    let col = |n: &str, t: &str| (n.to_string(), t.to_string());
+    let tables = vec![(
+        "meters".to_string(),
+        vec![col("meter", "VARCHAR"), col("power_kw", "DOUBLE")],
+    )];
+    let run = |n: u32, sql: &str| {
+        run_loader(&job_frame(&Job::Helpers {
+            helpers: benchy_mcp::helpers::parse(sql).unwrap(),
+            tables: tables.clone(),
+            stage: dir.join(format!("stage-{n}")),
+            memory_limit: "1GB".into(),
+            allow_unsandboxed: false,
+        }))
+    };
+    let made = run(
+        0,
+        "CREATE MACRO twice(x) AS x * 2;\nCREATE VIEW peak AS SELECT max(power_kw) AS kw FROM meters;",
+    );
+    let built = made.helpers.as_ref().expect("what it made");
+    assert!(built.broken.is_empty(), "{:?}", built.broken);
+    assert_eq!(built.shown.len(), 2, "{built:?}");
+    assert!(made.ok, "every helper made: {made:?}");
+
+    let broken = run(
+        1,
+        "CREATE VIEW peak AS SELECT max(no_such_column) AS kw FROM meters;",
+    );
+    let built = broken.helpers.as_ref().expect("what it made");
+    assert_eq!(built.broken.len(), 1, "{built:?}");
+    assert!(!broken.ok, "a helper broken: {broken:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_loader_that_cannot_read_its_job_says_so() {
     // The supervisor passes a loader's error on to the operator or the host. A loader handed
