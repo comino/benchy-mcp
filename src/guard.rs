@@ -533,12 +533,18 @@ impl Calls {
         let word = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_';
         let mut at = 0;
         while at < b.len() {
-            // A word, or one byte that is in none.
+            // A word, or one byte that is in none. Told apart by `b[at]`, which a scan run past
+            // the end cannot read, and not by the word's length: past the end, `b[at..]` is an
+            // empty slice, and the scan would go on as if nothing were wrong.
             let start = at;
-            let len = b[at..].iter().take_while(|c| word(c)).count();
-            at += len.max(1);
+            let in_word = word(&b[at]);
+            at += if in_word {
+                b[at..].iter().take_while(|c| word(c)).count()
+            } else {
+                1
+            };
             forward(start, at)?;
-            if len == 0 {
+            if !in_word {
                 continue;
             }
             // Both ends are ASCII bytes, so both are character boundaries.
@@ -986,6 +992,36 @@ mod tests {
             "",
         ] {
             assert!(lex(sql).is_ok(), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn the_stretches_are_the_whole_text_in_order() {
+        // What `lex` promises its callers: the stretches together are the text, in order, and
+        // no two of code are next to each other.
+        for sql in [
+            "SELECT $",
+            "SELECT $1, $a$",
+            "x$a$ 'b' E'c' \"d\" $$e$$ -- f\n/* g */ h",
+            "SELECT 'unterminated",
+            "/* unterminated",
+            "$",
+            "-",
+        ] {
+            let parts = lex(sql).unwrap();
+            let mut at = 0;
+            for (k, (part, r)) in parts.iter().enumerate() {
+                assert_eq!(r.start, at, "{sql:?}: {parts:?}");
+                assert!(r.end > r.start, "{sql:?}: {parts:?}");
+                if k > 0 {
+                    assert!(
+                        !(*part == Part::Code && parts[k - 1].0 == Part::Code),
+                        "{sql:?}: {parts:?}"
+                    );
+                }
+                at = r.end;
+            }
+            assert_eq!(at, sql.len(), "{sql:?}: {parts:?}");
         }
     }
 
