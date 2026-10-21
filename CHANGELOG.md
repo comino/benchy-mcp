@@ -6,6 +6,11 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+## [0.3.1] — 2026-10-21
+
+The weekly cargo-mutants gate is green again. No behaviour change, except that the guard's text
+scan refuses a batch if it ever stops moving on, which no input makes it do.
+
 - **The guard's text scan fails closed if it stops moving on** (#64). A step of the scan that
   reads a batch for refused table functions now has to move past at least one byte; one that
   does not refuses the batch, as an unparseable one is, instead of looping. No input makes it

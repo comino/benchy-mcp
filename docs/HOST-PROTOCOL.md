@@ -47,7 +47,7 @@ checked before that, when a host bumps its pin: in CI, before deploying. Each re
 object from the binary a host was handed, less `min_glibc`:
 
 ```json
-{"benchy": "0.3.0", "duckdb": "1.5.5", "host_protocols": [1, 2, 3, 4, 5, 6, 7],
+{"benchy": "0.3.1", "duckdb": "1.5.5", "host_protocols": [1, 2, 3, 4, 5, 6, 7],
  "platforms": ["linux-x86_64", "linux-aarch64", "macos-arm64", "macos-x86_64"],
  "full_sandbox_min_landlock_abi": 4, "min_glibc": "2.35"}
 ```
@@ -108,7 +108,7 @@ the session ends: a host that cannot open a session has nothing else it can do i
 ```
 
 ```json
-{"id": 1, "ok": true, "protocol": 5, "benchy": "0.3.0", "engine": "DuckDB v1.5.5",
+{"id": 1, "ok": true, "protocol": 5, "benchy": "0.3.1", "engine": "DuckDB v1.5.5",
  "sandbox": "fully enforced",
  "caps": {"max_rows": 200, "max_bytes": 8192, "max_cell_bytes": 256, "deadline_secs": 20},
  "timeouts": {"load_timeout_secs": 300, "hard_grace_secs": 10},
