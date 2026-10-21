@@ -1788,6 +1788,44 @@ fn several_tables_attach_in_one_request() {
 }
 
 #[test]
+fn the_tables_of_one_attach_share_what_the_budget_has_left() {
+    // REQ-12 for protocol 2's `tables`: each table is held to what the ones before it in the
+    // request left, as if it were attached on its own after them. Each loader is given the
+    // whole of what is left, so each table here fits alone; the rows each loader reports
+    // writing take their room in order (`Room`).
+    let dir = unique("host-room");
+    let mut h = Host::spawn(&["--session-rows", "5"]);
+    let hello = h.call("hello", json!({"protocol": [1, 2]}));
+    assert_eq!(hello["protocol"], 2, "{hello}");
+    let file = |rows: i64, tag: &str| {
+        arrows(
+            &dir.join(format!("{tag}.arrows")),
+            &readings(rows, tag),
+            true,
+        )
+    };
+    let (a, b, c) = (file(3, "a"), file(3, "b"), file(2, "c"));
+    let r = attach_many(&mut h, &[("a", &a), ("b", &b), ("c", &c)]);
+    let answers = each(&r);
+    assert_eq!(answers[0]["rows"], 3, "{r}");
+    assert_eq!(
+        answers[1]["error"]["code"], "E_LIMIT",
+        "3 rows past the 2 that `a` left: {r}"
+    );
+    assert!(
+        answers[1]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("after the tables before it"),
+        "{r}"
+    );
+    assert_eq!(answers[2]["rows"], 2, "what `a` left, exactly: {r}");
+    let r = h.call("describe", json!({}));
+    assert_eq!(r["budget"]["rows_left"], 0, "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_loaders_of_one_attach_run_at_once() {
     // Each table is turned into a DuckDB file by a loader of its own, a process, and they need
     // nothing from each other: the loaders of one request run side by side, as many at once as

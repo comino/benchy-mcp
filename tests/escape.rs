@@ -853,8 +853,9 @@ fn each_statement_kind_is_named_as_duckdb_types_it() {
         ("PREPARE p AS SELECT 1", "PREPARE"),
         ("UPDATE EXTENSIONS", "UPDATE EXTENSIONS"),
         // Typed as something other than their own kind, which leaves the guard's names for
-        // ANALYZE, VARIABLE_SET and COPY_DATABASE unreachable (.cargo/mutants.toml). Should
-        // DuckDB start typing one as its own kind, this is where it shows.
+        // ANALYZE, VARIABLE_SET and COPY_DATABASE unreachable from SQL (the names themselves are
+        // `every_statement_type_has_a_name_of_its_own`'s). Should DuckDB start typing one as its
+        // own kind, this is where it shows.
         ("ANALYZE", "VACUUM"),
         ("SET VARIABLE v = 1", "SET"),
         ("COPY FROM DATABASE memory TO x", "TRANSACTION"),

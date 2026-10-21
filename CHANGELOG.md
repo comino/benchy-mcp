@@ -6,6 +6,16 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **The guard's text scan fails closed if it stops moving on** (#64). A step of the scan that
+  reads a batch for refused table functions now has to move past at least one byte; one that
+  does not refuses the batch, as an unparseable one is, instead of looping. No input makes it
+  stop: it is there so that a slip in the scan's arithmetic is a refusal a test sees at once, not
+  a hang. The weekly cargo-mutants run on 0.3.0 had 22 such hangs, and five mutants no test told
+  apart; each now has a test that fails on it: a host asking for exactly a limit it has, a memory
+  ceiling at DuckDB's own budget, every statement type named on its own (which retires the
+  exclusion of the names no SQL reaches), a helpers job's `ok`, the reason a refused channel
+  stream lost its place, and the tables of one attach sharing what the budget has left.
+
 ## [0.3.0] — 2026-10-20
 
 Hardening of the SQL boundary, a `describe` that is right about mixed and series-sorted data,

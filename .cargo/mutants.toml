@@ -32,14 +32,10 @@ exclude_re = [
     # Equivalent: `elapsed() < grace` and `<= grace` differ only if the clock reads exactly
     # `grace` when sampled, and then for one 20 ms poll.
     'src/sandbox\.rs:\d+:\d+: replace < with <= in alone_by$',
-
-    # Message-only and unreachable: the name feeds a refusal's wording, never the allowlist
-    # (`is_allowed` reads the type), and under the lock no SQL reaches the classifier as these
-    # kinds. Measured on DuckDB 1.5.5: ANALYZE is typed VACUUM, SET VARIABLE is typed SET and
-    # COPY FROM DATABASE is typed TRANSACTION; COPY, EXPORT and EXECUTE never bind; RELATION
-    # and LOGICAL_PLAN come only from the C API's relation objects; and no statement tried was
-    # typed MULTI, CREATE_FUNC or EXTENSION (CREATE FUNCTION is typed CREATE).
-    # REQ-2 `each_statement_kind_is_named_as_duckdb_types_it` pins these typings, so a DuckDB that
-    # changes one fails there first, and this line is revisited then.
-    'src/guard\.rs:\d+:\d+: delete match arm ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_(COPY|EXPORT|EXECUTE|ANALYZE|MULTI|RELATION|LOGICAL_PLAN|CREATE_FUNC|VARIABLE_SET|EXTENSION|COPY_DATABASE) in type_name$',
 ]
+
+# Not excluded since #64: the arms of `guard::type_name` no SQL reaches under the lock (measured
+# on DuckDB 1.5.5: ANALYZE is typed VACUUM, SET VARIABLE SET, COPY FROM DATABASE TRANSACTION;
+# COPY, EXPORT and EXECUTE never bind; RELATION and LOGICAL_PLAN come only from the C API's
+# relation objects; and the classifier and the run name the agent's TRANSACTION themselves).
+# `every_statement_type_has_a_name_of_its_own` holds every arm to a name of its own instead.

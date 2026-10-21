@@ -238,6 +238,7 @@ const INSIDE: &str = "shows the engine's own workings (its log, memory, files, e
 const SECRETS: &str = "lists secrets, and this engine holds none";
 const INTERNAL: &str = "is DuckDB's internal or test machinery";
 const UNKNOWN: &str = "is a table function benchy has not classified for this version of DuckDB";
+const UNREAD_VIEW: &str = "is a view whose SQL benchy could not read through";
 
 /// The DuckDB [`TABLE_FUNCTIONS`] was measured on. On any other, what is refused is read from
 /// that engine's own catalog instead ([`Calls::for_version`]).
@@ -444,9 +445,12 @@ impl Calls {
         let refused: Vec<(String, &'static str)> = views
             .iter()
             .filter_map(|(name, sql)| {
-                calls
-                    .first(&code(sql).to_ascii_lowercase())
-                    .map(|(_, why)| (name.to_ascii_lowercase(), why))
+                let found = code(sql).and_then(|c| calls.first(&c.to_ascii_lowercase()));
+                match found {
+                    Ok(found) => found.map(|(_, why)| (name.to_ascii_lowercase(), why)),
+                    // Fails closed: a view whose body the scan could not read through is refused.
+                    Err(Stuck) => Some((name.to_ascii_lowercase(), UNREAD_VIEW)),
+                }
             })
             .collect();
         calls.views.extend(refused);
@@ -500,7 +504,16 @@ impl Calls {
                  no query. Nothing ran."
             ));
         }
-        let (name, why) = self.first(&code(sql).to_ascii_lowercase())?;
+        let (name, why) = match code(sql).and_then(|c| self.first(&c.to_ascii_lowercase())) {
+            Ok(found) => found?,
+            Err(Stuck) => {
+                return Some(
+                    "benchy could not read this batch's text through, so it runs none of it. \
+                     Nothing ran."
+                        .into(),
+                )
+            }
+        };
         Some(if self.views.contains_key(&name) {
             format!("`{name}` is not available here: it {why}. Nothing ran.")
         } else {
@@ -514,32 +527,32 @@ impl Calls {
     }
 
     /// The first word of the folded text `text` that names a refused view, or calls a refused
-    /// function, and why it is refused.
-    fn first(&self, text: &str) -> Option<(String, &'static str)> {
+    /// function, and why it is refused; [`Stuck`] if the scan stops moving on ([`forward`]).
+    fn first(&self, text: &str) -> Result<Option<(String, &'static str)>, Stuck> {
         let b = text.as_bytes();
-        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let word = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_';
         let mut at = 0;
         while at < b.len() {
-            if !word(b[at]) {
-                at += 1;
-                continue;
-            }
+            // A word, or one byte that is in none.
             let start = at;
-            while at < b.len() && word(b[at]) {
-                at += 1;
+            let len = b[at..].iter().take_while(|c| word(c)).count();
+            at += len.max(1);
+            forward(start, at)?;
+            if len == 0 {
+                continue;
             }
             // Both ends are ASCII bytes, so both are character boundaries.
             let w = &text[start..at];
             if let Some(why) = self.views.get(w) {
-                return Some((w.to_string(), why));
+                return Ok(Some((w.to_string(), why)));
             }
             if let Some(why) = self.functions.get(w) {
                 if calls(&b[at..]) {
-                    return Some((w.to_string(), why));
+                    return Ok(Some((w.to_string(), why)));
                 }
             }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -570,8 +583,9 @@ pub(crate) enum Part {
 /// and a literal, a quoted name or a `/*` comment that does not end leaves everything from there
 /// on as code, though DuckDB will not parse the batch at all. Every stretch starts and ends at an
 /// ASCII byte or at the end, so each is a `&sql[range]`; together they are `sql`, in order, and
-/// no two stretches of code are next to each other.
-pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
+/// no two stretches of code are next to each other. [`Stuck`] if a step does not move on
+/// ([`forward`]), which no input makes it do.
+pub(crate) fn lex(sql: &str) -> Result<Vec<(Part, std::ops::Range<usize>)>, Stuck> {
     let b = sql.as_bytes();
     let mut out: Vec<(Part, std::ops::Range<usize>)> = Vec::new();
     let mut push = |part: Part, r: std::ops::Range<usize>| {
@@ -586,7 +600,13 @@ pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
     let tag = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
     let at = |i: usize, s: &[u8]| b[i..].starts_with(s);
     let mut i = 0;
+    // Where the step before this one started.
+    let mut last = None;
     while i < b.len() {
+        if let Some(was) = last {
+            forward(was, i)?;
+        }
+        last = Some(i);
         let start = i;
         // What starts at `i`, and where it ends; `None` for one that does not end.
         let found: Option<(Part, usize)> = match b[i] {
@@ -601,6 +621,7 @@ pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
                     if j >= b.len() {
                         break None;
                     }
+                    let was = j;
                     if at(j, b"/*") {
                         depth += 1;
                         j += 2;
@@ -613,6 +634,7 @@ pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
                     } else {
                         j += 1;
                     }
+                    forward(was, j)?;
                 }
             }
             // To the next `"`: a `""` inside closes one quoted name and opens the next, which
@@ -621,16 +643,14 @@ pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
                 .iter()
                 .position(|c| *c == b'"')
                 .map(|n| (Part::Name, i + n + 2)),
-            b'\'' => quoted(b, i + 1, false).map(|e| (Part::Literal, e + 1)),
+            b'\'' => quoted(b, i + 1, false)?.map(|e| (Part::Literal, e + 1)),
             b'e' | b'E' if b.get(i + 1) == Some(&b'\'') => {
-                quoted(b, i + 2, true).map(|e| (Part::Literal, e + 1))
+                quoted(b, i + 2, true)?.map(|e| (Part::Literal, e + 1))
             }
             b'$' => {
                 let mut j = i + 1;
                 if b.get(j).is_some_and(|c| tag(*c) && !c.is_ascii_digit()) {
-                    while b.get(j).is_some_and(|c| tag(*c)) {
-                        j += 1;
-                    }
+                    j += b[j..].iter().take_while(|c| tag(**c)).count();
                 }
                 if b.get(j) != Some(&b'$') {
                     push(Part::Code, i..i + 1);
@@ -645,9 +665,7 @@ pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
                     .map(|n| (Part::Literal, body + n + delim.len()))
             }
             c if word(c) => {
-                while b.get(i).is_some_and(|c| word(*c)) {
-                    i += 1;
-                }
+                i += b[i..].iter().take_while(|c| word(**c)).count();
                 push(Part::Code, start..i);
                 continue;
             }
@@ -661,33 +679,53 @@ pub(crate) fn lex(sql: &str) -> Vec<(Part, std::ops::Range<usize>)> {
         push(found.map_or(Part::Code, |(part, _)| part), start..end);
         i = end;
     }
-    out
+    Ok(out)
 }
 
 /// `sql` with the text of each string literal blanked ([`lex`]), for a check that reads names
 /// and calls: a comment or a quoted name is left to be read. A literal is blanked to spaces, its
 /// quotes and prefix with it, so a name never runs into its neighbour.
-fn code(sql: &str) -> String {
+fn code(sql: &str) -> Result<String, Stuck> {
     let mut out = sql.as_bytes().to_vec();
-    for (part, r) in lex(sql) {
+    for (part, r) in lex(sql)? {
         if part == Part::Literal {
             out[r].fill(b' ');
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Where the `'…'` literal whose text starts at `from` closes: `''` is a quote, and with
 /// `escapes`, as in `E'…'`, a backslash takes the byte after it. `None` if it does not close.
-fn quoted(b: &[u8], from: usize, escapes: bool) -> Option<usize> {
+fn quoted(b: &[u8], from: usize, escapes: bool) -> Result<Option<usize>, Stuck> {
     let mut i = from;
     loop {
-        match b.get(i)? {
-            b'\\' if escapes => i += 2,
-            b'\'' if b.get(i + 1) == Some(&b'\'') => i += 2,
-            b'\'' => return Some(i),
-            _ => i += 1,
+        let was = i;
+        match b.get(i) {
+            None => return Ok(None),
+            Some(b'\\') if escapes => i += 2,
+            Some(b'\'') if b.get(i + 1) == Some(&b'\'') => i += 2,
+            Some(b'\'') => return Ok(Some(i)),
+            Some(_) => i += 1,
         }
+        forward(was, i)?;
+    }
+}
+
+/// A scan of a batch's text ([`lex`], [`Calls::first`]) that stopped moving on. No input makes
+/// it: each step of the scan moves past at least one byte. The check is for a scan that would
+/// otherwise loop for ever, as a slip in its arithmetic makes it: each such slip cargo-mutants
+/// made hung the suite until its timeout, 22 of them on 0.3.0 (#64). Stopped, the scan fails
+/// closed: the batch is refused, as one that does not parse is, and a hint reads nothing in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stuck;
+
+/// [`Stuck`] unless a step of a scan that started at `was` ended past it, at `now`.
+fn forward(was: usize, now: usize) -> Result<(), Stuck> {
+    if now > was {
+        Ok(())
+    } else {
+        Err(Stuck)
     }
 }
 
@@ -927,6 +965,47 @@ mod tests {
         ] {
             assert!(calls.check(sql).is_some(), "{sql:?}");
         }
+    }
+
+    #[test]
+    fn a_scan_that_does_not_move_on_stops() {
+        // #64: a step that ends where it started, or before, would be taken again for ever.
+        assert_eq!(forward(3, 3), Err(Stuck), "where it started");
+        assert_eq!(forward(3, 2), Err(Stuck), "before it");
+        assert_eq!(forward(0, 0), Err(Stuck), "at the start of the text");
+        assert_eq!(forward(3, 4), Ok(()), "one byte on");
+        assert_eq!(forward(3, 9), Ok(()), "a word on");
+        // Every form the scan reads, each step moving on.
+        for sql in [
+            "SELECT * FROM checkpoint()",
+            "SELECT 'a''b', E'c\\'d', $$e$$, $t$f$t$, \"g\"\"h\" -- i\n/* j /* k */ */ $1",
+            "'",
+            "E'",
+            "$",
+            "/*",
+            "",
+        ] {
+            assert!(lex(sql).is_ok(), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn every_statement_type_has_a_name_of_its_own() {
+        // The name is what a refusal says the agent ran (`each_statement_kind_is_named_as_duckdb_\
+        // types_it` holds which name DuckDB gives what). Every kind the C API has is named, and
+        // no two alike: `MERGE` and `UPDATE EXTENSIONS` were once refused as "UNKNOWN", and an
+        // agent told it ran what it did not cannot fix its batch.
+        let last = ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MERGE_INTO;
+        let mut seen = std::collections::HashSet::new();
+        for t in 1..=last {
+            let name = type_name(t);
+            assert_ne!(name, "UNKNOWN", "statement type {t}");
+            assert!(seen.insert(name), "{name} names two statement types");
+        }
+        assert_eq!(
+            type_name(ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_INVALID),
+            "UNKNOWN"
+        );
     }
 
     #[test]

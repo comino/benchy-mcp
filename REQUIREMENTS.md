@@ -119,6 +119,8 @@ before it runs.
   literal (`'…'`, `E'…'`, dollar-quoted) is not refused.
 - `a_refused_call_beside_a_literal_is_refused` — a refused call after a literal, or after what
   only looks like one, is refused; an unterminated literal, quoted name or comment is read on.
+- `a_scan_that_does_not_move_on_stops` — a step of the text's scan that does not move forward
+  stops it, and the batch is refused rather than scanned for ever.
 - `the_literals_the_check_skips_are_duckdbs` — each literal the check skips, and each call it
   reads, is one by DuckDB 1.5.5's own parse.
 - `what_ends_a_name_that_is_not_called` — a column, alias or table named like a refused
@@ -623,6 +625,8 @@ Nothing may let the model do unbounded work to a system benchy reads from.
 - `exactly_what_is_left_fits_and_one_more_does_not` — the budget's edge is exact, in rows and
   in bytes.
 - `session_budget_enforced` — the pass budget bounds what is read, not only what was estimated.
+- `the_tables_of_one_attach_share_what_the_budget_has_left` — in one host `attach` of several
+  tables, each is held to the rows the ones before it left, to the row.
 - `a_configured_session_budget_counts_every_fetch` — in a server, each loader's reported rows
   and bytes are charged: exactly the `[budget]` loads, and the next source is refused, naming it.
 - `a_failed_fetch_still_spends_what_it_read` — a fetch that fails is charged what it read before

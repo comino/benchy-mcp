@@ -459,6 +459,27 @@ fn a_channel_that_loses_its_place_is_closed_and_says_so() {
     );
     still_serves(&mut h, "too long to drain");
 
+    // Refused before its loader would read it, past the count of tables, with more of it left
+    // than an attachment may be: the stream is read past by a loader of its own, which says why
+    // it lost the place.
+    let mut h = Channeled::start(
+        CHANNEL,
+        V5,
+        json!({"limits": {"attach_bytes": 100_000, "attachments": 1}}),
+    );
+    h.channel.feed(stream(&readings(2, "first"), true));
+    assert_eq!(h.call("attach", channel("first"))["rows"], 2);
+    all_written(&h, 1);
+    h.channel.feed(stream(&readings(20_000, "long"), true));
+    let r = h.call("attach", channel("second"));
+    closed(&r, "refused first, too long to drain", "E_LIMIT");
+    assert!(message(&r).contains("tables"), "{r}");
+    assert!(
+        message(&r).contains("more than 100000 bytes of the refused stream"),
+        "{r}"
+    );
+    assert_eq!(code(&h.call("attach", channel("later"))), "E_CHANNEL");
+
     // A load that runs out of time stops part-way.
     let mut h = Channeled::start(
         &["--stream-channel", "3", "--load-timeout", "2"],
