@@ -25,12 +25,12 @@ libduckdb-sys = "=1.10505.0"
 # Arrow streaming IPC on stdout (docs/EXEC-CONNECTOR-PROTOCOL.md), and duckdb's arrow feature
 # set does not turn the reader on. Feature unification means this is the same crate, not a second
 # copy — `cargo tree -d` is the check.
-arrow = { version = "58.4", default-features = false, features = ["ipc"] }
+arrow = { version = "60.0", default-features = false, features = ["ipc"] }
 # LZ4-framed IPC bodies, which ClickHouse's `FORMAT ArrowStream` sends by default. The same crate
 # arrow uses, for the feature alone; lz4_flex is pure Rust. zstd is not turned on: src/ipc.rs
 # checks a compressed buffer's claimed size with LZ4 only, so a zstd body is refused naming the
 # setting that turns it off.
-arrow-ipc = { version = "58.4", default-features = false, features = ["lz4"] }
+arrow-ipc = { version = "60.0", default-features = false, features = ["lz4"] }
 # What arrow-ipc decodes LZ4 with, used directly to check a buffer's stated size before arrow
 # allocates it (src/ipc.rs). The same crate and version arrow-ipc resolves.
 lz4_flex = { version = "0.13", default-features = false, features = ["std", "frame"] }
@@ -55,7 +55,7 @@ zstd = { version = "0.13.3", default-features = false }
 # The HTTP source (src/sources/http/). JSON pages are decoded by arrow-json, the same version the
 # rest of arrow resolves: a page's rows decode straight into a list of structs whose child is the
 # batch, in half serde_json's instructions (docs/HTTP-SOURCE.md).
-arrow-json = { version = "58.4", default-features = false }
+arrow-json = { version = "60.0", default-features = false }
 # gzip bodies (src/decompress.rs), on zlib-rs: 20% less CPU than miniz_oxide for the same
 # instructions (docs/history/PERFORMANCE-rounds.md, round 1 item 3).
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
