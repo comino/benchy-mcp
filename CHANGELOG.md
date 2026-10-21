@@ -8,9 +8,13 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## [0.3.1] — 2026-10-21
 
-The weekly cargo-mutants gate is green again. No behaviour change, except that the guard's text
-scan refuses a batch if it ever stops moving on, which no input makes it do.
+Two TLS advisories fixed in the HTTP loader's dependencies, and the weekly cargo-mutants gate green
+again. The only other behaviour change: the guard's text scan refuses a batch if it ever stops
+moving on, which no input makes it do.
 
+- **TLS for the HTTP loader takes the fixes for RUSTSEC-2026-0381 and RUSTSEC-2026-0382**:
+  `rustls-webpki` 0.103.16 and `webpki-roots` 1.0.10, so certificate checks no longer accept the
+  distrusted intermediates those advisories name.
 - **The guard's text scan fails closed if it stops moving on** (#64). A step of the scan that
   reads a batch for refused table functions now has to move past at least one byte; one that
   does not refuses the batch, as an unparseable one is, instead of looping. No input makes it
