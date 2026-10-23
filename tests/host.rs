@@ -1681,6 +1681,46 @@ fn columns_duckdb_tells_apart_attach() {
 }
 
 #[test]
+fn a_hosts_sql_error_gives_the_columns_and_sends_its_agent_to_no_tool() {
+    // #27. A host may give its agent no `describe` tool, and `tool_names` can rename it but not
+    // say there is none. So the hints of an unknown column or table give the columns themselves,
+    // and send the agent to no tool: what is cut is `DESCRIBE <table>`, which is SQL.
+    let dir = unique("host-hint");
+    let mut h = Host::start(&[]);
+    let r = attach(
+        &mut h,
+        "readings",
+        &arrows(&dir.join("r.arrows"), &readings(3, "a"), true),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    for (sql, want) in [
+        (
+            "SELECT temp FROM readings",
+            "the tables the statement reads: readings(id, meter, power_kw).",
+        ),
+        (
+            "SELECT r.temp FROM readings r",
+            "`r` is `readings`. The tables the statement reads: readings(id, meter, power_kw).",
+        ),
+        (
+            "SELECT * FROM reading",
+            "What is here: readings(id, meter, power_kw).",
+        ),
+    ] {
+        let r = h.call("query", json!({"sql": sql}));
+        assert_eq!(code(&r), "E_SQL", "{r}");
+        let m = r["error"]["message"].as_str().unwrap_or("");
+        assert!(m.contains(want), "{sql}\n  wanted {want:?} in: {m}");
+        assert!(
+            !m.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|w| w == "describe"),
+            "{sql}: {m}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_hosts_describe_carries_the_shape_of_what_it_attached() {
     // REQ-14 through the host protocol: the Arrow loader profiles what it writes, as a file
     // loader does, and the host's `describe` text carries it. Three meters, hourly, one dead.

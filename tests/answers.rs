@@ -437,8 +437,13 @@ fn tool_names_are_known_tools_plain_names_and_protocol_4() {
         json!({"protocol": [4], "tool_names": {"get_result": "Bench-Page_2"}}),
     );
     assert_eq!(r["ok"], true, "{r}");
-    let t = text(&h.query("SELECT * FROM nowhere", json!({})));
-    assert!(t.contains("`describe`"), "{t}");
+    // One text that names both: the renamed tool, and one that keeps benchy's name. (This read
+    // the unknown-table hint for `describe` until #27, which names no tool there.)
+    let t = text(&h.query("COPY (SELECT 1) TO 'out.csv'", json!({})));
+    assert!(
+        t.contains("through query") && t.contains("Bench-Page_2"),
+        "{t}"
+    );
     let t = text(&h.query("SELECT * FROM range(100)", json!({"max_rows": 5})));
     assert!(t.contains("Bench-Page_2"), "{t}");
 }

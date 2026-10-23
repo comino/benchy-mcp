@@ -275,7 +275,8 @@ confined, and each is confined as the engine is (`sandbox_posture`).
 ### Tool names, in version 4
 
 benchy's texts name the agent's tools: a result's footer says to read on with `get_result`, a
-hint says to run `describe`, `describe` says what is over its budget. A host relays the agent's
+refused file output says results come back through `query`, `describe` says what is over its
+budget. A host relays the agent's
 calls through tools of its own, and if they are called something else, those texts send its
 agent to tools that do not exist. So `hello` may say what the host calls them, and every text of
 the session — footers, hints, `describe`, errors — uses those names:
@@ -292,6 +293,12 @@ the session — footers, hints, `describe`, errors — uses those names:
   tool names are on the platforms agents run on. Two tools under one name, or a tool under the
   name of another of benchy's, would send the agent to one for the other. They are labels in
   prose: benchy resolves nothing by them, and a name that could be a path or a URL is refused.
+- **A tool the host does not have.** A host may give its agent no `describe` of its own, folding
+  what it says into something else. The hints of an unknown table or column name no tool: they
+  give the columns of the tables themselves, `readings(series_id, t, n)`, within 1,024 bytes,
+  and where they cut, they point to `DESCRIBE <table>`, which is SQL the agent runs through its
+  query tool. So `tool_names` has no way to say a tool is absent, and needs none for the hints;
+  nothing changed in the protocol for it, and every version is served the same.
 - **Refused** like anything else wrong with `hello`, as `E_REQUEST`, and the session ends: a key
   that is not a tool, a name that is not plain, two tools under one name, or `tool_names` in a
   session that agrees on version 3 or older.

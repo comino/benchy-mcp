@@ -183,6 +183,37 @@ At `--deadline 3 --hard-grace 1` the same query with `c1 <> 'zz'` in place of th
 work in the same batch the batch finishes and the agent's tables stay. A query that quotes no
 string, or names no text column, pays nothing: the note returns before it reads.
 
+### The columns in an unknown column's or table's hint (#27)
+
+The hint of an unknown column or table gives the columns of the tables it names (REQ-11
+`an_unknown_column_names_the_columns_of_the_tables_it_reads`). A loaded table's columns are the
+ones kept from its attach; the agent's own objects and the helper views are prepared as `SELECT
+*` on the agent's connection and not run. Measured over `benchy-mcp examples/data` through MCP,
+`perf stat -e instructions:u` across every process and the driver, (1,100 calls − 100 calls) /
+1,000, medians of three runs, `9350575` against the change:
+
+| Each failing call | Before | After |
+|---|---|---|
+| `SELECT temp FROM meters` | 3.83 M | 3.64–3.78 M |
+| `SELECT m.temp FROM meters m` (no hint before) | 3.70 M | 3.73 M |
+| `SELECT * FROM sales` | 3.88 M | 3.72 M |
+| `SELECT temp FROM hourly`, a helper view (`examples/helpers.sql`) | 5.1 M | 6.4 M |
+| `SELECT * FROM sales`, with the helpers: two views listed | 4.1 M | 6.5 M |
+| `SELECT temp FROM wide`, 2,000 columns, 30 more tables | 84.7 M | 88.3 M |
+
+A loaded table costs nothing measurable: the calls vary by about 0.15 M. Each helper view or
+object of the agent's listed costs about 1.2 M, its bind. Listed by `duckdb_columns()` on the
+host-facing connection instead, one helper view took the call to 12.3 M: the listing builds a
+row for every column of every catalog first, DuckDB's own 527 included, and no filter is pushed
+into it; and `pragma_table_info` on that connection cannot bind a helper view, whose tables are
+named unqualified. The wide table's 85 M is DuckDB's binder before and after; the hint's 2,000
+names, cut to 39, are the 3.6 M more.
+
+In bytes, the bundled bench: `SELECT temp FROM meters`'s hint 114 → 91 (only the table it reads,
+and no pointer to `describe`, which was 1,143 bytes more to call), `SELECT * FROM sales`'s 96 →
+121, and `SELECT m.temp FROM meters m`'s 0 → 86. The wide table's is 1,094 bytes, its list held to
+1,024 (`the_columns_a_hint_lists_are_bounded`).
+
 ### A query read only as far as it is kept
 
 A query's result was built whole (`duckdb_execute_prepared`) before its first 2,000 rows were

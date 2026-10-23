@@ -14,8 +14,29 @@
 //! a fix that works on this bench. A hint that says "check your syntax" is noise in a payload
 //! that repeats every call.
 
-/// Names the agent can use right now: what was loaded, plus whatever it created itself.
-pub struct Catalogue<'a>(pub &'a [String]);
+/// Names the agent can use right now: what was loaded, plus whatever it created itself, and how
+/// to ask for their columns.
+pub struct Catalogue<'a> {
+    pub names: &'a [String],
+    /// Asked only by a hint that lists columns (#27). `None`, and a hint names tables alone.
+    pub columns: Option<&'a Columns<'a>>,
+}
+
+/// The columns of those of the tables asked for that the catalog has, by table, each table's in
+/// its own order.
+pub type Columns<'a> = dyn Fn(&[&str]) -> Vec<(String, Vec<String>)> + 'a;
+
+/// The most the tables and columns a hint lists may take, in bytes. The hint is said with every
+/// error and inside the reply's byte cap (8 KB by default), so a table of a thousand columns or a
+/// bench of many tables is cut here, saying what it left out, rather than by the cap, which would
+/// take the end of the sentence with it (`the_columns_a_hint_lists_are_bounded`). The bundled
+/// bench's two tables take 72 bytes; a table of 2,000 columns of 23-byte names is cut to its
+/// first 39, the whole hint 1,094 bytes.
+const SHAPES: usize = 1024;
+
+/// At most this many tables are named, as a bench of 200 tables must not put 200 names into
+/// every error.
+const SHOWN: usize = 12;
 
 /// What the agent was doing when DuckDB refused: the statement as written, when it can be told
 /// apart in the batch, and the tables the session was to have and could not load.
@@ -25,19 +46,114 @@ pub struct Context<'a> {
     pub unavailable: &'a [String],
 }
 
-impl Catalogue<'_> {
-    /// Bounded: a bench with 200 tables must not put 200 names into every error.
+impl<'a> Catalogue<'a> {
+    /// The names alone, with no columns to ask for.
+    pub fn of(names: &'a [String]) -> Self {
+        Catalogue {
+            names,
+            columns: None,
+        }
+    }
+
+    /// Bounded at [`SHOWN`] names.
     fn list(&self) -> String {
-        const SHOWN: usize = 12;
-        if self.0.is_empty() {
+        if self.names.is_empty() {
             return "nothing yet".into();
         }
-        let head = self.0.iter().take(SHOWN).cloned().collect::<Vec<_>>();
-        match self.0.len().checked_sub(SHOWN) {
+        let head = self.names.iter().take(SHOWN).cloned().collect::<Vec<_>>();
+        match self.names.len().checked_sub(SHOWN) {
             Some(n) if n > 0 => format!("{} (+{n} more)", head.join(", ")),
             _ => head.join(", "),
         }
     }
+
+    /// `tables` with their columns, `readings(series_id, t, n)`, in at most [`SHAPES`] bytes, and
+    /// the sentence that says where what was cut is, if anything was. Each table has an even
+    /// share of what the ones before it left, so a wide first table cannot crowd out the names
+    /// after it; one cut short ends `… [+N columns])`, and tables past [`SHOWN`] are counted,
+    /// `(+N more)`. A table the catalog gives no columns for is named alone.
+    ///
+    /// #27: told only the tables' names, an agent spent its next step on `describe`, about 4 KB
+    /// on a host's bench, to learn the one column it got wrong; and a host whose agent has no
+    /// `describe` had nowhere to send it. The columns are the catalog's, never the data's, and
+    /// where the hint sends the agent for the rest is SQL, which every agent can run.
+    fn shapes(&self, tables: &[&str]) -> (String, String) {
+        if tables.is_empty() {
+            return ("nothing yet".into(), String::new());
+        }
+        let named = &tables[..tables.len().min(SHOWN)];
+        let found = self.columns.map(|f| f(named)).unwrap_or_default();
+        let mut parts: Vec<String> = Vec::new();
+        let mut used = 0;
+        let mut short: Vec<&str> = Vec::new();
+        for (i, t) in named.iter().enumerate() {
+            let cols = found
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(t))
+                .map_or(&[][..], |(_, c)| c.as_slice());
+            let sep = if parts.is_empty() { 0 } else { 2 };
+            let share = (SHAPES.saturating_sub(used) / (named.len() - i)).saturating_sub(sep);
+            let (entry, cut) = entry(t, cols, share)
+                .unwrap_or_else(|| (crate::profile::ident(t), !cols.is_empty()));
+            // A name alone can be longer than its share; past the bound it is counted instead.
+            if used + sep + entry.len() > SHAPES {
+                break;
+            }
+            if cut {
+                short.push(t);
+            }
+            used += sep + entry.len();
+            parts.push(entry);
+        }
+        let mut s = parts.join("; ");
+        let more = tables.len() - parts.len();
+        if more > 0 {
+            s.push_str(&format!(" (+{more} more)"));
+        }
+        let mut rest = match short[..] {
+            [] => String::new(),
+            [t] => format!(
+                " `DESCRIBE {}` lists all its columns.",
+                crate::profile::ident(t)
+            ),
+            _ => " `DESCRIBE <table>` lists all of a table's columns.".into(),
+        };
+        if more > 0 {
+            rest.push_str(" `SELECT table_name FROM information_schema.tables` lists every table.");
+        }
+        (s, rest)
+    }
+}
+
+/// `name(a, b, c)` in at most `room` bytes, and whether columns were left out to fit: as many as
+/// fit, then `… [+N columns])`. `None` where not even the name and one column fit, and the table
+/// is named alone.
+fn entry(name: &str, cols: &[String], room: usize) -> Option<(String, bool)> {
+    let name = crate::profile::ident(name);
+    if cols.is_empty() {
+        return (name.len() <= room).then_some((name, false));
+    }
+    let cols: Vec<String> = cols.iter().map(|c| crate::profile::ident(c)).collect();
+    let all = format!("{name}({})", cols.join(", "));
+    if all.len() <= room {
+        return Some((all, false));
+    }
+    let mut s = format!("{name}(");
+    for (i, c) in cols.iter().enumerate() {
+        let item = if i == 0 { c.clone() } else { format!(", {c}") };
+        // the mark that would follow this column, which counts the ones after it
+        let mark = format!(", … [+{} columns])", cols.len() - i - 1);
+        if s.len() + item.len() + mark.len() > room {
+            if i == 0 {
+                return None;
+            }
+            s.push_str(&format!(", … [+{} columns])", cols.len() - i));
+            return Some((s, true));
+        }
+        s.push_str(&item);
+    }
+    // Every column fits with a mark after it, so all of them fit without one; not reached.
+    Some((all, false))
 }
 
 /// What DuckDB calls the thing another engine spells differently. Each key is a name measured to
@@ -183,19 +299,19 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
         ));
     }
 
+    // #27: what is here, with the columns, so the next statement can be right without a call to
+    // `describe`, which a host's agent may not have.
     if let Some(name) = between(message, "Table with name ", " does not exist") {
+        let all: Vec<&str> = catalogue.names.iter().map(String::as_str).collect();
+        let (here, rest) = catalogue.shapes(&all);
         if cx.unavailable.iter().any(|u| u.eq_ignore_ascii_case(name)) {
             return Some(format!(
                 "`{name}` is not available this session: it could not be loaded. What is here: \
-                 {}. Run `{}` for their columns.",
-                catalogue.list(),
-                crate::tools::name("describe")
+                 {here}.{rest}"
             ));
         }
         return Some(format!(
-            "There is no `{name}` on the bench. What is here: {}. Run `{}` for their columns.",
-            catalogue.list(),
-            crate::tools::name("describe")
+            "There is no `{name}` on the bench. What is here: {here}.{rest}"
         ));
     }
 
@@ -228,16 +344,144 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
         );
     }
 
+    // #27: an unknown column is told the columns of the tables the statement reads. DuckDB 1.5.5
+    // words it three ways: unqualified, `Binder Error: Referenced column "temp" not found in FROM
+    // clause!`; qualified by a table or its alias, `Binder Error: Table "r" does not have a
+    // column named "temp"`; and qualified by a view, a CTE or a subquery, `Binder Error: Values
+    // list "c" does not have a column named "temp"`. Only the first had a hint, of the tables'
+    // names, and it sent the agent to `describe` for their columns.
     if message.contains("Binder Error") && message.contains("not found in FROM clause") {
+        let read = tables_read(cx.statement.unwrap_or(""), catalogue.names);
+        if read.is_empty() {
+            let all: Vec<&str> = catalogue.names.iter().map(String::as_str).collect();
+            let (here, rest) = catalogue.shapes(&all);
+            return Some(format!(
+                "That column is not in what the statement reads. On the bench: {here}.{rest}"
+            ));
+        }
+        let (read, rest) = catalogue.shapes(&read);
         return Some(format!(
-            "That column is not in the tables you selected from. On the bench: {}. Run `{}` \
-             for their columns.",
-            catalogue.list(),
-            crate::tools::name("describe")
+            "That column is not in the tables the statement reads: {read}.{rest}"
         ));
     }
+    // DuckDB 1.5.5 says `Values list` of a view, a helper's included, as of a CTE or subquery.
+    let qualified = |of: &str| {
+        between(
+            message,
+            &format!("Binder Error: {of} \""),
+            "\" does not have a column named ",
+        )
+    };
+    let (q, view) = match (qualified("Table"), qualified("Values list")) {
+        (Some(q), _) => (q, false),
+        (None, Some(q)) => (q, true),
+        (None, None) => return None,
+    };
+    let statement = cx.statement.unwrap_or("");
+    let mut read = tables_read(statement, catalogue.names);
+    let table = read
+        .iter()
+        .position(|t| t.eq_ignore_ascii_case(q))
+        .or_else(|| {
+            let t = aliased(statement, q, &read)?;
+            read.iter().position(|r| *r == t)
+        });
+    let said = match table {
+        Some(i) => {
+            // what the agent qualified the column with first: it is what it was looking at
+            let t = read.remove(i);
+            read.insert(0, t);
+            if t.eq_ignore_ascii_case(q) {
+                format!("That column is not in `{t}`.")
+            } else {
+                format!("`{q}` is `{t}`.")
+            }
+        }
+        None if view => format!("`{q}` is a subquery or CTE of the statement."),
+        None => format!("`{q}` has no such column."),
+    };
+    if read.is_empty() {
+        return None;
+    }
+    let (read, rest) = catalogue.shapes(&read);
+    Some(format!(
+        "{said} The tables the statement reads: {read}.{rest}"
+    ))
+}
 
-    None
+/// The words of `statement` as DuckDB 1.5.5's lexer reads it (`crate::guard::lex`): a name,
+/// quoted or not, as the name, and any other mark as itself, so that two names either side of a
+/// `,` are not read as a table and its alias. A literal is a word of its own, `'`, which no name
+/// is; comments are left out.
+fn words(statement: &str) -> Vec<String> {
+    use crate::guard::Part;
+    let mut out = Vec::new();
+    // A scan that stops (`guard::Stuck`) reads no word, and the hint names no table.
+    for (part, r) in crate::guard::lex(statement).unwrap_or_default() {
+        let text = &statement[r];
+        match part {
+            Part::Code => {
+                let mut word = String::new();
+                for c in text.chars() {
+                    // What continues a word in DuckDB's lexer.
+                    if c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii() {
+                        word.push(c);
+                        continue;
+                    }
+                    if !word.is_empty() {
+                        out.push(std::mem::take(&mut word));
+                    }
+                    if !c.is_whitespace() {
+                        out.push(c.to_string());
+                    }
+                }
+                if !word.is_empty() {
+                    out.push(word);
+                }
+            }
+            Part::Name => out.push(
+                text.strip_prefix('"')
+                    .and_then(|t| t.strip_suffix('"'))
+                    .unwrap_or(text)
+                    .replace("\"\"", "\""),
+            ),
+            Part::Literal => out.push("'".into()),
+            Part::Comment => {}
+        }
+    }
+    out
+}
+
+/// The tables of `names` that `statement` names, in the order it first names them, as `names`
+/// spells them. A name is matched as DuckDB matches one, ASCII case folded. A column of the same
+/// name as a table counts too: the hint then lists a table more, which costs bytes and misleads
+/// no one.
+fn tables_read<'n>(statement: &str, names: &'n [String]) -> Vec<&'n str> {
+    let mut read: Vec<&str> = Vec::new();
+    for w in words(statement) {
+        if let Some(n) = names.iter().find(|n| n.eq_ignore_ascii_case(&w)) {
+            if !read.contains(&n.as_str()) {
+                read.push(n);
+            }
+        }
+    }
+    read
+}
+
+/// The table of `read` that `alias` stands for in `statement`: `readings r` or `readings AS r`,
+/// in a FROM or a JOIN.
+fn aliased<'n>(statement: &str, alias: &str, read: &[&'n str]) -> Option<&'n str> {
+    let w = words(statement);
+    (0..w.len()).find_map(|i| {
+        let table = read.iter().find(|t| t.eq_ignore_ascii_case(&w[i]))?;
+        let next = w.get(i + 1)?;
+        let named = if next.eq_ignore_ascii_case("as") {
+            w.get(i + 2)?
+        } else {
+            next
+        };
+        named.eq_ignore_ascii_case(alias).then_some(*table)
+    })
 }
 
 /// REQ-15: an error says nothing of how the bench is built. DuckDB names the catalog a loaded
@@ -486,7 +730,7 @@ mod tests {
         let names = ["t".to_string()];
         assert!(for_sql_error(
             "Conversion Error: something odd",
-            &Catalogue(&names),
+            &Catalogue::of(&names),
             &Context::default()
         )
         .is_none());

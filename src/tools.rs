@@ -1,5 +1,8 @@
 //! The names benchy's texts give the agent's tools: a result's footer says to read on with
-//! `get_result`, a hint says to run `describe`. Every such text takes the name from here.
+//! `get_result`, a refused file output that results come back through `query`. Every such text
+//! takes the name from here. The hints of an unknown table or column name no tool (#27): they
+//! give the columns themselves, and the SQL `DESCRIBE <table>` for what they cut, as a host's
+//! agent may have no `describe`.
 //!
 //! A host relays the agent's calls through tools of its own, which need not be called what
 //! benchy's MCP server calls them, and an agent told to call a tool that does not exist spends a
