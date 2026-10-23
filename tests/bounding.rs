@@ -117,6 +117,25 @@ fn a_full_page_is_not_called_truncated() {
 }
 
 #[test]
+fn a_value_as_long_as_the_cell_cap_is_not_called_cut() {
+    // The cell cap's edge, as the page's is in `a_full_page_is_not_called_truncated`: a value of
+    // exactly `--max-cell-bytes` is whole, and a byte more is cut and says so.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &["--max-cell-bytes", "16"]);
+    let (_, body, _) = s.query("SELECT repeat('x', 16) AS v");
+    assert!(
+        !body.contains("TRUNCATED") && body.contains(&"x".repeat(16)),
+        "{body}"
+    );
+    let (_, body, _) = s.query("SELECT repeat('x', 17) AS v");
+    assert!(
+        body.contains("TRUNCATED") && body.contains("[+1 bytes]"),
+        "{body}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_truncated_result_can_be_paged() {
     let dir = data_dir();
     let mut s = Server::start(&dir, &["--max-rows", "200"]);

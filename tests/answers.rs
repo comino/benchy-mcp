@@ -231,6 +231,36 @@ fn a_page_says_the_sql_of_its_result() {
 }
 
 #[test]
+fn a_result_keeps_64_kib_of_its_sql() {
+    // A request may be 1 MiB and 32 results are kept, so whole statements could hold 32 MiB of
+    // the engine to say what a page shows a few KiB of. 64 KiB of each is kept (`RETAIN_SQL`),
+    // the number written here so that a change to it is caught: a statement of 65,536 bytes
+    // comes back whole, one a byte longer cut, through a session whose pages may be larger.
+    let mut h = Host::start(&["--max-bytes", "200000"]);
+    let statement = |len: usize| {
+        let pad = len - "SELECT '' AS v".len();
+        format!("SELECT '{}' AS v", "y".repeat(pad))
+    };
+    for (len, whole) in [(65_536, true), (65_537, false)] {
+        let sql = statement(len);
+        let r = h.query(&sql, json!({}));
+        assert_eq!(r["ok"], true, "{len}");
+        let p = h.call("page", json!({"result_id": r["result_ids"][0]}));
+        let kept = p["sql"].as_str().unwrap_or_else(|| panic!("{len}"));
+        if whole {
+            assert_eq!(kept, sql, "{len}");
+        } else {
+            assert!(
+                kept.len() <= 65_536 && kept.ends_with("… [cut at the byte cap]"),
+                "{len}: {} bytes, ending {:?}",
+                kept.len(),
+                &kept[kept.len().saturating_sub(40)..]
+            );
+        }
+    }
+}
+
+#[test]
 fn a_page_cuts_values_at_its_own_cell_cap() {
     // #18: caps may lower the session's limits for one call, `page` among them. A page with
     // `max_cell_bytes` 16 showed all 200 bytes of a value kept at the query's 256, and did not
@@ -267,6 +297,23 @@ fn a_page_cuts_values_at_its_own_cell_cap() {
     // The session's cap again: the result as it was kept.
     let p = h.call("page", json!({"result_id": id}));
     assert!(text(&p).contains(&"x".repeat(200)), "{p}");
+    // A value exactly as long as the cap it was kept at was not cut then, and is cut now; and a
+    // cut inside a character goes back to its start, as the query's does: 16 bytes is five '€'.
+    let r = h.query(
+        "SELECT repeat('z', 256) AS edge, repeat('€', 50) AS euro",
+        json!({}),
+    );
+    let p = h.call(
+        "page",
+        json!({"result_id": r["result_ids"][0], "caps": {"max_cell_bytes": 16}}),
+    );
+    assert!(
+        text(&p).contains(&format!(
+            "{}… [+240 bytes] | €€€€€… [+135 bytes]",
+            "z".repeat(16)
+        )),
+        "{p}"
+    );
 }
 
 #[test]
