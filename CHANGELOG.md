@@ -6,6 +6,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **Dependencies:** tokio 1.53.3 (RUSTSEC-2026-0386: `AsyncFd` constructors were unsound), toml 1.1
+  (TOML 1.1; the config's rules are unchanged: unknown fields are still errors), libc 0.2.190,
+  serde_json 1.0.154.
 - **The load timeout covers handing a loader its job** (#61). The job was written to the
   loader's stdin before the timeout and the memory watch started, so a job larger than the pipe
   holds (64 KiB on Linux), such as an attach stating many series columns, to a loader that did
