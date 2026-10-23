@@ -670,7 +670,8 @@ fn build_in(
     }
     // One listing of functions, DuckDB's built-ins with the helpers': `duckdb_functions()` builds
     // a row for each built-in before any filter applies, so each listing of it costs the same,
-    // about 115 M instructions. So the built-ins are read after the helpers are made, not before:
+    // about 100–115 M instructions on DuckDB 1.5.5 (97 M measured for #63: what the engine's own
+    // listing of the built-ins cost, before it was folded into the agent's). So the built-ins are read after the helpers are made, not before:
     // a helper named like one has stood in for it in the helpers after it, but it stops startup
     // all the same.
     let mut functions = Vec::new();

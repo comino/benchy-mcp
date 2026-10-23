@@ -30,6 +30,14 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   not refused: a long comment reaches nothing it should not, and a deployment that started
   before still starts. No reply carries it. The README's "SQL helpers" now gives both caps; a
   signature of up to 82 bytes keeps a whole comment.
+- **DuckDB's built-in function names are read once per engine, in the scan the shadowing check
+  makes anyway** (#63). The first `CREATE MACRO` of an engine listed `duckdb_functions()` twice,
+  once for DuckDB's names and once for the agent's, and each listing builds every built-in's row:
+  it now costs 185 M instructions rather than 282 M (`benchy-mcp host`, medians of seven). Every
+  later `CREATE MACRO` costs what it did, about 137 M, since learning the name the agent made
+  still takes that one scan, and a session's helpers cost what they did at startup: the engine's
+  listing as it attaches their file checks the file, not DuckDB's names. The check is as strict
+  as before; docs/PERFORMANCE.md has the numbers.
 
 ## [0.3.1] — 2026-10-21
 
