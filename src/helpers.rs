@@ -23,6 +23,13 @@
 //! ([`macro_body`]), and what reads a table is a view. No query of the agent's is looked at for
 //! a CTE then.
 //!
+//! **A macro calls only DuckDB and the helpers.** DuckDB 1.5.5 checks only part of a macro's body
+//! for the functions it calls when it is made; the rest it binds where the macro is called, where
+//! a macro the agent made later under a name nothing had would answer for it, measured. So a
+//! helper macro that calls a function neither DuckDB nor a helper has, or one named by a schema,
+//! is refused ([`unresolved`]). A view is bound when it is made, here, and again in its own
+//! catalog, where nothing of the agent's stood in for a function, measured.
+//!
 //! **Unqualified names.** A helper names the bench's tables unqualified, and that is safe: the
 //! agent's search path resolves them at query time, a table's catalog is renamed by every attach
 //! (`benchy_<n>`), so a qualified name could not stay right, and no object of the agent's may take
@@ -31,7 +38,7 @@
 
 use duckdb::ffi;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString};
 
 /// What kind of helper a statement makes.
@@ -662,6 +669,9 @@ fn build_in(
         .into_iter()
         .map(|r| r[0].to_ascii_lowercase())
         .collect();
+    // DuckDB's own functions alone, of the same listing, for what a helper macro calls
+    // ([`unresolved`]): a system view's name is no function, and the agent may make a macro of it.
+    let mut system_functions: HashSet<String> = HashSet::new();
     // With each helper macro's body as DuckDB's parser reads it, for whether it reads a table
     // ([`macro_body`]). A macro is bound only where it is called, with what it is called with,
     // and a call with NULL arguments is no stand-in for that: DuckDB 1.5.5's binder folds `NULL +
@@ -683,6 +693,7 @@ fn build_in(
         }
         if f[0] == "system" {
             builtin.insert(f[1].to_ascii_lowercase());
+            system_functions.insert(f[1].to_ascii_lowercase());
             continue;
         }
         if f[0] == "bench" && f[4] == "true" {
@@ -700,9 +711,14 @@ fn build_in(
         }
     }
     let reading = macros_that_read(&bodies);
+    let calling = unresolved(&bodies, &system_functions);
     for d in defs {
-        if let Some(how) = reading.get(&d.name.to_ascii_lowercase()) {
+        let folded = d.name.to_ascii_lowercase();
+        if let Some(how) = reading.get(&folded) {
             built.broken.push(reads_a_table(&d.name, how));
+        }
+        if let Some(why) = calling.get(&folded) {
+            built.broken.push(format!("helper `{}` {why}.", d.name));
         }
     }
     for d in defs {
@@ -941,12 +957,15 @@ const READS_NONE: &[&str] = &[
     "TABLE_FUNCTION",
 ];
 
-/// What a helper macro's body calls that is not DuckDB's: each function and table function by
-/// folded name, which may be another helper's.
+/// What a helper macro's body calls: each function, DuckDB's or a helper's, and each table
+/// function, by folded name, a table function's name among the functions too.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Calls {
     functions: HashSet<String>,
     table_functions: HashSet<String>,
+    /// Each call named by a schema or a catalog other than DuckDB's own, as written
+    /// (`s.lower`), which [`unresolved`] refuses.
+    elsewhere: BTreeSet<String>,
 }
 
 /// What a helper macro's body, as DuckDB's parser serialized it (`json_serialize_sql` of the body
@@ -997,8 +1016,24 @@ fn macro_body(json: &str) -> Result<Calls, String> {
                         calls.table_functions.insert(f);
                     } else if o.contains_key("class") {
                         // Any expression that names a function: a call, a window or an
-                        // aggregate. Only a helper's name among them counts.
+                        // aggregate, a table function's own among them.
                         if let Some(f) = name(v) {
+                            let part = |k: &str| o.get(k).and_then(|p| p.as_str()).unwrap_or("");
+                            let (catalog, schema) = (part("catalog"), part("schema"));
+                            // DuckDB's catalog, or no catalog and at most `main`, which DuckDB's
+                            // own rewrite writes (`[x]` is `main.list_value(x)`).
+                            if !(catalog.eq_ignore_ascii_case("system")
+                                || catalog.is_empty()
+                                    && (schema.is_empty() || schema.eq_ignore_ascii_case("main")))
+                            {
+                                let at = [catalog, schema, f.as_str()]
+                                    .iter()
+                                    .filter(|p| !p.is_empty())
+                                    .copied()
+                                    .collect::<Vec<_>>()
+                                    .join(".");
+                                calls.elsewhere.insert(at);
+                            }
                             calls.functions.insert(f);
                         }
                     }
@@ -1071,6 +1106,71 @@ fn macros_that_read(bodies: &[(String, Result<Calls, String>)]) -> HashMap<Strin
         }
         reading.extend(more);
     }
+}
+
+/// Of the helper macros, by folded name with each overload's body ([`macro_body`]), the ones that
+/// call what may resolve to an object of the agent's, and why it is refused, REQ-18
+/// `a_helper_macro_that_calls_an_unknown_function_is_refused_at_startup`: a function that is
+/// neither one of DuckDB's `system` catalog (`functions`) nor a helper macro, or any call named
+/// by a schema or catalog other than DuckDB's.
+///
+/// DuckDB 1.5.5 checks a macro's body for the functions it calls when it is made, but only in
+/// part, and binds the rest where it is called, against the caller's search path, measured: a
+/// call in the select list or WHERE of a SELECT with a FROM, a table macro's included, and one in
+/// a lambda's body, were made with `nosuch` nowhere; `CASE`, an aggregate's argument, a FROM-less
+/// subquery, a table function's arguments, VALUES and a parameter's default were refused. Made,
+/// the helper called a macro the agent made afterwards under that name. So every name its body
+/// calls must be DuckDB's or a helper's, which the agent may not give a macro of its own in
+/// `main`, temporary or not (REQ-9 `an_agent_object_cannot_shadow_a_host_object_or_builtin`,
+/// REQ-18 `an_agent_cannot_replace_or_shadow_a_helper`). A macro of the agent's in a schema of its
+/// own may have any name, and `s.lower(x)` called one the agent made after the helper, as did
+/// `x.lower()`, which DuckDB parses the same way and binds to a schema `x` when there is one. So
+/// a call names no schema but `main`, which DuckDB's own rewrite writes (`[x]` is
+/// `main.list_value(x)`), and no catalog but `system`.
+///
+/// The other way round, taking from the agent each name a helper calls that nothing defines,
+/// would keep a helper that cannot work and a set of names `describe` never explains; refused
+/// here, no such name is left. A parameter's default is not in the body DuckDB lists, and needs
+/// no check: DuckDB binds it when the macro is made (`nosuch(1)`, and a lambda calling it, were
+/// refused) and refuses a subquery in one.
+///
+/// By name, which the parse gives: an operator (`+`, `~~`) and a rewrite (`[1]`) are each a
+/// function DuckDB lists. Swept over some two hundred expressions on 1.5.5, the one name a parse
+/// gives that the listing lacks is `overlay`, for `OVERLAY(… PLACING …)`, which DuckDB does not
+/// bind either. A body benchy could not read is refused already as reading a table
+/// ([`macros_that_read`]).
+fn unresolved(
+    bodies: &[(String, Result<Calls, String>)],
+    functions: &HashSet<String>,
+) -> HashMap<String, String> {
+    let helpers: HashSet<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (name, body) in bodies {
+        let Ok(c) = body else { continue };
+        let why = if let Some(at) = c.elsewhere.first() {
+            format!(
+                "calls `{at}`, named by a schema or a catalog, which DuckDB resolves where the \
+                 helper is called: a schema the agent made of that name would hold what the \
+                 helper calls, and `x.f()` is read so too. Call a function by its name alone, \
+                 `f(x)`"
+            )
+        } else if let Some(f) = c
+            .functions
+            .iter()
+            .filter(|f| !functions.contains(*f) && !helpers.contains(f.as_str()))
+            .min()
+        {
+            format!(
+                "calls `{f}`, which is neither DuckDB's nor a helper's. DuckDB binds a macro's \
+                 body where it is called, so a macro the agent made named `{f}` would be what \
+                 the helper calls. Call a function DuckDB has, or make `{f}` a helper"
+            )
+        } else {
+            continue;
+        };
+        out.entry(name.clone()).or_insert(why);
+    }
+    out
 }
 
 /// Why helper macro `name`, which reads a table as `how` says, is refused.

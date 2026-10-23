@@ -13,6 +13,14 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   after 30 s past a 2 s load timeout. The job is now written on the thread that reads the
   loader's answer, and the load fails `E_DEADLINE` at the timeout, with the loader killed and
   nothing attached (`a_job_the_loader_does_not_read_is_held_to_the_load_timeout`).
+- **A helper macro that calls a function nothing defines stops startup** (#62). DuckDB 1.5.5
+  checks only part of a macro's body when it is made: a call in a SELECT with a FROM, a table
+  macro's included, or in a lambda was made with no such function anywhere, and once the agent
+  made a macro of that name, the operator's helper called the agent's code. A helper macro now
+  calls only DuckDB's functions and other helpers, by name alone (not `s.f(x)` or `x.f()`, which
+  DuckDB binds to a schema the agent may make), read from the function listing the helpers job
+  already makes; the refusal names the helper and what it calls. Helper views were not affected:
+  DuckDB binds one when it is made, in the helpers job, and a waiting one when its table arrives.
 
 ## [0.3.1] — 2026-10-21
 

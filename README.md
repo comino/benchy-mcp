@@ -264,8 +264,11 @@ or names a table in a string (`query_table('readings')`), stops startup. **A hel
 no table**: DuckDB expands a macro inside the caller's query, where a CTE of the caller's named
 like the table would stand in for it, so a macro whose body reads one stops startup too, and
 what reads a table is written as a view the agent filters. A macro computes from its arguments,
-with `range`, `generate_series`, `unnest` or VALUES for a table macro. A view over a table a
-host has not attached yet says so until it is.
+with `range`, `generate_series`, `unnest` or VALUES for a table macro, and **calls only DuckDB's
+functions and other helpers**, each by its name alone: DuckDB binds part of a macro's body only
+where it is called, where a macro the agent made under a name nothing had (or in a schema of its
+own, for `s.f(x)` or `x.f()`) would answer for it, so a macro that calls anything else stops
+startup. A view over a table a host has not attached yet says so until it is.
 [`examples/helpers.sql`](examples/helpers.sql) has four for the bundled data, and
 [REQ-18](REQUIREMENTS.md#req-18--helpers-the-operator-provides) the rules.
 

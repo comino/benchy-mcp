@@ -1121,6 +1121,12 @@ error; a view is bound on its own and reads the table (measured). So what reads 
 view, and a macro is a formula over its arguments, or a table macro over its arguments alone.
 A parameterised recipe that reads a table is a view plus the filter the agent writes.
 
+**A helper macro calls only DuckDB and the helpers.** DuckDB 1.5.5 checks only part of a macro's
+body for the functions it calls when it is made, and binds the rest where it is called, so a
+helper calling a name nothing had called the agent's macro once the agent made one of that name,
+and a CTE of the agent's could then stand in for a table that macro read (measured). Every
+function a helper macro calls is DuckDB's or a helper's, named alone, and so taken from the agent.
+
 A helpers job (`Job::Helpers`, a loader confined to its staging directory and locked down as the
 engine is) makes the helpers in a file of their own against empty stand-ins of the bench's
 tables, since DuckDB binds a body when it is created; the engine attaches that file `READ_ONLY`
@@ -1149,6 +1155,16 @@ that table is attached again.
   view.
 - `a_macro_body_benchy_cannot_read_reads_a_table` — parser output benchy cannot read counts as
   reading a table.
+- `a_helper_macro_that_calls_an_unknown_function_is_refused_at_startup` — a helper macro that
+  calls a function neither DuckDB nor a helper has, or one named by a schema or catalog (`s.f(x)`,
+  `x.f()`), stops startup, naming the helper and the call; plain DuckDB makes such a macro and
+  then calls the agent's macro of that name.
+- `a_helper_view_never_calls_the_agents_function` — a helper view calling an unknown function
+  stops startup, and a schema and macro of the agent's named like a view's `meter.upper()` leave
+  its answer as it was.
+- `a_waiting_view_never_calls_the_agents_function` — through the host protocol too: a helper
+  macro is checked before any table is attached, and a waiting view is bound by the helpers job
+  when its table arrives, where a macro of the agent's never answers for a function it lacks.
 - `a_table_free_helper_macro_and_a_view_serve` — views and table-free macros serve, and no CTE of
   the agent's changes their answers.
 - `a_string_that_looks_like_sql_runs_beside_helpers` — beside helpers, a string literal runs as

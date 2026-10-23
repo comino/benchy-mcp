@@ -2553,6 +2553,58 @@ fn a_view_over_a_missing_table_errors_until_attached() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A host's helpers are made before any table is attached, so a waiting view's body is bound
+/// only when its table arrives: then by the helpers job, against stand-ins of the tables, where
+/// nothing of the agent's is, so a function of the agent's never stands in for one that is not
+/// there. A helper macro is checked at startup in host mode too.
+#[test]
+fn a_waiting_view_never_calls_the_agents_function() {
+    let dir = unique("host-helper-unknown");
+    let cfg = helpers_config(
+        &dir,
+        "CREATE MACRO total(n) AS (SELECT sum(nosuch(range)) FROM range(n));\n",
+    );
+    let out = Command::new(common::BIN)
+        .arg("host")
+        .args(common::PLATFORM)
+        .args(["--config", cfg.to_str().unwrap()])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(
+        err.contains("helper `total` calls `nosuch`, which is neither DuckDB's nor a helper's"),
+        "{err}"
+    );
+
+    let cfg = helpers_config(
+        &dir,
+        "CREATE VIEW scaled AS SELECT nosuch(power_kw) AS p FROM readings;\n",
+    );
+    let mut h = Host::start(&["--config", cfg.to_str().unwrap()]);
+    let r = h.call("query", json!({"sql": "CREATE MACRO nosuch(x) AS x * 100"}));
+    assert_eq!(r["ok"], true, "{r}");
+    let r = attach(
+        &mut h,
+        "readings",
+        &arrows(&dir.join("a.arrows"), &readings(4, "a"), true),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let r = h.call("query", json!({"sql": "SELECT sum(p) AS s FROM scaled"}));
+    assert_eq!(
+        code(&r),
+        "E_SQL",
+        "the agent's macro answered for the view: {r}"
+    );
+    let r = h.call(
+        "query",
+        json!({"sql": "SELECT sum(nosuch(power_kw)) AS s FROM readings"}),
+    );
+    assert!(r["text"].as_str().unwrap_or("").contains("600"), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_host_cannot_attach_under_a_helpers_name() {
     // REQ-18: a helper's name is taken from the start, a waiting one's too, so no table the host

@@ -442,6 +442,138 @@ fn a_helper_macro_that_reads_a_table_is_refused_at_startup() {
     }
 }
 
+/// DuckDB 1.5.5 checks only part of a macro's body for the functions it calls when the macro is
+/// made, and binds the rest where it is called, against the caller's search path: a call in the
+/// select list or WHERE of a SELECT with a FROM, and one in a lambda, were made with nothing of
+/// that name anywhere, and then called the agent's macro of that name. Shown on plain DuckDB
+/// first, so this test says when a DuckDB release changes it.
+#[test]
+fn a_helper_macro_that_calls_an_unknown_function_is_refused_at_startup() {
+    let shapes = [
+        (
+            "CREATE MACRO f(n) AS (SELECT sum(nosuch(range)) FROM range(n))",
+            "SELECT f(2)::BIGINT AS a",
+        ),
+        (
+            "CREATE MACRO f(n) AS TABLE SELECT nosuch(range) AS a FROM range(n)",
+            "SELECT sum(a)::BIGINT AS a FROM f(2)",
+        ),
+        (
+            "CREATE MACRO f(n) AS TABLE SELECT range AS a FROM range(n) WHERE nosuch(range) > 0",
+            "SELECT (count(*) * 100)::BIGINT AS a FROM f(2)",
+        ),
+        (
+            "CREATE MACRO f(n) AS list_transform([n], y -> nosuch(y))[1]",
+            "SELECT f(1)::BIGINT AS a",
+        ),
+    ];
+    let plain = duckdb::Connection::open_in_memory().unwrap();
+    for (helper, call) in shapes {
+        plain.execute_batch(helper).expect(helper);
+        plain
+            .execute_batch("CREATE OR REPLACE MACRO nosuch(x) AS x * 100")
+            .unwrap();
+        let a: i64 = plain.query_row(call, [], |r| r.get(0)).expect(call);
+        assert_eq!(
+            a, 100,
+            "{helper}: the agent's macro answered for the helper"
+        );
+        plain.execute_batch("DROP MACRO nosuch; DROP MACRO f").ok();
+        plain.execute_batch("DROP MACRO TABLE f").ok();
+    }
+
+    // Through benchy, each stops startup, naming the helper and what it calls.
+    for (helper, _) in shapes {
+        let e = refused(helper);
+        assert!(
+            e.contains("helper `f` calls `nosuch`, which is neither DuckDB's nor a helper's"),
+            "{helper}: {e}"
+        );
+    }
+    // A system view's name is no function's, and the agent may make a macro of it.
+    let e = refused("CREATE MACRO f(n) AS (SELECT max(sqlite_master(range)) FROM range(n))");
+    assert!(e.contains("helper `f` calls `sqlite_master`"), "{e}");
+    // A macro of the agent's in a schema of its own may have any name, and DuckDB binds `s.f()`,
+    // and `x.f()` alike, to a schema `s` or `x` when there is one: a call names no schema or
+    // catalog of its own.
+    for (helper, call) in [
+        (
+            "CREATE MACRO f(n) AS (SELECT max(s.lower(range)) FROM range(n))",
+            "s.lower",
+        ),
+        (
+            "CREATE MACRO f(n) AS (SELECT max(memory.s.lower(range)) FROM range(n))",
+            "memory.s.lower",
+        ),
+        ("CREATE MACRO f(x) AS x.lower()", "x.lower"),
+        (
+            "CREATE MACRO f(x) AS list_transform([x], y -> s.lower(y))[1]",
+            "s.lower",
+        ),
+    ] {
+        let e = refused(helper);
+        assert!(
+            e.contains(&format!(
+                "helper `f` calls `{call}`, named by a schema or a catalog"
+            )),
+            "{helper}: {e}"
+        );
+    }
+    // What DuckDB has and what a helper is serve, in those shapes too, DuckDB's own catalog and
+    // its rewrite of `[x]` to `main.list_value(x)` included; and none of those names is the
+    // agent's to take.
+    let (mut s, dir) = start(
+        "CREATE MACRO kw_to_w(kw) AS kw * 1000;\n\
+         CREATE MACRO total_w(n) AS (SELECT sum(kw_to_w(range)) FROM range(n));\n\
+         CREATE MACRO shout(x) AS list_transform([x], y -> system.main.upper(y))[1];\n",
+        &[],
+    );
+    assert!(ok(&mut s, "SELECT total_w(3) || '!' AS w").contains("3000!"));
+    assert!(ok(&mut s, "SELECT shout('lab') AS s").contains("LAB"));
+    for sql in [
+        "CREATE MACRO kw_to_w(kw) AS 0",
+        "CREATE TEMP MACRO upper(x) AS 'mine'",
+    ] {
+        let e = err(&mut s, sql);
+        assert!(e.contains("is taken"), "{sql}: {e}");
+    }
+    ok(&mut s, "CREATE MACRO sqlite_master(x) AS x");
+    drop(s);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A view is bound when it is made, in the helpers job, where nothing of the agent's is, and DuckDB
+/// binds its body again in its own catalog: measured on 1.5.5, a schema and a macro the agent made
+/// named like what a view's `meter.upper()` could mean left the view's answer as it was.
+#[test]
+fn a_helper_view_never_calls_the_agents_function() {
+    let e = refused("CREATE VIEW v AS SELECT nosuch(power_kw) AS x FROM meters");
+    assert!(
+        e.contains("helper `v`") && e.contains("Scalar Function with name nosuch does not exist"),
+        "{e}"
+    );
+    let (mut s, dir) = start(
+        "CREATE VIEW up AS SELECT DISTINCT meter.upper() AS m FROM meters;",
+        &[],
+    );
+    let before = rows(&ok(&mut s, "SELECT m, 0 AS k FROM up ORDER BY m"));
+    assert_eq!(before, ["LAB 0", "OFFICE 0"]);
+    ok(&mut s, "CREATE SCHEMA meter");
+    ok(
+        &mut s,
+        "CREATE MACRO meter.upper() AS 'agent', (x) AS 'agent'",
+    );
+    // The agent's own query reaches its macro; the view does not.
+    let mine = ok(&mut s, "SELECT DISTINCT meter.upper() AS m FROM meters");
+    assert!(mine.contains("agent"), "{mine}");
+    assert_eq!(
+        rows(&ok(&mut s, "SELECT m, 0 AS k FROM up ORDER BY m")),
+        before
+    );
+    drop(s);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A CTE of the agent's named like the view's table, like `range` or like a helper table macro
 /// changes none of their answers: measured on DuckDB 1.5.5, a table function is no table a CTE
 /// can take.
