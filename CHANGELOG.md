@@ -6,6 +6,14 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **The load timeout covers handing a loader its job** (#61). The job was written to the
+  loader's stdin before the timeout and the memory watch started, so a job larger than the pipe
+  holds (64 KiB on Linux), such as an attach stating many series columns, to a loader that did
+  not read it left startup or the attach waiting for as long as the loader stayed so: no reply
+  after 30 s past a 2 s load timeout. The job is now written on the thread that reads the
+  loader's answer, and the load fails `E_DEADLINE` at the timeout, with the loader killed and
+  nothing attached (`a_job_the_loader_does_not_read_is_held_to_the_load_timeout`).
+
 ## [0.3.1] — 2026-10-21
 
 Two TLS advisories fixed in the HTTP loader's dependencies, and the weekly cargo-mutants gate green
