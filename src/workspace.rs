@@ -100,8 +100,9 @@ pub struct Workspace {
 struct Taken {
     /// DuckDB's built-in functions, macros and table functions, every schema of the `system`
     /// catalog, and apart from them the names its parser reads itself ([`PARSER_NAMES`]). Read
-    /// on the first CREATE that may have made a function, and kept: no extension loads after the
-    /// lock, so neither can grow.
+    /// on the first CREATE that may have made a function, the functions in the same scan as the
+    /// agent's ([`AGENT_AND_BUILTIN_FUNCTIONS`]), and kept: no extension loads after the lock, so
+    /// neither can grow.
     builtin: Option<Builtin>,
     /// The views of DuckDB's `system` catalog, in every schema of it ([`SYSTEM_VIEWS`]), which an
     /// unqualified name reaches after the agent's own: `sqlite_master`, `duckdb_tables`,
@@ -297,8 +298,22 @@ const AGENT_FUNCTIONS: &CStr = c_str(concat!(
     "))::VARCHAR FROM system.main.duckdb_functions() \
      WHERE database_name IN ('temp', 'memory') GROUP BY ALL\0"
 ));
-const BUILTIN_FUNCTIONS: &CStr = c"SELECT DISTINCT function_name \
-      FROM system.main.duckdb_functions() WHERE database_name = 'system'";
+/// [`AGENT_FUNCTIONS`], and in the same scan DuckDB's own functions, of every schema of the
+/// `system` catalog, as `-1` and the name (`Taken::builtin`). Asked on the first CREATE that may
+/// have made a function, in place of the listing of the agent's alone, and never again in that
+/// engine. A listing of the built-ins of their own cost a second scan, as much as the first (#63:
+/// the first `CREATE MACRO` of an engine, measured in docs/PERFORMANCE.md). Read where the
+/// agent's are, after its CREATE, as the agent's own listing is: nothing the agent makes is in
+/// the `system` catalog, which DuckDB keeps to itself.
+const AGENT_AND_BUILTIN_FUNCTIONS: &CStr = c_str(concat!(
+    "SELECT CASE WHEN database_name = 'system' THEN -1 \
+       ELSE (schema_name = 'main')::INTEGER END, function_name, \
+       bool_or(CASE WHEN database_name = 'system' THEN false \
+         ELSE regexp_matches(coalesce(macro_definition, ''), ",
+    enum_spelled!(),
+    ") END)::VARCHAR FROM system.main.duckdb_functions() \
+     WHERE database_name IN ('temp', 'memory', 'system') GROUP BY ALL\0"
+));
 /// DuckDB's system views, of every schema of the `system` catalog (`main`, `information_schema`,
 /// `pg_catalog`): 47 on DuckDB 1.5.5. An agent's `CREATE VIEW sqlite_master` answered for the
 /// system view of that name, measured (REQ-9 `a_system_view_name_is_taken`). Schemas need no
@@ -1795,7 +1810,11 @@ impl Workspace {
                 // views; a CREATE VIEW and its DROP 5.55 M → 3.9 M, since a CREATE that makes a
                 // table or view no longer lists types; a CREATE MACRO and its DROP 6.9 M →
                 // 119 M, the listing of every function, ~30 ms here, paid only by a CREATE that
-                // made no table, view or type.
+                // made no table, view or type. Measured again for #63 over `benchy-mcp host`, one
+                // table, seven runs of each binary interleaved, medians: each CREATE MACRO and
+                // its DROP 137 M, before and after; the first of an engine 282 M → 185 M, since
+                // DuckDB's own names now come from the agent's scan ([`AGENT_AND_BUILTIN_FUNCTIONS`])
+                // and only the parser's are read apart (about 50 M).
                 let create = kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE;
                 let alter = kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_ALTER;
                 if create || alter {
@@ -2298,21 +2317,30 @@ impl Workspace {
         if let Some(what) = self.enum_spelled(&[ENUM_IN_TABLES, ENUM_IN_VIEWS, ENUM_IN_INDEXES])? {
             return Ok(Made::Taken(enum_refused(&what)));
         }
-        if self.taken.builtin.is_none() {
-            let names = |sql| -> Result<std::collections::HashSet<String>, String> {
-                Ok(self
-                    .agent_rows(sql)?
+        // #63: DuckDB's own functions are read once per engine, from the same scan of
+        // `duckdb_functions()` as the agent's, which builds every built-in's row either way.
+        let functions = if self.taken.builtin.is_some() {
+            self.agent_rows(AGENT_FUNCTIONS)?
+        } else {
+            let (system, agent): (Vec<_>, Vec<_>) = self
+                .agent_rows(AGENT_AND_BUILTIN_FUNCTIONS)?
+                .into_iter()
+                .partition(|r| r.0 < 0);
+            let parser = self
+                .agent_rows(PARSER_NAMES)?
+                .into_iter()
+                .map(|r| r.1.to_ascii_lowercase())
+                .collect();
+            self.taken.builtin = Some(Builtin {
+                functions: system
                     .into_iter()
                     .map(|r| r.1.to_ascii_lowercase())
-                    .collect())
-            };
-            self.taken.builtin = Some(Builtin {
-                functions: names(BUILTIN_FUNCTIONS)?,
-                parser: names(PARSER_NAMES)?,
+                    .collect(),
+                parser,
             });
-        }
+            agent
+        };
         let builtin = self.taken.builtin.as_ref().expect("read above");
-        let functions = self.agent_rows(AGENT_FUNCTIONS)?;
         for (_, name, _) in functions.iter().filter(|f| f.0 == 1) {
             let folded = name.to_ascii_lowercase();
             if builtin.parser.contains(&folded) && !builtin.functions.contains(&folded) {

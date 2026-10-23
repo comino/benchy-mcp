@@ -305,6 +305,37 @@ its parse, and no longer does; the rest is within the ±0.15 M a call and ±0.15
 sessions vary by. The check that a macro reads no table adds nothing measurable to startup: it
 reads the column of `json_serialize_sql` the job already computed.
 
+### DuckDB's built-ins read once per engine, in the agent's scan (#63)
+
+The engine read DuckDB's own function names (`Taken::builtin`) on the first `CREATE` that may
+have made a function, with a listing of `duckdb_functions()` of its own, and then listed the
+agent's functions with a second one. Each scan builds every built-in's row before it filters
+(R4-4), so the two cost the same. The built-ins now come from the scan of the agent's
+(`AGENT_AND_BUILTIN_FUNCTIONS` in `src/workspace.rs`), still read after the agent's `CREATE`, on
+its connection, filtered to the `system` catalog, which nothing of the agent's can be in: the
+check is as strict as before (`an_agent_object_cannot_shadow_a_host_object_or_builtin`,
+`a_name_the_parser_reads_itself_is_taken`, REQ-18's helper tests, all unchanged). Measured with
+`perf stat -e instructions:u` over a whole `benchy-mcp host` session, every process, the bundled
+`hello.arrows` attached once, the session without the call subtracted; the parent `32bad6f`
+against the change, seven runs each interleaved, medians, load average 9–10:
+
+| | `32bad6f` | change |
+|---|---:|---:|
+| The first `CREATE MACRO …; DROP …` of an engine | 282 M | 185 M |
+| Each one after it (20 calls) | 137 M | 137 M |
+| The first, with the four example helpers | 295 M | 191 M |
+| A session's helpers at startup (four, no table) | 506 M | 501 M |
+| Each `attach` of one table (10 calls) | 235 M | 239 M |
+
+What a `CREATE MACRO` pays every time is unchanged and stays DuckDB's: the listing of the agent's
+own functions, to learn the name it made and whether its body spells an ENUM, is one scan of every
+built-in. The first one of an engine pays the parser's names on top (one parse of each of 337
+names, about 50 M). The helpers cost nothing more or less. The engine's check of the helpers' file
+lists every function once more, as a table's check does: it is what holds the file to the views
+and macros the job says it made, and the job's own listing of them is no check of the file the
+engine is given, so it stays. The rows of an attach, and of the helpers at startup, move within
+their spread (attach 2.87–3.03 G for eleven).
+
 ## The profile's claims, made true: what it costs
 
 Four `describe` claims were stated as facts and were not: an integer reading taken for the

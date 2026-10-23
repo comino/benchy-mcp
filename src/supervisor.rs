@@ -1209,10 +1209,20 @@ impl Supervisor {
         if !due {
             return;
         }
+        let waited: Vec<String> = self.helpers_waiting().into_iter().map(|w| w.0).collect();
         match self.build_helpers() {
             Ok(built) => {
                 for b in &built.broken {
                     eprintln!("benchy: {b}");
+                }
+                // #60: a view made now has its columns in its line for the first time; what its
+                // comment lost was said at startup.
+                let made =
+                    |s: &&crate::helpers::Shown| s.waits.is_none() && waited.contains(&s.name);
+                for s in built.shown.iter().filter(made) {
+                    if let Some(cut) = crate::helpers::line_cut(s) {
+                        eprintln!("benchy: {cut}");
+                    }
                 }
                 for (name, table) in built.waiting() {
                     eprintln!("benchy: helper `{name}` waits for table `{table}`");

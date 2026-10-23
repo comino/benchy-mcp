@@ -2541,6 +2541,80 @@ const HOST_HELPERS: &str = "-- Rows per meter.\n\
     -- Twice a number.\n\
     CREATE MACRO twice(x) AS 2 * x;\n";
 
+/// #60: a waiting view's columns are in its `describe` line only once its table is attached and
+/// it is made, so a line that passes 320 bytes only then is told to the operator then, once.
+#[test]
+fn a_waiting_view_whose_line_is_cut_once_made_is_told_to_the_operator() {
+    let dir = unique("host-helper-cut");
+    let cols: Vec<String> = (1..=12)
+        .map(|i| format!("a_rather_long_column_{i:02}"))
+        .collect();
+    let select: Vec<String> = cols.iter().map(|c| format!("meter AS {c}")).collect();
+    // Beside it, a macro whose line is cut from the start and a view that still waits after the
+    // attach, whose line is cut too: each told at startup, and not again at the attach.
+    let far = "readings_of_the_weather_station_on_the_roof_of_the_lab_building";
+    let later = format!(
+        "  later — view: {}… [+40 bytes] (works once `{far}` is on the bench)",
+        "x".repeat(200)
+    );
+    assert!(later.len() > 320, "{}", later.len());
+    let cfg = helpers_config(
+        &dir,
+        &format!(
+            "-- Wide.\nCREATE VIEW wide AS SELECT {} FROM readings;\n\
+             -- Many.\nCREATE MACRO many({}) AS 1;\n\
+             -- {}\nCREATE VIEW later AS SELECT * FROM {far};\n",
+            select.join(", "),
+            cols.join(", "),
+            "x".repeat(240),
+        ),
+    );
+    let line = format!("  wide ({}) — view: Wide.", cols.join(", "));
+    assert!(line.len() > 320, "{}", line.len());
+    let log = dir.join("stderr.log");
+    let mut h = Host::spawn_with(
+        &["--config", cfg.to_str().unwrap()],
+        Stdio::from(std::fs::File::create(&log).unwrap()),
+        false,
+    );
+    let hello = h.call("hello", json!({"protocol": [1]}));
+    assert_eq!(hello["ok"], true, "{hello}");
+    let said = || std::fs::read_to_string(&log).unwrap();
+    // Waiting, its line is its name, its comment and what it waits for: nothing is cut.
+    assert!(said().contains("helper `wide` waits"), "{}", said());
+    assert!(!said().contains("helper `wide`'s"), "{}", said());
+    for other in ["helper `many`'s line", "helper `later`'s line"] {
+        assert_eq!(said().matches(other).count(), 1, "{}", said());
+    }
+    let r = attach(
+        &mut h,
+        "readings",
+        &arrows(&dir.join("a.arrows"), &readings(4, "a"), true),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let told = format!(
+        "helper `wide`'s line in `describe`, its signature, kind and comment, is {} bytes; \
+         `describe` shows the first 320 and marks the other {} cut",
+        line.len(),
+        line.len() - 320
+    );
+    assert_eq!(said().matches(&told).count(), 1, "{}", said());
+    for other in ["helper `many`'s line", "helper `later`'s line"] {
+        assert_eq!(said().matches(other).count(), 1, "{}", said());
+    }
+    let d = h.call("describe", json!({}));
+    assert!(
+        d["text"].as_str().unwrap().contains(&format!(
+            "{}… [+{} bytes]",
+            &line[..320],
+            line.len() - 320
+        )),
+        "{d}"
+    );
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `describe` says what the helper waits for and calling it says so; detached again, the view
 /// says which table it misses. A macro over a missing table reads a table, and is refused.
 #[test]
