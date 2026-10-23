@@ -8,7 +8,7 @@
 use crate::guard::{Classifier, Verdict};
 use crate::{
     lockdown,
-    result::{Cell, QueryResult},
+    result::{Cell, Keep, QueryResult},
 };
 use duckdb::{ffi, Connection};
 use std::ffi::{CStr, CString};
@@ -647,9 +647,6 @@ pub fn fresh_name(prefix: &str) -> String {
         N.fetch_add(1, Ordering::Relaxed)
     )
 }
-
-/// How many results are kept for paging.
-pub const RETAINED_RESULTS: usize = 32;
 
 /// The most an empty result's note may take (REQ-11), and never more than the batch has left of
 /// its deadline (`Workspace::why_empty`). Past it the note's query is interrupted and the result
@@ -1963,10 +1960,7 @@ impl Workspace {
             }
         }
         for r in &out {
-            self.retained.push_back(r.clone());
-            while self.retained.len() > RETAINED_RESULTS {
-                self.retained.pop_front();
-            }
+            crate::result::retain(&mut self.retained, r.clone());
         }
         match failure {
             None => Ok(out),
@@ -2702,47 +2696,6 @@ unsafe fn arrow_reads(con: ffi::duckdb_connection, prep: ffi::duckdb_prepared_st
 unsafe fn result_error(r: &mut ffi::duckdb_result) -> Option<String> {
     let e = ffi::duckdb_result_error(r);
     (!e.is_null()).then(|| CStr::from_ptr(e).to_string_lossy().into_owned())
-}
-
-/// The retention rule, in one place, so the Arrow and legacy readers cannot drift apart on it:
-/// keep rows while there is room, and remember whether more existed.
-struct Keep {
-    rows: Vec<Vec<Cell>>,
-    bytes: usize,
-    more: bool,
-    cut: bool,
-}
-
-impl Keep {
-    fn new() -> Self {
-        Self {
-            rows: Vec::new(),
-            bytes: 0,
-            more: false,
-            cut: false,
-        }
-    }
-
-    /// A value, cut to the cell cap if it is longer — remembered, so the result can say so.
-    fn value(&mut self, s: String, max: usize) -> Cell {
-        if s.len() > max {
-            self.cut = true;
-        }
-        Cell::Text(crate::result::cut(s, max))
-    }
-
-    /// Offer a row. `false` once retention is full — and then more rows existed than were kept.
-    fn offer(&mut self, row: Vec<Cell>) -> bool {
-        if self.rows.len() >= crate::result::RETAIN_ROWS
-            || self.bytes >= crate::result::RETAIN_BYTES
-        {
-            self.more = true;
-            return false;
-        }
-        self.bytes += row.iter().map(Cell::byte_len).sum::<usize>();
-        self.rows.push(row);
-        true
-    }
 }
 
 /// A value this reader cannot render faithfully. Saying so, with the fix, is the only honest

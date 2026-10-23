@@ -154,6 +154,105 @@ fn a_truncated_result_can_be_paged() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// What the bench kept of `sql`'s result for paging, as a page past its end says it: "has N
+/// row(s)" when every row was kept, "keeps its first N row(s)" when more existed.
+fn kept(s: &mut Server, sql: &str) -> String {
+    let (err, body, _) = s.query(sql);
+    assert!(!err, "{body}");
+    let (err, page) = get_result(s, &result_id(&body), Some(1_000_000));
+    assert!(!err, "{page}");
+    page
+}
+
+// The retention limits below are written as the README and REQUIREMENTS.md give them, never read
+// from the constants: a test that imported `RETAIN_ROWS` would follow it to any value, and a
+// change of a documented limit is what each is here to catch. Each is held at both edges, since
+// a limit one off in either direction passed the suites before these (#22).
+
+#[test]
+fn a_result_keeps_its_first_2000_rows() {
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &[]);
+    let page = kept(&mut s, "SELECT i FROM range(2000) t(i)");
+    assert!(
+        page.contains("has 2000 row(s)"),
+        "exactly 2,000 are all kept: {page}"
+    );
+    let page = kept(&mut s, "SELECT i FROM range(2001) t(i)");
+    assert!(
+        page.contains("keeps its first 2000 row(s)"),
+        "one more is not: {page}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_result_keeps_rows_until_they_reach_1_mib() {
+    // A kept value costs its text and 3 bytes (`Cell::byte_len`), so a row of 1,021 bytes costs
+    // 1,024 and 1,024 of them come to 1 MiB exactly. Rows are kept while less than 1 MiB is
+    // held: the row that reaches it is the last kept, and none after it. One byte short, the
+    // next row is still kept, which takes the result past 1 MiB by up to a row. The cell cap is
+    // raised so that no value is cut before it is counted, and the row cap is never reached.
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &["--max-cell-bytes", "2048"]);
+    let page = kept(&mut s, "SELECT repeat('x', 1021) AS v FROM range(1500)");
+    assert!(
+        page.contains("keeps its first 1024 row(s)"),
+        "1 MiB exactly, and no row more: {page}"
+    );
+    let page = kept(
+        &mut s,
+        "SELECT repeat('x', CASE WHEN i = 0 THEN 1020 ELSE 1021 END) AS v FROM range(1500) t(i)",
+    );
+    assert!(
+        page.contains("keeps its first 1025 row(s)"),
+        "a byte short of 1 MiB, one row more: {page}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_last_32_results_are_kept() {
+    let dir = data_dir();
+    let mut s = Server::start(&dir, &[]);
+    let ids: Vec<String> = (0..33)
+        .map(|i| {
+            let (err, body, _) = s.query(&format!("SELECT {i} AS n"));
+            assert!(!err, "{body}");
+            result_id(&body)
+        })
+        .collect();
+    let (err, page) = get_result(&mut s, &ids[1], None);
+    assert!(!err, "the 32nd from the last is kept: {page}");
+    let (err, page) = get_result(&mut s, &ids[0], None);
+    assert!(err, "the 33rd is not: {page}");
+    assert!(page.contains("last 32 results are kept"), "{page}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_response_cap_is_at_least_512_bytes() {
+    // Below 512 bytes the notices that say what a response cut would not fit (README: "at least
+    // 512"). A host's per-call floor is held in `a_host_lowers_max_bytes_to_512_and_no_further`.
+    let dir = data_dir();
+    let out = std::process::Command::new(common::BIN)
+        .arg(&dir)
+        .args(["--max-bytes", "511"])
+        .args(common::PLATFORM)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "511 started: {err}");
+    assert!(err.contains("--max-bytes must be at least 512"), "{err}");
+    let mut s = Server::start(&dir, &["--max-bytes", "512"]);
+    let (err, body, _) = s.query("SELECT repeat('x', 5000) AS v FROM range(10)");
+    assert!(!err, "{body}");
+    assert!(wire_len(&body) <= 512, "{} bytes", wire_len(&body));
+    assert!(body.contains("TRUNCATED"), "512 says what it cut: {body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Not an error: the result is there, and a host's `page` still gets its `sql`.
 #[test]
 fn a_page_past_the_end_says_so() {

@@ -270,6 +270,26 @@ fn a_page_cuts_values_at_its_own_cell_cap() {
 }
 
 #[test]
+fn a_host_lowers_max_bytes_to_512_and_no_further() {
+    // docs/HOST-PROTOCOL.md: `max_bytes` stays at least 512, the floor `--max-bytes` has
+    // (`the_response_cap_is_at_least_512_bytes`). Written as the number the docs give, so that a
+    // change of the floor is caught here and not followed.
+    let mut h = Host::start(&[]);
+    let sql = "SELECT repeat('x', 5000) AS v FROM range(10)";
+    let r = h.query(sql, json!({"max_bytes": 511}));
+    assert_eq!(code(&r), "E_REQUEST", "{r}");
+    assert!(text(&r).contains("must be at least 512"), "{r}");
+    let r = h.query(sql, json!({"max_bytes": 512}));
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(benchy_mcp::result::wire_len(&text(&r)) <= 512, "{r}");
+    let id = r["result_ids"][0].clone();
+    let p = h.call("page", json!({"result_id": id, "caps": {"max_bytes": 511}}));
+    assert_eq!(code(&p), "E_REQUEST", "a page too: {p}");
+    let p = h.call("page", json!({"result_id": id, "caps": {"max_bytes": 512}}));
+    assert_eq!(p["ok"], true, "{p}");
+}
+
+#[test]
 fn page_sql_keeps_every_literal_whole() {
     // #16: a `--` or `/*` inside a string is the string's. Comments were found by a scan that
     // knew `'…'` and `"…"` alone, so `SELECT $$a -- b$$ AS y, 'q' AS z` came back as

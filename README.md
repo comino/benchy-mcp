@@ -687,4 +687,5 @@ and `scripts/ci.sh` fails if one names a test that does not exist.
 
 MIT; see [LICENSE](LICENSE). The eval data: Artur Trindade, *ElectricityLoadDiagrams20112014*, UCI
 Machine Learning Repository (2015), https://doi.org/10.24432/C58C86, CC BY 4.0, cut as
-[`eval/fetch_uci.py`](eval/fetch_uci.py) describes.
+[`eval/fetch_uci.py`](eval/fetch_uci.py) describes; seven of its meters are committed as a test fixture,
+[`tests/fixtures/uci/`](tests/fixtures/uci/README.md), under the same licence.

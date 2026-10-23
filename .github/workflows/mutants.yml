@@ -3,7 +3,7 @@ name: Mutants
 # A test is evidence only if it fails when the thing it guards is removed. cargo-mutants removes
 # things — replaces a function body, flips a comparison — and reports each change the suite did
 # not notice. Every mutant runs the whole suite, so this is weekly and on demand, not per push,
-# and it covers the modules the containment rests on.
+# and it covers the modules the containment rests on, and result.rs, which bounds what comes back.
 #
 # A gate: any mutant the suite misses (exit 2) or that hangs it (exit 3) fails the run. What is
 # mutated, and the few mutants no test can tell apart from the original, each with the reason,

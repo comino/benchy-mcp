@@ -180,9 +180,9 @@ there if manual approval is desired; otherwise a passing tag publishes automatic
 
 The one rule is checked by machine. `.github/workflows/mutants.yml` runs
 [cargo-mutants](https://mutants.rs) weekly, and on demand, over what the containment rests on:
-`guard`, `lockdown`, `sandbox`, `admission` and `loader`. It changes the code one mutant at a
-time — a function body replaced, a comparison flipped, a field left out — and runs the suite
-against each. **It is a gate:** a mutant the suite does not notice, or one that hangs it, fails
+`guard`, `lockdown`, `sandbox`, `admission` and `loader`, and `result`, which bounds what
+comes back (REQ-10). It changes the code one mutant at a time — a function body replaced, a
+comparison flipped, a field left out — and runs the suite against each. **It is a gate:** a mutant the suite does not notice, or one that hangs it, fails
 the run, and the fix is the test that should have caught it.
 
 `.cargo/mutants.toml` says what is mutated, and lists the few mutants no test can tell from the

@@ -1,5 +1,6 @@
 //! REQ-5: the process that runs agent SQL holds data, never credentials — and nothing else the
-//! server was handed.
+//! server was handed. Linux only: the engine's environment, descriptors and memory are read
+//! through /proc.
 #![cfg(target_os = "linux")]
 
 mod common;

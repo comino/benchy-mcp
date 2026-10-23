@@ -65,6 +65,60 @@ pub const MIN_MAX_BYTES: usize = 512;
 pub const RETAIN_ROWS: usize = 2000;
 /// Bytes kept per result, so one result of wide rows cannot hold the whole retention budget.
 pub const RETAIN_BYTES: usize = 1 << 20;
+/// How many results are kept for paging.
+pub const RETAINED_RESULTS: usize = 32;
+
+/// The retention rule, in one place, so the Arrow and legacy readers cannot drift apart on it:
+/// keep rows while there is room, and remember whether more existed. Here beside the limits it
+/// applies, and with [`retain`], so that what REQ-10 says is kept is all in the one file the
+/// mutation tests examine for it.
+pub(crate) struct Keep {
+    pub(crate) rows: Vec<Vec<Cell>>,
+    bytes: usize,
+    pub(crate) more: bool,
+    pub(crate) cut: bool,
+}
+
+impl Keep {
+    pub(crate) fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            bytes: 0,
+            more: false,
+            cut: false,
+        }
+    }
+
+    /// A value, cut to the cell cap if it is longer — remembered, so the result can say so.
+    pub(crate) fn value(&mut self, s: String, max: usize) -> Cell {
+        if s.len() > max {
+            self.cut = true;
+        }
+        Cell::Text(cut(s, max))
+    }
+
+    /// Offer a row. `false` once retention is full — and then more rows existed than were kept.
+    /// Full is [`RETAIN_ROWS`] rows, or [`RETAIN_BYTES`] reached: the row that reaches it is kept,
+    /// so a result can hold up to a row more than 1 MiB
+    /// (`a_result_keeps_rows_until_they_reach_1_mib`).
+    pub(crate) fn offer(&mut self, row: Vec<Cell>) -> bool {
+        if self.rows.len() >= RETAIN_ROWS || self.bytes >= RETAIN_BYTES {
+            self.more = true;
+            return false;
+        }
+        self.bytes += row.iter().map(Cell::byte_len).sum::<usize>();
+        self.rows.push(row);
+        true
+    }
+}
+
+/// Keep `r` for paging, among the last [`RETAINED_RESULTS`]: the oldest goes first.
+pub(crate) fn retain(kept: &mut std::collections::VecDeque<QueryResult>, r: QueryResult) {
+    kept.push_back(r);
+    while kept.len() > RETAINED_RESULTS {
+        kept.pop_front();
+    }
+}
 
 /// A result as the workspace keeps it: up to [`RETAIN_ROWS`] rows, every value already cut to the
 /// cell cap. Paging reads from here, so it never runs the query again.

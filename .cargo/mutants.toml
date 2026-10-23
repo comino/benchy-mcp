@@ -18,6 +18,10 @@ examine_globs = [
     "src/sandbox.rs",
     "src/admission.rs",
     "src/loader.rs",
+    # REQ-10: what a result keeps, and how the rest is cut and said. The retention rule and its
+    # limits are here, not in src/workspace.rs, so that they are examined without the 371
+    # mutants of the rest of that file (#22).
+    "src/result.rs",
 ]
 
 additional_cargo_args = ["--release"]

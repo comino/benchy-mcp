@@ -316,7 +316,7 @@ pub fn run() -> ! {
                         format!(
                         "no result {result_id} here. The last {} results are kept, and a rebuilt \
                          bench keeps none from before it — run the query again.",
-                            crate::workspace::RETAINED_RESULTS
+                            crate::result::RETAINED_RESULTS
                         ),
                     ),
                 },
