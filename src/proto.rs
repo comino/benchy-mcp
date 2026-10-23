@@ -169,7 +169,7 @@ pub fn write_frame<W: Write>(w: &mut W, value: &impl Serialize) -> std::io::Resu
 }
 
 /// The frame [`write_frame`] writes, as bytes: for a writer that writes it elsewhere, on a thread
-/// of its own (`Supervisor::send`). Serialized straight after its length's place, so the body is
+/// of its own (`Supervisor::send`, `supervisor::run_loader`). Serialized straight after its length's place, so the body is
 /// not copied.
 pub fn frame(value: &impl Serialize) -> std::io::Result<Vec<u8>> {
     let mut out = vec![0u8; 4];

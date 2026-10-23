@@ -1326,6 +1326,81 @@ fn a_request_the_engine_does_not_read_is_held_to_the_hard_deadline() {
     assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
 }
 
+#[test]
+#[cfg(target_os = "linux")]
+fn a_job_the_loader_does_not_read_is_held_to_the_load_timeout() {
+    // REQ-8: the load timeout covers handing the loader its job, not only waiting for its
+    // answer. A job larger than the loader's stdin pipe holds (64 KiB on Linux) blocks its
+    // writer until the loader reads it; a loader that never does — wedged before it reads, in
+    // the field — must still fail at the load timeout and be killed. With the job written before
+    // the timeout started, the attach below had no reply after 30 s past a 2 s load timeout.
+    //
+    // The session runs a copy of the binary, and a loader is that binary started again: once
+    // the engine is up, a script that sleeps without reading its stdin takes the copy's place,
+    // so the next loader is wedged from the start, with no race against a loader that reads at
+    // once. The copy is put back before anything else is started.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = unique("host-unread-job");
+    let file = arrows(&dir.join("m.arrows"), &meters(), true);
+    let bin = dir.join("benchy-mcp");
+    std::fs::copy(common::BIN, &bin).unwrap();
+    let kept = dir.join("benchy-mcp.kept");
+    std::fs::hard_link(&bin, &kept).unwrap();
+    let wedged = dir.join("wedged");
+    std::fs::write(&wedged, "#!/bin/sh\nexec sleep 600\n").unwrap();
+    std::fs::set_permissions(&wedged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = Command::new(&bin)
+        .arg("host")
+        .args(common::PLATFORM)
+        .args(["--load-timeout", "2"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut h = Host {
+        stdin: child.stdin.take().unwrap(),
+        stdout: child.stdout.take().unwrap(),
+        child,
+        next: 100,
+    };
+    let hello = h.call("hello", json!({"protocol": [1, 2, 3]}));
+    assert_eq!(hello["protocol"], 3, "{hello}");
+    let r = h.call("query", json!({"sql": "SELECT 40 + 2 AS answer"}));
+    assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
+    std::fs::rename(&wedged, &bin).unwrap();
+
+    // Some 300 KiB of series names, which the job carries to the loader: it is the loader that
+    // checks them against the stream.
+    let series: Vec<String> = (0..20_000).map(|i| format!("series-{i:06}")).collect();
+    let asked = Instant::now();
+    h.send(&json!({"id": 1, "call": "attach", "name": "load", "path": file, "series": series}));
+    let mut stdout = std::mem::replace(&mut h.stdout, spare_stdout());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let reply: std::io::Result<Value> = read_frame(&mut stdout);
+        let _ = tx.send(reply.map(|r| (r, stdout)));
+    });
+    let got = rx.recv_timeout(Duration::from_secs(30));
+    std::fs::rename(&kept, &bin).unwrap();
+    let (reply, stdout) = got
+        .expect("an answer within the load timeout, not a session stuck writing")
+        .expect("a reply");
+    h.stdout = stdout;
+    assert_eq!(reply["id"], 1, "{reply}");
+    assert_eq!(code(&reply), "E_DEADLINE", "{reply}");
+    assert!(
+        asked.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        asked.elapsed()
+    );
+    // Nothing attached, and the session serves on.
+    let r = h.call("query", json!({"sql": "SELECT count(*) FROM load"}));
+    assert_ne!(r["ok"], true, "{r}");
+    let r = h.call("query", json!({"sql": "SELECT 40 + 2 AS answer"}));
+    assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
+}
+
 /// Stand-ins for a Host's pipes, so the real ones can be closed while the Host lives on.
 fn spare_stdin() -> ChildStdin {
     let mut other = Command::new("true").stdin(Stdio::piped()).spawn().unwrap();

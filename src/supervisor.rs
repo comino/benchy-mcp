@@ -23,7 +23,7 @@
 //! nor asks a source twice (docs/HOST-PROTOCOL.md).
 
 use crate::loader::{Done, Job};
-use crate::proto::{read_frame, write_frame, Reply, Request};
+use crate::proto::{read_frame, Reply, Request};
 use std::io::{BufReader, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::DirBuilderExt;
@@ -1840,6 +1840,14 @@ fn run_loader(
             Ok(())
         });
     }
+    // Serialized before the loader starts, so a job that cannot be is refused with nothing to
+    // stop, and the writer below is handed bytes, not the job.
+    let frame = crate::proto::frame(job).map_err(|e| {
+        load_error(
+            "E_INTERNAL",
+            format!("could not hand `{}` to a loader: {e}", job.name()),
+        )
+    })?;
     crate::trace::mark("loader.spawn", &[]);
     let mut child = cmd
         .spawn()
@@ -1854,11 +1862,20 @@ fn run_loader(
     }
     let mut stdin = child.stdin.take().expect("piped");
     let stdout = child.stdout.take().expect("piped");
-    let sent = write_frame(&mut stdin, job);
-    drop(stdin);
+    // Written and read on the worker thread, so the load timeout and the memory watch cover
+    // both. A job larger than the pipe holds (64 KiB on Linux) to a loader that does not read
+    // it, wedged before it does, left an attach without a reply for as long as the loader stayed
+    // so: over 30 s past a 2 s load timeout. The kill below ends the write with EPIPE, or the
+    // read with EOF, so the thread ends with the loader. One thread does both, as one did the
+    // read before: the loader reads its whole job before it answers.
+    // REQ-8 `a_job_the_loader_does_not_read_is_held_to_the_load_timeout`.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let r: std::io::Result<Done> = read_frame(&mut BufReader::new(stdout));
+        // The outer error is the job's write, the inner the answer's read.
+        let written = stdin.write_all(&frame).and_then(|()| stdin.flush());
+        drop(stdin);
+        let r: std::io::Result<std::io::Result<Done>> =
+            written.map(|()| read_frame(&mut BufReader::new(stdout)));
         let _ = tx.send(r);
     });
     let timeout = spec.load_timeout;
@@ -1882,18 +1899,18 @@ fn run_loader(
             got => break got,
         }
     };
-    let out = match (sent, answer) {
+    let out = match answer {
         _ if swollen.is_some() => Err(loader_swollen(
             job.name(),
             swollen.unwrap_or_default(),
             ceiling,
             runs_connectors,
         )),
-        (Err(e), _) => Err(load_error(
+        Ok(Err(e)) => Err(load_error(
             "E_INTERNAL",
             format!("could not hand `{}` to a loader: {e}", job.name()),
         )),
-        (_, Ok(Ok(done))) => {
+        Ok(Ok(Ok(done))) => {
             crate::trace::mark(
                 "loader.done",
                 &[
@@ -1903,11 +1920,11 @@ fn run_loader(
             );
             Ok(done)
         }
-        (_, Ok(Err(e))) => Err(load_error(
+        Ok(Ok(Err(e))) => Err(load_error(
             "E_DATA",
             format!("the loader for `{}` stopped: {e}", job.name()),
         )),
-        (_, Err(_)) => Err(load_error(
+        Err(_) => Err(load_error(
             "E_DEADLINE",
             format!(
                 "loading `{}` did not finish within {}s; raise --load-timeout if the source \
