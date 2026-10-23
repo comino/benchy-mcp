@@ -128,6 +128,17 @@ pub struct Reply {
     /// lost, and never passes this answer on.
     #[serde(default)]
     pub rebuild: Option<String>,
+    /// The statement of its batch a failed `Query` stopped at, counted from 1, where the failure
+    /// names one: for a host's `error.detail` (#26), beside the results of the statements before
+    /// it in `result_ids` and `results`.
+    #[serde(default)]
+    pub statement: Option<usize>,
+    /// Facts about a failure the supervisor itself decided, for a host's `error.detail` (#26):
+    /// why the engine was rebuilt and what went with it. Never on the wire, so an engine cannot
+    /// put anything there: only a number (`statement`) and the result ids it already reports
+    /// cross from it.
+    #[serde(skip)]
+    pub detail: Option<serde_json::Value>,
 }
 
 impl Reply {
@@ -144,6 +155,8 @@ impl Reply {
             results: vec![],
             sql: None,
             rebuild: None,
+            statement: None,
+            detail: None,
         }
     }
     pub fn err(body: impl Into<String>) -> Self {

@@ -164,6 +164,10 @@ pub struct Done {
     /// Why it is not, for the host.
     #[serde(default)]
     pub out_of_step: Option<String>,
+    /// For `E_LIMIT`, which limit (`crate::exec::Fault::limit`). Only the name: its value is the
+    /// job's, which the supervisor set (`Supervisor::store_output`).
+    #[serde(default)]
+    pub limit: Option<String>,
 }
 
 /// Where a finished loader's table is: the bench file in the staging directory its job named — a
@@ -499,6 +503,7 @@ fn into_table(
 ) -> Done {
     let refused = |f: crate::exec::Fault| Done {
         code: Some(f.code.to_string()),
+        limit: f.limit.map(str::to_string),
         ..failed(name, f.detail)
     };
     let host = match opened {
@@ -522,16 +527,16 @@ fn into_table(
     // (`open_host_pipe`); the rows are counted as each batch arrives, and the stream stops at the
     // batch that passes what is left (`a_host_attach_stops_at_the_budget_not_after_reading_it_all`).
     if let Some(bytes) = host.bytes.filter(|b| *b > budget_bytes) {
-        return refused(crate::exec::Fault::host(
-            "E_LIMIT",
+        return refused(crate::exec::Fault::limit(
+            "session_bytes",
             format!(
                 "it is {bytes} bytes, and this session has {budget_bytes} bytes of its budget left"
             ),
         ));
     }
     let over = || {
-        crate::exec::Fault::host(
-            "E_LIMIT",
+        crate::exec::Fault::limit(
+            "session_rows",
             format!(
                 "it holds more than {budget_rows} rows, and this session has {budget_rows} rows \
                  of its budget left"

@@ -150,7 +150,8 @@ The first three are the whole string; the last begins with `unavailable: `.
 | 7 | `threads` in `hello`'s `limits`, reported and lowered (**Threads** below) | `limits.threads`, and the session ends; it is not reported |
 
 Replies only grow: a field a reply gained in a later version (`results` beside a query's text,
-`sql` on a page, `unenforced` beside the limits, `sandbox_posture` and `timeouts` in `hello`) is
+`sql` on a page, `unenforced` beside the limits, `sandbox_posture` and `timeouts` in `hello`,
+`detail` in an error) is
 sent whatever version was agreed, and a host that does not know it ignores it. The one exception is a field of
 `limits`: a host may send `limits` back as it got it, and a field there that its version does not
 take would end its session, so `limits.loader_memory_ceiling` (and
@@ -249,7 +250,8 @@ a load is measured to need (the harness's 10,000,000-row loads peak at 94 to 410
 supervisor reads each loader's resident memory every 50 ms while it runs, and past the ceiling
 kills it, with its connector's whole process group. The attach is `E_LIMIT`, saying it was the
 loader memory ceiling, what was held, and what to do (narrow the source, or ask the operator for
-a larger ceiling); nothing of the table is attached, and a stream from the channel loses its
+a larger ceiling), with `"detail": {"limit": "loader_memory_ceiling", "value": …}`; nothing of
+the table is attached, and a stream from the channel loses its
 place, which closes the channel ([Through a stream channel](#through-a-stream-channel-in-version-5)).
 A host running many sessions lowers it in `hello`, `"limits": {"loader_memory_ceiling":
 300000000}`; it is reported from version 6, and lowering it before 6 is `E_REQUEST`. Off Linux it
@@ -328,10 +330,37 @@ it sent.
 | `E_SQL` | the SQL failed; the message is the one the agent would see |
 | `E_DEADLINE` | a query passed its deadline and was interrupted, or an attach took longer than `--load-timeout`; the bench is intact |
 | `E_NO_RESULT` | no retained result by that id: never produced, dropped with a detach or replace, or from before a rebuild |
-| `E_REBUILT` | the engine was killed and rebuilt while this call ran — past the hard deadline, past the memory ceiling while it ran or as it answered, or because the batch left a dynamic PIVOT's type that could not be dropped; the message names which: its result is lost and the agent's own tables are gone, every attached table is back |
+| `E_REBUILT` | the engine was killed and rebuilt while this call ran — past the hard deadline, past the memory ceiling while it ran or as it answered, or because the batch left a dynamic PIVOT's type that could not be dropped; the message names which, and `detail.reason` ([Detail](#detail)): its result is lost and the agent's own tables are gone, every attached table is back |
 | `E_UNAVAILABLE` | the bench could not be rebuilt. After two failures in a row it is not tried again until a detach changes what a rebuild would attach |
 | `E_INTERNAL` | benchy failed on its own side; the operator's log says why, and nothing changed |
 | `E_CHANNEL` | a table from the stream channel after the channel was closed: it lost its place in an earlier stream, or an earlier request that named it was refused whole, and that answer said so with `"channel": "closed"` ([Through a stream channel](#through-a-stream-channel-in-version-5)). Nothing changed; everything else still works |
+
+### Detail
+
+`message` is for the model: prose, whose wording may change between releases. What a host acts
+on is in `detail`, an object beside it, wherever there is a fact to give; where there is none,
+`detail` is absent. A host reads `detail`, never the message:
+
+```json
+{"id": 7, "ok": false, "error": {"code": "E_REBUILT", "message": "the engine passed its memory ceiling, ...",
+ "detail": {"reason": "memory_ceiling", "lost": ["results", "agent_tables"],
+            "held": 1612000000, "ceiling": 1500000000}}}
+```
+
+| Code | `detail` |
+|---|---|
+| `E_VERSION` | `protocols`: every version this benchy speaks, as `compat.json`'s `host_protocols` |
+| `E_LIMIT` | `limit`: which, by its name in `hello`'s `limits` — `attach_rows`, `attach_bytes`, `attachments`, `session_rows`, `session_bytes` or `loader_memory_ceiling`. `value`: the bound the table was held to — the limit itself, or for `session_rows` and `session_bytes` what the session's budget had left after the tables before it |
+| `E_SQL` | where the batch stopped at a statement: `statement`, counted from 1; `result_ids` and `results`, the statements' before it, in a query reply's shape ([query](#query)), empty where none ran. Absent for a batch that did not parse, or one refused whole |
+| `E_DEADLINE` | `reason`: `deadline`, a query past its deadline, or `load_timeout`, an attach past `--load-timeout`. `lost`: `[]`, nothing. A query's has `statement`, `result_ids` and `results` too, as `E_SQL`'s |
+| `E_REBUILT` | `reason`: `hard_deadline`, `memory_ceiling`, `engine_died` (the engine stopped answering, as when something killed it) or `pivot_type` (a batch left a dynamic PIVOT's type that could not be dropped). `lost`: what the rebuild did not bring back, `["results", "agent_tables"]`: every retained result id, and the agent's own tables. For `memory_ceiling`, `held` and `ceiling` in bytes |
+| `E_UNAVAILABLE` | where this call lost the engine and the rebuild failed: `reason` and `lost`, as `E_REBUILT`'s. Absent where the bench was already unavailable |
+| `E_REQUEST`, `E_NAME`, `E_DATA`, `E_NO_RESULT`, `E_INTERNAL`, `E_CHANNEL` | none: the host sent what was refused, and knows it. A closed channel is `"channel": "closed"` beside the code, as before |
+
+A detail names nothing a message may not: no path, no session, no database; a result id is one
+the agent was given. It came without a protocol version: replies only grow, and a host that does
+not know `detail` ignores it ([Frames](#frames)). The model's text is unchanged by it: an MCP
+client has no `detail`, so the message still says everything, the earlier results included.
 
 ## The calls
 
@@ -650,7 +679,9 @@ at least 16, below which a result could not say it was cut, and `deadline_secs` 
 A batch stops at the first statement that fails, and the call is refused with `E_SQL` (or
 `E_DEADLINE`). The statements before it have run and keep their effects, as for the agent: the
 error's message comes first, then their results, with their result ids in the text, all inside
-`max_bytes`.
+`max_bytes`. The error's `detail` gives the statement it stopped at, and the earlier results'
+`result_ids` and `results` as this reply would, so a host pages or logs them without reading the
+text ([Detail](#detail)).
 
 ### page
 

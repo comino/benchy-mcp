@@ -155,6 +155,10 @@ pub struct Fault {
     pub code: &'static str,
     /// Operator-facing. May contain paths, hosts and stack traces. Never shown to the model.
     pub detail: String,
+    /// For a host's attach past a limit, which one, by the name `hello` reports it under
+    /// (`attach_rows`, `attach_bytes`, `session_rows`, `session_bytes`): the loader says which,
+    /// and the supervisor gives the value from the job it set (#26).
+    pub limit: Option<&'static str>,
 }
 
 impl Fault {
@@ -162,6 +166,15 @@ impl Fault {
         Self {
             code,
             detail: detail.into(),
+            limit: None,
+        }
+    }
+
+    /// A host's attach refused as `E_LIMIT`, past `limit`.
+    pub fn limit(limit: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            limit: Some(limit),
+            ..Self::host("E_LIMIT", detail)
         }
     }
 }
@@ -654,6 +667,7 @@ fn read_control(text: &str) -> Control {
                     c.error = Some(Fault {
                         code: known_code(code),
                         detail,
+                        limit: None,
                     });
                 } else {
                     c.log.push_str(line);
@@ -1484,15 +1498,22 @@ pub fn open_host_pipe(
 /// A pipe's stream ran past what it may be: an attachment's bytes, or what the session's budget
 /// has left, whichever is less — the refusals a file's size gets.
 fn pipe_over(max_bytes: u64, budget_bytes: u64) -> Fault {
-    let why = if budget_bytes < max_bytes {
-        format!(
-            "it is more than {budget_bytes} bytes, and this session has {budget_bytes} bytes of \
-             its budget left"
+    if budget_bytes < max_bytes {
+        Fault::limit(
+            "session_bytes",
+            format!(
+                "it is more than {budget_bytes} bytes, and this session has {budget_bytes} bytes \
+                 of its budget left"
+            ),
         )
     } else {
-        format!("it is more than {max_bytes} bytes, and an attachment may be at most {max_bytes}")
-    };
-    Fault::host("E_LIMIT", why)
+        Fault::limit(
+            "attach_bytes",
+            format!(
+                "it is more than {max_bytes} bytes, and an attachment may be at most {max_bytes}"
+            ),
+        )
+    }
 }
 
 /// A host's stream that does not end with its marker, file or pipe: the same refusal.
@@ -1517,8 +1538,8 @@ pub fn open_host_stream(path: &Path, max_bytes: u64) -> Result<HostStream, Fault
     }
     let bytes = md.len();
     if bytes > max_bytes {
-        return Err(Fault::host(
-            "E_LIMIT",
+        return Err(Fault::limit(
+            "attach_bytes",
             format!("it is {bytes} bytes, and an attachment may be at most {max_bytes}"),
         ));
     }
@@ -1612,9 +1633,15 @@ impl HostStream {
     pub fn read(self, max_rows: u64, sink: &mut Sink) -> Result<(Stream, u64), Fault> {
         use std::io::{Seek, SeekFrom};
         let max_bytes = self.max_bytes;
-        let refused = |e: Fault| match e.code {
-            "E_HOST_OVERSIZE" | "E_TOO_LARGE" => Fault::host(
-                "E_LIMIT",
+        // Which of the two it passed is told by the rows read: the read stops at the first batch
+        // past `max_rows`, and otherwise at the bytes it decodes to.
+        let refused = |e: Fault, rows: u64| match e.code {
+            "E_HOST_OVERSIZE" | "E_TOO_LARGE" => Fault::limit(
+                if rows > max_rows {
+                    "attach_rows"
+                } else {
+                    "attach_bytes"
+                },
                 format!(
                     "it holds more than an attachment may: {max_rows} rows, or {max_bytes} bytes \
                      once decoded. {}",
@@ -1628,17 +1655,18 @@ impl HostStream {
                 file.seek(SeekFrom::Start(0)).map_err(|e| {
                     Fault::host("E_DATA", format!("it could not be read: {}", e.kind()))
                 })?;
+                let mut rows = 0;
                 let stream = read_stream(
                     &mut file,
                     Some(&self.declared),
                     max_rows,
                     max_bytes,
-                    &mut 0,
+                    &mut rows,
                     sink,
                     nothing_after_the_marker,
                     "",
                 )
-                .map_err(refused)?;
+                .map_err(|e| refused(e, rows))?;
                 Ok((stream, self.bytes.unwrap_or(0)))
             }
             HostInput::Pipe {
@@ -1646,12 +1674,13 @@ impl HostStream {
                 opened,
                 budget_bytes,
             } => {
+                let mut rows = 0;
                 let read = read_opened(
                     &mut capped,
                     *opened,
                     Some(&self.declared),
                     max_rows,
-                    &mut 0,
+                    &mut rows,
                     sink,
                     nothing_after_the_marker,
                 );
@@ -1659,7 +1688,7 @@ impl HostStream {
                 if capped.over {
                     return Err(pipe_over(max_bytes, budget_bytes));
                 }
-                let stream = read.map_err(refused)?;
+                let stream = read.map_err(|e| refused(e, rows))?;
                 // A pipe closed at a message boundary reads as a shorter stream: only the marker
                 // tells the two apart, as for a file.
                 if !capped.ended_cleanly() {

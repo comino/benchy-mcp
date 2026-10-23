@@ -1,4 +1,4 @@
-//! `benchy-mcp host`: the host protocol, `benchy-host/1` to `benchy-host/6`, on stdin and
+//! `benchy-mcp host`: the host protocol, `benchy-host/1` to `benchy-host/7`, on stdin and
 //! stdout (docs/HOST-PROTOCOL.md).
 //!
 //! A host runs one of these per session, puts data on the bench with `attach`, and relays the
@@ -134,6 +134,33 @@ fn send(out: &Out, reply: &Value) -> bool {
 
 fn refused(id: Value, code: &str, message: impl Into<String>) -> Value {
     json!({"id": id, "ok": false, "error": {"code": code, "message": message.into()}})
+}
+
+/// A refusal with `detail` beside its message (#26): the message is for the model, the detail
+/// for the host, which then parses no prose for a fact. Left out where there is none.
+fn with_detail(mut reply: Value, detail: Option<Value>) -> Value {
+    if let Some(d) = detail {
+        reply["error"]["detail"] = d;
+    }
+    reply
+}
+
+/// What a failed query's reply says beside its message: why the engine went, from the
+/// supervisor; past the deadline, why too, and that nothing was lost; and, where the batch
+/// stopped at a statement, which, with the results of the statements before it as a query reply
+/// gives them.
+fn query_detail(r: &crate::proto::Reply) -> Option<Value> {
+    let mut detail = r.detail.clone();
+    if detail.is_none() && r.code.as_deref() == Some("E_DEADLINE") {
+        detail = Some(json!({"reason": "deadline", "lost": []}));
+    }
+    if let Some(n) = r.statement {
+        let d = detail.get_or_insert_with(|| json!({}));
+        d["statement"] = n.into();
+        d["result_ids"] = json!(r.result_ids);
+        d["results"] = json!(r.results);
+    }
+    detail
 }
 
 fn caps_json(c: &Caps) -> Value {
@@ -684,10 +711,13 @@ fn read_requests(
             else {
                 send(
                     out,
-                    &refused(
-                        id.into(),
-                        "E_VERSION",
-                        format!("this benchy speaks protocols {PROTOCOLS:?}"),
+                    &with_detail(
+                        refused(
+                            id.into(),
+                            "E_VERSION",
+                            format!("this benchy speaks protocols {PROTOCOLS:?}"),
+                        ),
+                        Some(json!({ "protocols": PROTOCOLS })),
                     ),
                 );
                 break;
@@ -1325,10 +1355,14 @@ fn run(
             v["ok"] = true.into();
             v
         } else {
-            refused(
-                id.into(),
-                r.code.as_deref().unwrap_or(default),
-                scrub(&r.body, &session.dir, None),
+            let detail = query_detail(&r);
+            with_detail(
+                refused(
+                    id.into(),
+                    r.code.as_deref().unwrap_or(default),
+                    scrub(&r.body, &session.dir, None),
+                ),
+                detail,
             )
         }
     };
@@ -1359,6 +1393,7 @@ fn run(
                         code: "E_NAME",
                         message: e,
                         closed_channel: None,
+                        detail: None,
                     };
                     // Its stream is in the channel all the same: read past, so the next table
                     // takes the next one.
@@ -1375,6 +1410,7 @@ fn run(
                         code: "E_DATA",
                         message: e,
                         closed_channel: None,
+                        detail: None,
                     })));
                     continue;
                 }
@@ -1394,6 +1430,7 @@ fn run(
                         code,
                         message,
                         closed_channel,
+                        detail,
                     }) => {
                         let mut message = scrub(&message, &session.dir, path.as_deref());
                         let mut error = json!({"code": code});
@@ -1404,6 +1441,9 @@ fn run(
                             error["channel"] = "closed".into();
                         }
                         error["message"] = message.into();
+                        if let Some(d) = detail {
+                            error["detail"] = d;
+                        }
                         json!({"name": name, "ok": false, "error": error})
                     }
                 }
