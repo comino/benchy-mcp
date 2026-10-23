@@ -6,6 +6,15 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **A helper macro that calls a function nothing defines stops startup** (#62). DuckDB 1.5.5
+  checks only part of a macro's body when it is made: a call in a SELECT with a FROM, a table
+  macro's included, or in a lambda was made with no such function anywhere, and once the agent
+  made a macro of that name, the operator's helper called the agent's code. A helper macro now
+  calls only DuckDB's functions and other helpers, by name alone (not `s.f(x)` or `x.f()`, which
+  DuckDB binds to a schema the agent may make), read from the function listing the helpers job
+  already makes; the refusal names the helper and what it calls. Helper views were not affected:
+  DuckDB binds one when it is made, in the helpers job, and a waiting one when its table arrives.
+
 ## [0.3.1] — 2026-10-21
 
 Two TLS advisories fixed in the HTTP loader's dependencies, and the weekly cargo-mutants gate green
