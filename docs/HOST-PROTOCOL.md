@@ -701,6 +701,11 @@ yet, and fixed for the session:
   reading a file, the network or an extension, keeping an ENUM (the agent may keep none, for the
   memory DuckDB does not count), or not a view or a macro — stops startup, and the reason goes to
   stderr.
+- A helper's comment is cut at 200 bytes in `describe`, and its whole line at 320 (the README's
+  "SQL helpers"). The session starts all the same, and stderr names each helper cut and by how
+  many bytes; a waiting view's line, whose columns come with its table, is told when the attach
+  makes it. No reply carries this: it follows from the config alone, so a host can check its
+  helpers against the two caps where it writes them.
 - A helper view that reads a table not attached yet **waits** for it. `describe`
   lists it with what it waits for, a query naming it says so (`E_SQL`), and the attach of that
   table makes it; the operator's log says what still waits.

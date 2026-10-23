@@ -1189,6 +1189,15 @@ that table is attached again.
   splits it, and each statement checked for kind and name before anything runs.
 - `helper_sql_splits_where_duckdb_would` — quotes, comments and dollar quotes hold their `;`,
   and the `--` lines directly above a statement are its comment.
+- `a_cut_helper_comment_or_line_is_told_to_the_operator` — a comment `describe` cuts at 200
+  bytes, or a line it cuts at 320, is named on stderr with the bytes cut, by `benchy-mcp <dir>`
+  and `benchy-mcp host` alike, and the session starts; a helper under both caps is not named.
+- `a_cut_is_told_from_the_first_byte_past_a_cap` — a comment of 200 bytes and a line of 320 are
+  whole and not named; one byte more is, with the bytes `describe` keeps, a character across the
+  cap kept whole or not at all.
+- `a_waiting_view_whose_line_is_cut_once_made_is_told_to_the_operator` — a waiting view whose
+  line passes 320 bytes only once its table's columns are in it is named on stderr when the
+  attach makes it, once.
 
 A helper costs nothing to a session that has none: no job runs and no catalog is attached.
 Measured in docs/history/PERFORMANCE-rounds.md, "Helpers".

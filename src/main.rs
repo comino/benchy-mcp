@@ -440,7 +440,7 @@ fn main() -> ExitCode {
     // table no source provides is a mistake too. One that reads a table that failed to load waits
     // for it, as the table is listed as unavailable.
     if !helpers.is_empty() {
-        supervisor.set_helpers(helpers);
+        supervisor.set_helpers(helpers.clone());
         let built = match trace::span("helpers", || supervisor.build_helpers()) {
             Ok(b) => b,
             Err(e) => return fail(&format!("the helpers could not be made: {e}")),
@@ -467,6 +467,10 @@ fn main() -> ExitCode {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+        // #60: what `describe` cuts of a comment the operator wrote, said, and startup goes on.
+        for cut in benchy_mcp::helpers::cuts(&helpers, &built.shown) {
+            eprintln!("benchy: {cut}");
+        }
     }
     eprintln!(
         "benchy: sealed in a separate engine process — SQL cannot reach the filesystem or the \
@@ -915,7 +919,7 @@ fn serve_host(
     // REQ-18: the helpers, made before the host's first call, against no table yet. One that
     // cannot be made stops startup; one that reads a table waits for the host to attach it.
     if !helpers.is_empty() {
-        supervisor.set_helpers(helpers);
+        supervisor.set_helpers(helpers.clone());
         let built = match trace::span("helpers", || supervisor.build_helpers()) {
             Ok(b) => b,
             Err(e) => return fail(&format!("the helpers could not be made: {e}")),
@@ -925,6 +929,11 @@ fn serve_host(
         }
         for (name, table) in built.waiting() {
             eprintln!("benchy: helper `{name}` waits for table `{table}`");
+        }
+        // #60: on stderr, as every other word on the helpers is in this mode, and in no reply:
+        // the cut follows from the config alone, so a host can test for it where it writes them.
+        for cut in benchy_mcp::helpers::cuts(&helpers, &built.shown) {
+            eprintln!("benchy: {cut}");
         }
     }
     eprintln!(

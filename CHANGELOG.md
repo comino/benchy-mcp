@@ -21,6 +21,15 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   DuckDB binds to a schema the agent may make), read from the function listing the helpers job
   already makes; the refusal names the helper and what it calls. Helper views were not affected:
   DuckDB binds one when it is made, in the helpers job, and a waiting one when its table arrives.
+- **A helper comment `describe` cuts is told to the operator** (#60). `describe` cuts a helper's
+  comment at 200 bytes and its whole line (signature, kind and comment) at 320, and marked the cut
+  only for the agent, which never sees what was cut. Startup now says on stderr, beside
+  `benchy: N helper(s): …`, which helper is cut and by how many bytes, in `benchy-mcp <dir>` and
+  `benchy-mcp host` alike, and a waiting view whose line passes 320 once its columns are known is
+  told when the attach makes it (`a_cut_helper_comment_or_line_is_told_to_the_operator`). Told,
+  not refused: a long comment reaches nothing it should not, and a deployment that started
+  before still starts. No reply carries it. The README's "SQL helpers" now gives both caps; a
+  signature of up to 82 bytes keeps a whole comment.
 
 ## [0.3.1] — 2026-10-21
 

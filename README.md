@@ -257,7 +257,12 @@ alike, and are fixed for the session; no tool or protocol call adds one:
 file = "helpers.sql"     # CREATE VIEW and CREATE MACRO statements; or `sql = """…"""` inline
 ```
 
-`describe` lists each with its signature and the `--` comment above it. The agent cannot drop,
+`describe` lists each with its signature and the `--` comment above it, on one line. **The
+comment is cut at 200 bytes, and the whole line (signature, kind and comment) at 320**: a
+signature of up to 82 bytes keeps a whole comment, and past that a view of many columns or a
+macro of many parameters gives up the end of its comment. `describe` marks a cut for the agent
+(`… [+51 bytes]`), and startup goes on with a line on stderr naming the helper and the bytes cut
+(``benchy: helper `long_view`'s comment is 251 bytes; …``). The agent cannot drop,
 change or shadow one, nor give anything of its own the name of a table a helper reads, and a
 helper named like a built-in or a word DuckDB's parser reads itself, or one that reads a file
 or names a table in a string (`query_table('readings')`), stops startup. **A helper macro reads

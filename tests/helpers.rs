@@ -931,6 +931,74 @@ fn a_lateral_macro_call_equals_the_per_id_call() {
     );
 }
 
+/// #60: `describe` cuts a helper's comment at 200 bytes and its whole line at 320, and marks the
+/// cut for the agent; the operator who wrote the comment is told at startup, by each helper's
+/// name and the bytes cut, in both modes. A long comment stops nothing: the session starts.
+#[test]
+fn a_cut_helper_comment_or_line_is_told_to_the_operator() {
+    // The issue's: a comment of 251 bytes ("long_view: " and 240 x), cut to 200.
+    let long = format!("long_view: {}", "x".repeat(240));
+    // A short comment, and a signature long enough that the line passes 320 bytes on its own.
+    let params: Vec<String> = (1..=30).map(|i| format!("argument_{i:02}")).collect();
+    let signature = format!("wide({})", params.join(", "));
+    let wide_line = format!("  {signature} — macro: adds the first and last");
+    assert!(wide_line.len() > 320, "{}", wide_line.len());
+    let sql = format!(
+        "-- {long}\nCREATE VIEW long_view AS SELECT 1 AS a;\n\
+         -- short_macro: ok\nCREATE MACRO short_macro(x) AS x + 1;\n\
+         -- adds the first and last\nCREATE MACRO wide({}) AS argument_01 + argument_30;\n",
+        params.join(", ")
+    );
+    let told = |log: &str| {
+        assert!(
+            log.contains(
+                "helper `long_view`'s comment is 251 bytes; `describe` shows the first 200 and \
+                 marks the other 51 cut"
+            ),
+            "{log}"
+        );
+        assert!(
+            log.contains(&format!(
+                "helper `wide`'s line in `describe`, its signature, kind and comment, is {} \
+                 bytes; `describe` shows the first 320 and marks the other {} cut",
+                wide_line.len(),
+                wide_line.len() - 320
+            )),
+            "{log}"
+        );
+        // Under both caps: nothing said. And the comment cut to 200 leaves long_view's line
+        // under 320, so its line is not reported as well.
+        assert!(!log.contains("`short_macro`"), "{log}");
+        assert!(!log.contains("helper `long_view`'s line"), "{log}");
+    };
+
+    let (toml, dir) = config(&sql);
+    let log = dir.join("stderr.log");
+    let mut s = Server::launch_logging(
+        &[DATA, "--config", toml.to_str().unwrap()],
+        &[],
+        std::fs::File::create(&log).unwrap(),
+    );
+    let d = describe(&mut s);
+    assert!(d.contains("… [+51 bytes]"), "{d}");
+    assert!(
+        d.contains("short_macro(x) — macro: short_macro: ok\n"),
+        "{d}"
+    );
+    drop(s);
+    told(&std::fs::read_to_string(&log).unwrap());
+
+    // `benchy-mcp host` makes the helpers before `hello`, and says so on stderr the same way.
+    let out = Command::new(BIN)
+        .args(["host", "--config", toml.to_str().unwrap()])
+        .args(PLATFORM)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    told(&String::from_utf8_lossy(&out.stderr));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The data rows of a rendered result, each as its cells joined by a space.
 fn rows(body: &str) -> Vec<String> {
     body.lines()
