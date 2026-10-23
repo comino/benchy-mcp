@@ -525,11 +525,16 @@ fn fault(
                 hint: Some(hint),
             };
         }
+        let columns = |tables: &[&str]| ws.columns_of(tables);
+        let catalogue = crate::hint::Catalogue {
+            names: &names,
+            columns: Some(&columns),
+        };
         WorkError::Sql {
             index: index as usize + 1,
             hint: ws
                 .waiting_helper(&raw)
-                .or_else(|| crate::hint::for_sql_error(&raw, &crate::hint::Catalogue(&names), &cx)),
+                .or_else(|| crate::hint::for_sql_error(&raw, &catalogue, &cx)),
             message: crate::hint::scrub(&raw),
         }
     }
@@ -568,6 +573,31 @@ unsafe fn raw_exec(con: ffi::duckdb_connection, sql: &str) -> Result<(), String>
         })
     };
     ffi::duckdb_destroy_result(&mut r);
+    out
+}
+
+/// The names of the columns `sql` would return, from preparing it on `con` without running it;
+/// `None` if it does not prepare.
+unsafe fn bound_columns(con: ffi::duckdb_connection, sql: &str) -> Option<Vec<String>> {
+    let c = CString::new(sql).ok()?;
+    let mut prep: ffi::duckdb_prepared_statement = std::ptr::null_mut();
+    let prepared =
+        ffi::duckdb_prepare(con, c.as_ptr(), &mut prep) == ffi::duckdb_state_DuckDBSuccess;
+    let out = prepared.then(|| {
+        (0..ffi::duckdb_prepared_statement_column_count(prep))
+            .filter_map(|i| {
+                let p = ffi::duckdb_prepared_statement_column_name(prep, i);
+                if p.is_null() {
+                    return None;
+                }
+                let name = CStr::from_ptr(p).to_string_lossy().into_owned();
+                ffi::duckdb_free(p as *mut std::ffi::c_void);
+                Some(name)
+            })
+            .collect()
+    });
+    // A statement that did not prepare is destroyed too: it holds its error.
+    ffi::duckdb_destroy_prepare(&mut prep);
     out
 }
 
@@ -1412,6 +1442,37 @@ impl Workspace {
             // what we put on the bench ourselves.
             _ => self.loaded.iter().map(|t| t.name.clone()).collect(),
         }
+    }
+
+    /// The columns of each of `tables` the agent can name — loaded, its own, a helper view —
+    /// in their order, for REQ-11's hints (#27). Asked only by the hints that list columns, and
+    /// no table is scanned. A loaded table's are the ones kept from its attach.
+    ///
+    /// The rest are what `SELECT * FROM <name>` would give, prepared and never run on the
+    /// agent's connection, which is the one whose search path resolves a helper view's tables.
+    /// Measured on the bundled bench with its helpers, DuckDB 1.5.5, per failing query that
+    /// names a helper view, over the whole session: 5.1 M instructions before #27, 6.4 M so.
+    /// `duckdb_columns()` on the host-facing connection took it to 12.3 M, as it builds a row
+    /// for every column of every catalog, DuckDB's own 527 included, before any filter applies;
+    /// `pragma_table_info` there cannot bind a helper view, whose tables are named unqualified.
+    /// A loaded table's columns cost nothing measurable: 3.7–3.9 M before and after.
+    fn columns_of(&self, tables: &[&str]) -> Vec<(String, Vec<String>)> {
+        tables
+            .iter()
+            .filter_map(|t| {
+                if let Some(l) = self.loaded.iter().find(|l| l.name.eq_ignore_ascii_case(t)) {
+                    return Some((
+                        l.name.clone(),
+                        l.columns.iter().map(|(c, _)| c.clone()).collect(),
+                    ));
+                }
+                let sql = format!("SELECT * FROM \"{}\"", t.replace('"', "\"\""));
+                // SAFETY: the agent connection is this workspace's, and no query runs on it now:
+                // the statement that failed has returned. Prepared only, so nothing executes.
+                let cols = unsafe { bound_columns(self.agent, &sql) }?;
+                Some((t.to_string(), cols))
+            })
+            .collect()
     }
 
     /// REQ-9: prove the loaded data really is read-only, rather than trusting the attach.

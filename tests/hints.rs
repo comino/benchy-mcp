@@ -365,3 +365,237 @@ fn a_dynamic_pivot_answers_once() {
         .expect("runs");
     assert!(out.iter().all(|r| r.note.is_none()), "{out:?}");
 }
+
+/// The hint of an error, after the dash that sets it off from DuckDB's message.
+fn hint_of(e: &str) -> &str {
+    e.split_once(" — ").map_or("", |(_, h)| h)
+}
+
+/// Whether `text` sends the agent to the `describe` tool, which a host's agent may not have
+/// (#27). DuckDB's own `DESCRIBE t` is SQL, which every agent can run through its query tool.
+fn names_the_describe_tool(text: &str) -> bool {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|w| w == "describe")
+}
+
+#[test]
+fn an_unknown_column_names_the_columns_of_the_tables_it_reads() {
+    // #27. DuckDB 1.5.5: `Binder Error: Referenced column "temp" not found in FROM clause!`. The
+    // hint named the bench's tables and sent the agent to `describe` for their columns: a step,
+    // about 4 KB on a host's bench, to learn the value column is `power_kw`. It now names the
+    // columns of the tables the statement reads, and those alone.
+    let mut ws = bench_with_tables();
+    ws.work(
+        "CREATE VIEW mine AS SELECT meter, room AS place FROM rooms",
+        &Caps::default(),
+    )
+    .expect("a view of the agent's");
+    for (sql, want, not) in [
+        (
+            "SELECT temp FROM meters",
+            &["meters(observed_at, meter, power_kw)"][..],
+            "rooms",
+        ),
+        (
+            "SELECT * FROM meters WHERE kw > 1",
+            &["meters(observed_at, meter, power_kw)"],
+            "rooms",
+        ),
+        (
+            "SELECT temp FROM meters JOIN rooms USING (meter)",
+            &["meters(observed_at, meter, power_kw)", "rooms(meter, room)"],
+            "mine",
+        ),
+        ("SELECT room FROM mine", &["mine(meter, place)"], "meters"),
+    ] {
+        let e = err_for(&mut ws, sql);
+        let h = hint_of(&e);
+        for w in want {
+            assert!(h.contains(w), "{sql}\n  wanted {w:?} in: {e}");
+        }
+        assert!(
+            !h.contains(not),
+            "{sql}: names a table it does not read: {e}"
+        );
+        assert!(!names_the_describe_tool(h), "{sql}: {e}");
+    }
+}
+
+#[test]
+fn a_qualified_unknown_column_resolves_its_alias() {
+    // #27. DuckDB 1.5.5 words a qualified reference otherwise, `Binder Error: Table "m" does not
+    // have a column named "temp"`, and one to a CTE or subquery `Binder Error: Values list "c"
+    // does not have a column named "temp"`, which it says of a view too; neither had a hint at
+    // all. The alias is said as the table it stands for, that table first.
+    let mut ws = bench_with_tables();
+    ws.work(
+        "CREATE VIEW mine AS SELECT meter, room AS place FROM rooms",
+        &Caps::default(),
+    )
+    .expect("a view of the agent's");
+    for (sql, want) in [
+        (
+            "SELECT v.room FROM mine v",
+            "`v` is `mine`. The tables the statement reads: mine(meter, place)",
+        ),
+        (
+            "SELECT m.temp FROM meters m",
+            "`m` is `meters`. The tables the statement reads: meters(observed_at, meter, power_kw)",
+        ),
+        (
+            "SELECT m.temp FROM meters AS m",
+            "`m` is `meters`. The tables the statement reads: meters(observed_at, meter, power_kw)",
+        ),
+        (
+            "SELECT meters.temp FROM meters",
+            "That column is not in `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw)",
+        ),
+        (
+            "SELECT r.temp FROM meters m JOIN rooms r USING (meter)",
+            "`r` is `rooms`. The tables the statement reads: rooms(meter, room); \
+             meters(observed_at, meter, power_kw)",
+        ),
+        (
+            "SELECT \"R\".temp FROM meters m JOIN rooms \"R\" USING (meter)",
+            "`R` is `rooms`.",
+        ),
+        (
+            "WITH c AS (SELECT * FROM meters) SELECT c.temp FROM c",
+            "`c` is a subquery or CTE of the statement. The tables the statement reads: \
+             meters(observed_at, meter, power_kw)",
+        ),
+    ] {
+        let e = err_for(&mut ws, sql);
+        assert!(
+            hint_of(&e).contains(want),
+            "{sql}\n  wanted {want:?} in: {e}"
+        );
+        assert!(!names_the_describe_tool(hint_of(&e)), "{sql}: {e}");
+    }
+}
+
+#[test]
+fn an_unknown_table_lists_the_columns_of_what_is_here() {
+    // #27: the tables it could have meant, with their columns, so the next statement can be
+    // right; and no `describe`, which a host's agent may not have.
+    let mut ws = bench_with_tables();
+    let e = err_for(&mut ws, "SELECT temp FROM sales");
+    let h = hint_of(&e);
+    assert!(
+        h.contains("What is here: meters(observed_at, meter, power_kw); rooms(meter, room)."),
+        "{e}"
+    );
+    assert!(!names_the_describe_tool(h), "{e}");
+}
+
+#[test]
+fn the_columns_a_hint_lists_are_bounded() {
+    // #27. The hint is said with every error, inside the reply's byte cap: a table of 2,000
+    // columns, or a bench of 30 tables, is cut by the hint itself, saying what it left out and
+    // where the rest is, rather than by the cap, which would cut the sentence off.
+    let mut bench = common::bench();
+    let cols: Vec<String> = (0..2000)
+        .map(|i| format!("a_long_column_name_{i:04}"))
+        .collect();
+    let mut sql = format!(
+        "CREATE TABLE wide AS SELECT {}",
+        cols.iter()
+            .map(|c| format!("1 AS {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for t in 0..30 {
+        sql.push_str(&format!(
+            "; CREATE TABLE t{t:02} AS SELECT 1 AS id, 2 AS value_of_t{t:02}"
+        ));
+    }
+    bench.connection().execute_batch(&sql).unwrap();
+    let int = |c: &str| (c.to_string(), "INTEGER".to_string());
+    let mut tables = vec![("wide".to_string(), cols.iter().map(|c| int(c)).collect())];
+    for t in 0..30 {
+        tables.push((
+            format!("t{t:02}"),
+            vec![int("id"), int(&format!("value_of_t{t:02}"))],
+        ));
+    }
+    for (name, columns) in tables {
+        bench
+            .record(benchy_mcp::LoadedTable {
+                name,
+                rows: 1,
+                columns,
+                source: "test".into(),
+                profile: None,
+                seen: None,
+            })
+            .unwrap();
+    }
+    let mut ws = bench.seal("1GB").unwrap();
+
+    let e = err_for(&mut ws, "SELECT temp FROM wide");
+    let h = hint_of(&e);
+    assert!(
+        h.starts_with(
+            "That column is not in the tables the statement reads: \
+             wide(a_long_column_name_0000, "
+        ),
+        "{e}"
+    );
+    assert!(h.contains(" columns])"), "the cut is marked: {e}");
+    assert!(
+        h.contains("`DESCRIBE wide`"),
+        "and says where the rest are: {e}"
+    );
+    assert!(h.len() < 1300, "{} bytes: {e}", h.len());
+    // and where it sends the agent is a statement that runs here
+    let out = ws
+        .work("DESCRIBE wide", &Caps::default())
+        .expect("DESCRIBE runs");
+    assert!(!out[0].rows.is_empty());
+
+    // Many tables: as many as the bound holds, with their columns, then how many more.
+    let e = err_for(&mut ws, "SELECT * FROM nowhere");
+    let h = hint_of(&e);
+    assert!(
+        h.contains("t00(id, value_of_t00); t01(id, value_of_t01)"),
+        "{e}"
+    );
+    assert!(h.contains(" more)"), "says there are more: {e}");
+    assert!(h.len() < 1300, "{} bytes: {e}", h.len());
+    assert!(!names_the_describe_tool(h), "{e}");
+}
+
+#[test]
+fn an_unknown_column_of_a_helper_view_lists_its_columns() {
+    // #27, REQ-18: a helper view is a table to the agent, and its columns are the catalog's
+    // like any other's.
+    let dir = common::unique("hint-helpers");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("helpers.sql"),
+        include_str!("../examples/helpers.sql"),
+    )
+    .unwrap();
+    let toml = dir.join("benchy.toml");
+    std::fs::write(&toml, "[helpers]\nfile = \"helpers.sql\"\n").unwrap();
+    let data = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/data"));
+    let mut s = common::Server::start(data, &["--config", toml.to_str().unwrap()]);
+    for (sql, want) in [
+        (
+            "SELECT temp FROM hourly",
+            "hourly(meter, hour, mean_kw, peak_kw, readings)",
+        ),
+        (
+            "SELECT h.temp FROM reading_spans h",
+            "`h` is `reading_spans`. The tables the statement reads: \
+             reading_spans(meter, observed_at, power_kw, held)",
+        ),
+    ] {
+        let (err, body, _) = s.query(sql);
+        assert!(err, "{sql} ran: {body}");
+        assert!(body.contains(want), "{sql}\n  wanted {want:?} in: {body}");
+        assert!(!names_the_describe_tool(hint_of(&body)), "{sql}: {body}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

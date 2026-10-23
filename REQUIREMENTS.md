@@ -590,6 +590,18 @@ error that can have one.
   DuckDB spelling.
 - `an_unknown_table_names_the_ones_that_exist` — including the agent's own.
 - `a_scratch_table_is_not_forgotten_by_the_hint` — the named tables include scratch.
+- `an_unknown_table_lists_the_columns_of_what_is_here` — with each table's columns.
+- `an_unknown_column_names_the_columns_of_the_tables_it_reads` — an unknown column is told the
+  columns of the tables, views and the agent's own objects the statement names, and of no
+  others.
+- `a_qualified_unknown_column_resolves_its_alias` — `r.temp`, `t.temp` and a CTE's `c.temp`
+  are told too, the alias said as its table, that table first.
+- `an_unknown_column_of_a_helper_view_lists_its_columns` — a helper view is listed like a table.
+- `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
+  table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
+  the rest.
+- `a_hosts_sql_error_gives_the_columns_and_sends_its_agent_to_no_tool` — these hints name no
+  tool, so a host whose agent has no `describe` is not sent to one.
 - `a_correct_query_carries_no_hint` — a success is never padded.
 - `empty_results_say_what_exists` — an empty result whose filter used an unknown value says what
   the column holds.
