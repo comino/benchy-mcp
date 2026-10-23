@@ -724,6 +724,22 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   them, in protocol 3's `hello`.
 - `a_query_reply_counts_the_rows_of_each_result` — `results` gives each result's rows held,
   whether complete, rows shown and whether the text was cut.
+- `a_version_refusal_lists_the_versions_in_its_detail` — `E_VERSION`'s `detail.protocols` is
+  every version benchy speaks.
+- `a_failed_batch_says_what_ran_in_its_detail` — a batch that fails gives the statement it
+  stopped at, and the earlier results' `result_ids` and `results` in a query reply's shape, in
+  `detail`, and still in the message; past the deadline, `reason` and an empty `lost` too.
+- `a_rebuild_says_in_its_detail_why_and_what_was_lost` — `E_REBUILT`'s `detail.reason`
+  (`hard_deadline`, `engine_died`, `memory_ceiling` with `held` and `ceiling`) and `lost`
+  (`results`, `agent_tables`); the message tells the model the results went, and past the
+  ceiling to say the work needs more rather than to restart benchy itself.
+- `a_lost_engine_says_why_in_one_word` — every way the engine is lost, `pivot_type` included,
+  has a reason of its own and loses the same.
+- `an_attach_past_a_limit_names_it_in_its_detail` — `E_LIMIT`'s `detail.limit` names the limit
+  as `hello` does, for rows, bytes, a file, a stream and the table count, and `value` the bound
+  it was held to.
+- `a_load_past_its_timeout_says_why_in_its_detail` — an attach past `--load-timeout` is
+  `E_DEADLINE` with `reason: load_timeout` and nothing lost.
 - `a_page_says_the_sql_of_its_result` — `page` returns the agent's own statement of its result,
   never a helper's body, cut at `max_bytes`, left out where the batch cannot be split as DuckDB
   splits it.

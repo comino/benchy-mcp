@@ -6,6 +6,19 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **A host's error replies carry `detail`, facts beside the model's message** (#26). A host
+  no longer parses prose: `E_REBUILT` says why the engine went (`reason`: `hard_deadline`,
+  `memory_ceiling`, `engine_died` or `pivot_type`) and what went with it (`lost`: `results`,
+  `agent_tables`); `E_DEADLINE` says `deadline` or `load_timeout`, with nothing lost; a batch
+  that fails at a statement gives that statement and the earlier results' `result_ids` and
+  `results`, in a query reply's shape; `E_LIMIT` names the limit as `hello` does and the value it
+  held the table to; `E_VERSION` lists the versions benchy speaks. docs/HOST-PROTOCOL.md has
+  the table of which code carries what. Additive: every field and message is as before, and no
+  new protocol version, since replies only grow. The model's message after a rebuild now says
+  the earlier results are gone too, and past the memory ceiling no longer tells the agent to ask
+  the operator to start benchy with a larger `--memory-ceiling`, which it cannot do: it is told to
+  use less, or to say that the work needs more.
+
 ## [0.3.1] — 2026-10-21
 
 Two TLS advisories fixed in the HTTP loader's dependencies, and the weekly cargo-mutants gate green

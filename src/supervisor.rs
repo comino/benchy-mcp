@@ -386,8 +386,9 @@ fn loader_swollen(name: &str, held: u64, ceiling: u64, connector: bool) -> LoadE
     } else {
         "the loader"
     };
-    load_error(
-        "E_LIMIT",
+    over_limit(
+        "loader_memory_ceiling",
+        ceiling,
         format!(
             "loading `{name}` passed the loader memory ceiling: {who} held {} against {}, and \
              it was stopped; nothing of it was attached. A source with very wide rows or deeply \
@@ -472,6 +473,10 @@ pub struct LoadError {
     /// Set where this table's stream lost the stream channel its place, and why: the channel is
     /// closed from here on.
     pub closed_channel: Option<String>,
+    /// What a host is told beside the message as `error.detail` (#26): which limit, why a load
+    /// or the engine was stopped, what a rebuild lost. Facts the supervisor holds itself, never
+    /// a path.
+    pub detail: Option<serde_json::Value>,
 }
 
 impl std::fmt::Display for LoadError {
@@ -488,8 +493,23 @@ fn load_error(code: &'static str, message: impl Into<String>) -> LoadError {
         code,
         message: message.into(),
         closed_channel: None,
+        detail: None,
     }
 }
+
+/// `E_LIMIT` for limit `limit`, by the name `hello` reports it under, held to `value`: the
+/// limit's own, or what the session's budget had left.
+fn over_limit(limit: &str, value: u64, message: impl Into<String>) -> LoadError {
+    LoadError {
+        detail: Some(serde_json::json!({"limit": limit, "value": value})),
+        ..load_error("E_LIMIT", message)
+    }
+}
+
+/// What a rebuilt engine no longer has: every retained result, since a new engine keeps none
+/// (`result_ids_continue_across_a_rebuild`), and every table the agent made. The attached tables
+/// and the helpers it is given again.
+const REBUILD_LOST: [&str; 2] = ["results", "agent_tables"];
 
 /// A table on the bench, and where the store keeps it.
 #[derive(Debug, Clone)]
@@ -519,6 +539,27 @@ enum Lost {
 }
 
 impl Lost {
+    /// Why, as one word a host can switch on (`error.detail.reason`, #26), where `why` is prose.
+    fn reason(&self) -> &'static str {
+        match self {
+            Lost::Died(_) => "engine_died",
+            Lost::Wedged => "hard_deadline",
+            Lost::Swollen { .. } => "memory_ceiling",
+            Lost::Spoiled(_) => "pivot_type",
+        }
+    }
+
+    /// `error.detail` for a call that lost the engine: why, what the engine held past its
+    /// ceiling, and what the rebuild did not bring back.
+    fn detail(&self) -> serde_json::Value {
+        let mut d = serde_json::json!({"reason": self.reason(), "lost": REBUILD_LOST});
+        if let Lost::Swollen { held, ceiling } = self {
+            d["held"] = (*held).into();
+            d["ceiling"] = (*ceiling).into();
+        }
+        d
+    }
+
     fn why(&self) -> String {
         match self {
             Lost::Died(e) => format!("the engine stopped responding: {e}"),
@@ -548,9 +589,13 @@ impl Lost {
                  query."
             }
             Lost::Swollen { .. } => {
+                // Not "ask the operator to start benchy with a larger ceiling", which the agent
+                // cannot do (#26): what it can do is use less, or say that the work needs more.
+                // Where the ceiling is set stays named, for the person an MCP client's agent
+                // tells; a host reads `error.detail`.
                 "Use less memory: aggregate or filter before sorting or joining, add a LIMIT, \
-                 build smaller strings and nested values, or ask the operator to start benchy \
-                 with a larger --memory-ceiling."
+                 or build smaller strings and nested values. If the work needs more, say so: \
+                 the ceiling is set where benchy is started (--memory-ceiling), not from here."
             }
             _ => {
                 "Narrow the query: a deeply nested type expression or a very wide computed \
@@ -907,14 +952,35 @@ impl Supervisor {
             self.budget.spend(done.fetched_rows, done.fetched_bytes);
         }
         if !done.ok {
-            let code = match done.code.as_deref() {
-                Some("E_LIMIT") => "E_LIMIT",
-                _ => "E_DATA",
+            let message = done.error.unwrap_or_else(|| "the loader failed".into());
+            if done.code.as_deref() != Some("E_LIMIT") {
+                return Err(load_error("E_DATA", message));
+            }
+            // The loader says which limit stopped it; the value is the job's, which this process
+            // set, not a number the loader reports.
+            let held_to = match (job, done.limit.as_deref()) {
+                (
+                    Job::Arrow {
+                        max_rows,
+                        max_bytes,
+                        budget_rows,
+                        budget_bytes,
+                        ..
+                    },
+                    Some(limit),
+                ) => match limit {
+                    "attach_rows" => Some(("attach_rows", *max_rows)),
+                    "attach_bytes" => Some(("attach_bytes", *max_bytes)),
+                    "session_rows" => Some(("session_rows", *budget_rows)),
+                    "session_bytes" => Some(("session_bytes", *budget_bytes)),
+                    _ => None,
+                },
+                _ => None,
             };
-            return Err(load_error(
-                code,
-                done.error.unwrap_or_else(|| "the loader failed".into()),
-            ));
+            return Err(match held_to {
+                Some((limit, value)) => over_limit(limit, value, message),
+                None => load_error("E_LIMIT", message),
+            });
         }
         let file = crate::loader::output(job)
             .map_err(|e| load_error("E_DATA", format!("could not keep `{name}`: {e}")))?;
@@ -956,12 +1022,13 @@ impl Supervisor {
         let each = match crate::trace::span("engine.attach", || self.attach_on_engine(tables)) {
             Ok(each) => each,
             Err(lost) => {
+                let detail = lost.detail();
                 let lost = lost.why();
                 let rebuilt = self.rebuild();
                 let why = |name: &str| {
                     format!("{lost} while `{name}` was being attached, so it was not attached")
                 };
-                return match rebuilt {
+                let mut each = match rebuilt {
                     Ok(()) => none("E_REBUILT", &|name| {
                         format!(
                             "{}. The bench has been rebuilt with every table it had before; \
@@ -971,6 +1038,10 @@ impl Supervisor {
                     }),
                     Err(e) => none("E_UNAVAILABLE", &|name| format!("{}. {e}", why(name))),
                 };
+                for e in each.iter_mut().filter_map(|a| a.as_mut().err()) {
+                    e.detail = Some(detail.clone());
+                }
+                return each;
             }
         };
         let kept = self.keep_attached(tables, each);
@@ -1624,15 +1695,25 @@ impl Supervisor {
         let advice = lost.advice();
         self.kills += 1;
         self.stop_engine();
+        let detail = Some(lost.detail());
         match self.rebuild() {
-            Ok(()) => Reply::fail(
-                "E_REBUILT",
-                format!(
-                    "{why}. The bench has been rebuilt and is ready, with every table it had. \
-                     Tables you created yourself are gone. {advice}"
-                ),
-            ),
-            Err(e) => Reply::fail("E_UNAVAILABLE", format!("{why}. {e}")),
+            // That the results went too is said: an agent paging an id from before the rebuild
+            // was told so only by the `E_NO_RESULT` that followed.
+            Ok(()) => Reply {
+                detail,
+                ..Reply::fail(
+                    "E_REBUILT",
+                    format!(
+                        "{why}. The bench has been rebuilt and is ready, with every table it \
+                         had. Tables you created yourself are gone, and results from before it \
+                         are gone too: run again what you still need. {advice}"
+                    ),
+                )
+            },
+            Err(e) => Reply {
+                detail,
+                ..Reply::fail("E_UNAVAILABLE", format!("{why}. {e}"))
+            },
         }
     }
 
@@ -1907,15 +1988,19 @@ fn run_loader(
             "E_DATA",
             format!("the loader for `{}` stopped: {e}", job.name()),
         )),
-        (_, Err(_)) => Err(load_error(
-            "E_DEADLINE",
-            format!(
-                "loading `{}` did not finish within {}s; raise --load-timeout if the source \
-                 is genuinely that slow",
-                job.name(),
-                timeout.as_secs()
-            ),
-        )),
+        (_, Err(_)) => Err(LoadError {
+            // Nothing changed: a load is kept only once it has finished.
+            detail: Some(serde_json::json!({"reason": "load_timeout", "lost": []})),
+            ..load_error(
+                "E_DEADLINE",
+                format!(
+                    "loading `{}` did not finish within {}s; raise --load-timeout if the source \
+                     is genuinely that slow",
+                    job.name(),
+                    timeout.as_secs()
+                ),
+            )
+        }),
     };
     if alone {
         LOADER.store(0, Ordering::SeqCst);
@@ -2122,8 +2207,9 @@ impl Room {
     fn take(&mut self, name: &str, rows: u64, bytes: u64) -> Result<(), LoadError> {
         let most = self.most;
         if !self.names.contains(name) && self.names.len() >= most {
-            return Err(load_error(
-                "E_LIMIT",
+            return Err(over_limit(
+                "attachments",
+                most as u64,
                 format!(
                     "a session holds at most {most} tables; detach one first, or \
                      replace one by attaching its name again"
@@ -2131,8 +2217,9 @@ impl Room {
             ));
         }
         if rows > self.rows_left {
-            return Err(load_error(
-                "E_LIMIT",
+            return Err(over_limit(
+                "session_rows",
+                self.rows_left,
                 format!(
                     "it holds {rows} rows, and this session has {} rows of its budget left \
                      after the tables before it",
@@ -2141,8 +2228,9 @@ impl Room {
             ));
         }
         if bytes > self.bytes_left {
-            return Err(load_error(
-                "E_LIMIT",
+            return Err(over_limit(
+                "session_bytes",
+                self.bytes_left,
                 format!(
                     "it is {bytes} bytes, and this session has {} bytes of its budget left \
                      after the tables before it",
@@ -2399,7 +2487,33 @@ impl Drop for Supervisor {
 
 #[cfg(test)]
 mod tests {
-    use super::{a_session, Room, MAX_ATTACHMENTS};
+    use super::{a_session, Lost, Room, MAX_ATTACHMENTS};
+
+    #[test]
+    fn a_lost_engine_says_why_in_one_word() {
+        // #26: a host switches on `error.detail.reason`, not on the prose `why` gives the model;
+        // each way of losing the engine has a word of its own, and every one lost the same.
+        let lost = serde_json::json!(["results", "agent_tables"]);
+        for (l, reason) in [
+            (Lost::Died("gone".into()), "engine_died"),
+            (Lost::Wedged, "hard_deadline"),
+            (Lost::Spoiled("a type".into()), "pivot_type"),
+        ] {
+            assert_eq!(
+                l.detail(),
+                serde_json::json!({"reason": reason, "lost": lost})
+            );
+        }
+        let swollen = Lost::Swollen {
+            held: 300,
+            ceiling: 200,
+        };
+        assert_eq!(
+            swollen.detail(),
+            serde_json::json!({"reason": "memory_ceiling", "lost": lost, "held": 300,
+                               "ceiling": 200})
+        );
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
@@ -2465,9 +2579,17 @@ mod tests {
         let e = r.take("b", 5, 40).unwrap_err();
         assert_eq!(e.code, "E_LIMIT", "{e}");
         assert!(e.message.contains("4 rows of its budget left"), "{e}");
+        assert_eq!(
+            e.detail,
+            Some(serde_json::json!({"limit": "session_rows", "value": 4}))
+        );
         let e = r.take("c", 1, 61).unwrap_err();
         assert_eq!(e.code, "E_LIMIT", "{e}");
         assert!(e.message.contains("60 bytes of its budget left"), "{e}");
+        assert_eq!(
+            e.detail,
+            Some(serde_json::json!({"limit": "session_bytes", "value": 60}))
+        );
         assert!(r.take("d", 4, 60).is_ok(), "exactly what is left fits");
         assert!(r.take("e", 1, 0).is_err(), "one row more does not");
         assert!(r.take("f", 0, 1).is_err(), "nor one byte more");

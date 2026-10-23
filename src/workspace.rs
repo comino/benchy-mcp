@@ -406,6 +406,23 @@ impl WorkError {
             other => other,
         }
     }
+
+    /// The statement the batch stopped at, counted from 1, where that is known: the one a
+    /// refusal or DuckDB named, or, past the deadline, the one after those that ran, since every
+    /// statement of the agent's that runs gives one result. A batch that did not parse, or a
+    /// refusal of the whole batch, stopped at none.
+    pub fn statement(&self) -> Option<usize> {
+        self.statement_after(0)
+    }
+
+    fn statement_after(&self, ran: usize) -> Option<usize> {
+        match self {
+            WorkError::Partial { ran, error } => error.statement_after(ran.len()),
+            WorkError::Sql { index, .. } | WorkError::Denied { index, .. } => Some(*index),
+            WorkError::Deadline { .. } => Some(ran + 1),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for WorkError {
