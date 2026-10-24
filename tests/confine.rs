@@ -6,6 +6,8 @@
 //! The engine loads nothing and runs no connector, so a connector's threads live and die in its
 //! loader; and the engine, like every file loader, checks that it is alone before it confines
 //! itself.
+//!
+//! Linux only, as Landlock is: elsewhere there is no sandbox to test.
 #![cfg(target_os = "linux")]
 
 mod common;

@@ -291,7 +291,30 @@ fn hello_says_what_the_session_is() {
     assert_eq!(r["caps"]["max_rows"], 50, "{r}");
     assert_eq!(r["caps"]["deadline_secs"], 7, "{r}");
     assert_eq!(r["limits"]["attachments"], 64, "{r}");
-    assert!(r["sandbox"].is_string(), "{r}");
+    assert_eq!(r["benchy"], env!("CARGO_PKG_VERSION"), "{r}");
+    // The prose for this platform's sandbox, worked out apart from the server: on Linux from the
+    // Landlock ABI the kernel itself reports (`landlock_create_ruleset` asked for its version),
+    // TCP rules coming with ABI 4; elsewhere there is no sandbox, and the tests serve anyway.
+    #[cfg(target_os = "linux")]
+    let sandbox = {
+        let abi = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                std::ptr::null::<libc::c_void>(),
+                0usize,
+                1u32,
+            )
+        };
+        match abi {
+            4.. => "fully enforced".to_string(),
+            1..=3 => "enforced, some newer rights unsupported by this kernel".to_string(),
+            _ => panic!("no Landlock here (ABI {abi}), and the server started"),
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let sandbox =
+        "unavailable: Landlock is Linux-only, and nothing equivalent is wired up here".to_string();
+    assert_eq!(r["sandbox"], sandbox, "{r}");
 }
 
 #[test]

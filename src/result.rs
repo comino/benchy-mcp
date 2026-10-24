@@ -65,6 +65,62 @@ pub const MIN_MAX_BYTES: usize = 512;
 pub const RETAIN_ROWS: usize = 2000;
 /// Bytes kept per result, so one result of wide rows cannot hold the whole retention budget.
 pub const RETAIN_BYTES: usize = 1 << 20;
+/// How many results are kept for paging.
+pub const RETAINED_RESULTS: usize = 32;
+
+/// The retention rule, in one place, so the Arrow and legacy readers cannot drift apart on it:
+/// keep rows while there is room, and remember whether more existed. Here beside the limits it
+/// applies, and with [`retain`], so that what REQ-10 says is kept is all in the one file the
+/// mutation tests examine for it.
+pub(crate) struct Keep {
+    pub(crate) rows: Vec<Vec<Cell>>,
+    bytes: usize,
+    pub(crate) more: bool,
+    pub(crate) cut: bool,
+}
+
+impl Keep {
+    pub(crate) fn new() -> Self {
+        Self {
+            rows: Vec::new(),
+            bytes: 0,
+            more: false,
+            cut: false,
+        }
+    }
+
+    /// A value, cut to the cell cap if it is longer — remembered, so the result can say so.
+    pub(crate) fn value(&mut self, s: String, max: usize) -> Cell {
+        if s.len() > max {
+            self.cut = true;
+        }
+        Cell::Text(cut(s, max))
+    }
+
+    /// Offer a row. `false` once retention is full — and then more rows existed than were kept.
+    /// Full is [`RETAIN_ROWS`] rows, or [`RETAIN_BYTES`] reached: the row that reaches it is kept,
+    /// so a result can hold up to a row more than 1 MiB
+    /// (`a_result_keeps_rows_until_they_reach_1_mib`).
+    pub(crate) fn offer(&mut self, row: Vec<Cell>) -> bool {
+        if self.rows.len() >= RETAIN_ROWS || self.bytes >= RETAIN_BYTES {
+            self.more = true;
+            return false;
+        }
+        self.bytes += row.iter().map(Cell::byte_len).sum::<usize>();
+        self.rows.push(row);
+        true
+    }
+}
+
+/// Keep `r` for paging, among the last [`RETAINED_RESULTS`]: the oldest goes first. Results
+/// arrive one at a time, so one is the most ever over; an `if`, not a `while`, so that no
+/// change to the comparison can loop on an empty list (a mutant that did hung the suite).
+pub(crate) fn retain(kept: &mut std::collections::VecDeque<QueryResult>, r: QueryResult) {
+    kept.push_back(r);
+    if kept.len() > RETAINED_RESULTS {
+        kept.pop_front();
+    }
+}
 
 /// A result as the workspace keeps it: up to [`RETAIN_ROWS`] rows, every value already cut to the
 /// cell cap. Paging reads from here, so it never runs the query again.
@@ -119,10 +175,8 @@ pub fn cut(s: String, max: usize) -> String {
     if s.len() <= max {
         return s;
     }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
+    // No loop stepping back to the boundary, which a mutation test can make endless.
+    let end = s.floor_char_boundary(max);
     format!("{}… [+{} bytes]", &s[..end], s.len() - end)
 }
 
@@ -203,10 +257,7 @@ fn recut(v: &str, kept_at: usize, max: usize) -> Option<String> {
     if head.len() <= max {
         return None;
     }
-    let mut end = max;
-    while !head.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = head.floor_char_boundary(max);
     Some(format!("{}… [+{} bytes]", &head[..end], whole - end))
 }
 
@@ -262,9 +313,10 @@ fn render_page(
                     room.saturating_sub(used + 2),
                     ROW_CUT,
                 );
+                // `used` is not counted on: a page out of bytes has no note, the one thing that
+                // reads it after the rows.
                 body.push_str(&line);
                 body.push('\n');
-                used += wire_len(&line) + 2;
                 out_of_bytes = true;
                 shown += 1;
                 break;
@@ -309,11 +361,13 @@ fn render_page(
         let mut f = format!("\n{} row(s), result_id {}", kept, r.result_id);
         if let Some(n) = &r.note {
             // The note gets what the page left, and no more: it can quote values of any length.
-            let left = budget.saturating_sub(used + wire_len(&f) + wire_len(" — "));
-            if left > LEAST {
-                f.push_str(" — ");
-                f.push_str(&fit(n, left));
-            }
+            // A complete page used at most `room`, so what is left is never less than
+            // `FOOTER_ROOM` less this line, some 200 bytes: there is always room for a note.
+            // The separator is counted with the line it joins: subtracted on its own, an error in
+            // it was one the backstop below made up for, and no test could see.
+            f.push_str(" — ");
+            let left = budget.saturating_sub(used + wire_len(&f));
+            f.push_str(&fit(n, left));
         }
         f
     } else if let Some(why) = &r.partial {
@@ -541,6 +595,255 @@ mod tests {
             );
             assert!(text.contains("TRUNCATED"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_value_is_cut_back_to_a_character_boundary() {
+        // 16 bytes falls inside the sixth '€' (three bytes each): the cut keeps five, never
+        // part of the sixth, and never all of it, which would be more than the cap.
+        assert_eq!(cut("€".repeat(10), 16), "€€€€€… [+15 bytes]");
+        assert_eq!(cut("€".repeat(10), 15), "€€€€€… [+15 bytes]");
+        assert_eq!(cut("€".repeat(5), 15), "€€€€€");
+    }
+
+    #[test]
+    fn the_wire_length_is_the_text_as_json_escapes_it() {
+        // What every cap is measured in: inside a JSON string, quotes not counted.
+        assert_eq!(wire_len(""), 0);
+        assert_eq!(wire_len("abc"), 3);
+        assert_eq!(wire_len("a\"b\\"), 6);
+        assert_eq!(wire_len("\u{1}"), 6);
+        assert_eq!(wire_len("€"), 3);
+    }
+
+    /// A page of `rows` inside `budget`, values kept and shown at up to 4096 bytes.
+    fn page(rows: Vec<&str>, offset: usize, max_rows: usize, budget: usize) -> Page {
+        let r = QueryResult {
+            cell_cap: 4096,
+            ..result(rows, None)
+        };
+        render_page(&r, offset, max_rows, 4096, budget)
+    }
+
+    // The edges of a page, each where one byte decides. At a budget of 1,024 the rows have
+    // 764 bytes (`FOOTER_ROOM` is kept for the footer), and the header `a\n` takes 3 of them,
+    // a newline counting 2 as it is escaped: a row of 759 bytes is a line of 761, which fills
+    // the page exactly. The caps' own tests show only that a page fits, which a page that
+    // kept less than fits does too.
+
+    #[test]
+    fn rows_that_fill_the_page_exactly_are_shown_whole() {
+        let one = "x".repeat(759);
+        let p = page(vec![&one, "y"], 0, 10, 1024);
+        assert_eq!(p.shown, 1);
+        assert!(p
+            .text
+            .starts_with(&format!("a\n{one}\n\nrows 1–1 of 2 (at the byte cap)")));
+        assert!(!p.text.contains(ROW_CUT), "{}", p.text);
+        // two rows that come to the page between them, 3 + 402 + 359 bytes
+        let (a, b) = ("x".repeat(400), "y".repeat(357));
+        let p = page(vec![&a, &b], 0, 10, 1024);
+        assert_eq!(p.shown, 2);
+        assert!(p
+            .text
+            .starts_with(&format!("a\n{a}\n{b}\n\n2 row(s), result_id r1")));
+    }
+
+    #[test]
+    fn a_row_wider_than_the_page_is_shown_cut_and_read_past() {
+        // What fits of it, to the byte, and the next page starts after it: shown nothing, paging
+        // would stall on it.
+        let wide = "x".repeat(2000);
+        let p = page(vec![&wide, "y"], 0, 10, 1024);
+        assert_eq!(p.shown, 1);
+        let kept = "x".repeat(764 - 3 - 2 - wire_len(ROW_CUT));
+        assert_eq!(
+            p.text,
+            format!(
+                "a\n{kept}{ROW_CUT}\n\nrows 1–1 of 2 (at the byte cap), result_id r1 — TRUNCATED: \
+                 this is not all the rows. Read on with {} r1 offset 1, or aggregate.",
+                crate::tools::name("get_result")
+            )
+        );
+    }
+
+    #[test]
+    fn a_header_that_fills_the_page_exactly_is_not_cut() {
+        let fits = QueryResult {
+            columns: vec!["c".repeat(762)],
+            ..result(vec![], None)
+        };
+        let p = render_page(&fits, 0, 10, 4096, 1024);
+        assert!(!p.text.contains("[columns cut]"), "{}", p.text);
+        let over = QueryResult {
+            columns: vec!["c".repeat(763)],
+            ..result(vec![], None)
+        };
+        let p = render_page(&over, 0, 10, 4096, 1024);
+        assert!(p.text.contains("[columns cut]"), "{}", p.text);
+    }
+
+    #[test]
+    fn a_page_with_the_least_room_is_still_shown() {
+        // 64 bytes for the rows, at a budget of 324, is the least a page is shown with.
+        let p = page(vec!["1"], 0, 10, 324);
+        assert_eq!(p.shown, 1);
+        assert!(p.text.starts_with("a\n1\n\n1 row(s)"), "{}", p.text);
+        let p = page(vec!["1"], 0, 10, 323);
+        assert_eq!(p.shown, 0);
+        assert!(p.text.contains("not shown"), "{}", p.text);
+        // and with no rows to show, the page says there are none, not that it is not shown
+        let p = page(vec![], 0, 10, 324);
+        assert_eq!(p.text, "a\n\n0 row(s), result_id r1");
+    }
+
+    #[test]
+    fn a_page_is_called_truncated_for_each_reason_alone() {
+        // `truncated` is what a host reads; each reason on its own must set it. Every row
+        // shown, but more existed than were kept:
+        let more = QueryResult {
+            more: true,
+            ..result(vec!["1", "2"], None)
+        };
+        let p = render_page(&more, 0, 10, 4096, 1024);
+        assert_eq!(p.shown, 2);
+        assert!(p.truncated, "{}", p.text);
+        // the one row shown, and cut at the byte cap:
+        let wide = "x".repeat(2000);
+        let p = page(vec![&wide], 0, 10, 1024);
+        assert_eq!(p.shown, 1);
+        assert!(p.truncated, "{}", p.text);
+        // and none of them:
+        let p = page(vec!["1", "2"], 0, 10, 1024);
+        assert!(!p.truncated, "{}", p.text);
+    }
+
+    #[test]
+    fn a_page_counts_its_rows_from_1() {
+        let p = page(vec!["1", "2", "3"], 0, 1, 1024);
+        assert!(p.text.contains("\nrows 1–1 of 3 (one page)"), "{}", p.text);
+        let p = page(vec!["1", "2", "3"], 1, 1, 1024);
+        assert!(p.text.contains("\nrows 2–2 of 3 (one page)"), "{}", p.text);
+        // an empty result read from its start is complete, not a page past its end
+        let p = page(vec![], 0, 10, 1024);
+        assert_eq!(p.text, "a\n\n0 row(s), result_id r1");
+    }
+
+    #[test]
+    fn a_note_gets_all_the_page_left() {
+        // 1,024 less the rows (6), the footer's line (24) and " — " (5): 989 bytes of note, and
+        // the response comes to the budget exactly.
+        let r = QueryResult {
+            note: Some("n".repeat(1000)),
+            ..result(vec!["1"], None)
+        };
+        let p = render_page(&r, 0, 10, 4096, 1024);
+        let mark = "… [cut at the byte cap]";
+        assert_eq!(
+            p.text,
+            format!(
+                "a\n1\n\n1 row(s), result_id r1 — {}{mark}",
+                "n".repeat(989 - wire_len(mark))
+            )
+        );
+        assert_eq!(p.bytes, 1024);
+    }
+
+    /// A result of `rows` one-letter rows with id `id`: each row a line of 3 bytes.
+    fn letters(id: &str, rows: usize) -> QueryResult {
+        QueryResult {
+            result_id: id.into(),
+            ..result(vec!["x"; rows], None)
+        }
+    }
+
+    #[test]
+    fn a_batch_shares_its_budget_to_the_byte() {
+        // Three results in 1,023 bytes. The first is given what is left less 120 for each result
+        // after it, and takes 30. The second is given 1,023 - 30 - 4 (the separator) - 120 =
+        // 869, so 609 for its rows: its header and 202 rows of 3 bytes, exactly. The third has no
+        // room for rows and says where it is.
+        let caps = Caps {
+            max_bytes: 1023,
+            max_rows: 1000,
+            ..Caps::default()
+        };
+        let (text, shown) = render_batch_shown(
+            &[letters("r1", 1), letters("r2", 400), letters("r3", 1)],
+            &caps,
+        );
+        let counts: Vec<(usize, bool)> = shown.iter().map(|s| (s.shown, s.truncated)).collect();
+        assert_eq!(counts, [(1, false), (202, true), (0, true)], "{text}");
+        assert!(
+            text.starts_with("a\nx\n\n1 row(s), result_id r1\n\na\nx\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("rows 1–202 of 400 (at the byte cap), result_id r2")
+                && text.contains("\n\nresult_id r3 — TRUNCATED: not shown"),
+            "{text}"
+        );
+        assert!(wire_len(&text) <= 1023);
+    }
+
+    #[test]
+    fn a_page_that_fills_the_response_exactly_is_shown() {
+        // The note takes all the page leaves, so the page is the response's 1,024 bytes.
+        let r = QueryResult {
+            note: Some("n".repeat(1000)),
+            ..result(vec!["1"], None)
+        };
+        let caps = Caps {
+            max_bytes: 1024,
+            ..Caps::default()
+        };
+        let (text, shown) = render_batch_shown(std::slice::from_ref(&r), &caps);
+        assert_eq!(wire_len(&text), 1024);
+        assert_eq!(shown[0].shown, 1, "{text}");
+    }
+
+    #[test]
+    fn a_result_with_no_room_left_is_pointed_to() {
+        // The first page fills its 1,024 - 120 bytes; the second result's pointer, its id twice,
+        // does not fit the 116 left, and the line that says results are missing does.
+        let first = QueryResult {
+            note: Some("n".repeat(1000)),
+            ..result(vec!["1"], None)
+        };
+        let caps = Caps {
+            max_bytes: 1024,
+            ..Caps::default()
+        };
+        let long_id = "r-0123456789abcdef-12";
+        let (text, shown) = render_batch_shown(&[first, letters(long_id, 1)], &caps);
+        assert_eq!(shown[1].shown, 0);
+        assert!(!text.contains(long_id), "{text}");
+        assert!(
+            text.ends_with(&format!(
+                "\n\n… 1 more result(s) not shown: the response is at its byte cap. Fetch them \
+                 with {}.",
+                crate::tools::name("get_result")
+            )),
+            "{text}"
+        );
+        assert!(wire_len(&text) <= 1024);
+    }
+
+    #[test]
+    fn a_fitted_text_keeps_all_that_fits() {
+        // A cut that kept less than fits would still be inside the cap, so the cap's tests
+        // alone cannot tell it from this: the whole room, counted as it is escaped.
+        let mark = "… [cut at the byte cap]";
+        let room = 40 - wire_len(mark);
+        assert_eq!(fit("abc", 3), "abc");
+        assert_eq!(
+            fit(&"x".repeat(100), 40),
+            format!("{}{mark}", "x".repeat(room))
+        );
+        assert_eq!(
+            fit(&"\"".repeat(100), 40),
+            format!("{}{mark}", "\"".repeat(room / 2))
+        );
     }
 
     #[test]

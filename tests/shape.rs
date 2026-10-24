@@ -547,30 +547,43 @@ fn the_shape_reaches_the_agent_through_the_engine() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Optional: the public meter data the eval uses, when `eval/fetch_uci.py` has fetched it.
+/// The public meter data the eval uses, in the excerpt committed for this test
+/// (tests/fixtures/uci/README.md): seven meters, all of 2014, chosen for what they show. This read
+/// the whole cut when `eval/fetch_uci.py` had fetched it and otherwise passed saying it was
+/// skipped, which in CI was always (#22).
 #[test]
 fn the_public_meter_data_shows_its_quirks() {
-    let csv = Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/uci/readings.csv");
-    if !csv.exists() {
-        eprintln!("skipped: {} is not fetched", csv.display());
-        return;
-    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/uci/readings.parquet");
     let dir = common::unique("shape-uci");
     std::fs::create_dir_all(&dir).unwrap();
-    std::os::unix::fs::symlink(&csv, dir.join("readings.csv")).unwrap();
+    std::os::unix::fs::symlink(&fixture, dir.join("readings.parquet")).unwrap();
     let d = sealed(&dir, &[]).describe(4096);
     eprintln!("{d}");
-    has(&d, "series key meter (looks like it): 24 series");
+    has(&d, "series key meter (looks like it): 7 series");
     has(&d, "every series has a row every 15 minutes");
+    // the dead meter, and the two that start late
     has(&d, "'MT_223': kw is 0 in every row");
     has(&d, "'MT_106': kw is 0 from the start");
     has(&d, "'MT_109': kw is 0 from the start");
+    // the one that pauses for days, and then stops
+    has(
+        &d,
+        "then 0 from 2014-08-06 16:15:00+00 to 2014-08-12 15:15:00+00",
+    );
     has(&d, "to the end (2014-12-31 23:45:00+00) (13 days");
+    // both clock changes, and no other moment: three meters that read all year, the largest
+    // of the 20 the eval has, make the totals as steady as all 24 do (with one, of the 20's
+    // smaller ones, a holiday's dip was a moment and the October hour went unlisted)
     has(
         &d,
         "kw is 0 in every series at 2014-03-30 01:00:00+00 to 01:45:00+00",
     );
-    has(&d, "2014-10-26 01:00:00+00 to 01:45:00+00");
+    has(
+        &d,
+        "kw summed over the series is 2.1× the same time a day before and after at 2014-10-26 \
+         01:00:00+00 to 01:45:00+00",
+    );
+    assert_eq!(d.matches("the same time a day before").count(), 1, "{d}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

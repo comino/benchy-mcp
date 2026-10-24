@@ -1,6 +1,7 @@
 //! REQ-16: ClickHouse as a built-in source, against a real ClickHouse server
 //! (`common::clickhouse`, started from `BENCHY_CLICKHOUSE_BIN`; without it each test that needs
-//! the server says it was skipped). The config test at the end needs none.
+//! the server says it was skipped). The config test at the end needs none. Linux only: the server
+//! is tied to the test binary's life by `PR_SET_PDEATHSIG`, which only Linux has.
 #![cfg(target_os = "linux")]
 
 mod common;

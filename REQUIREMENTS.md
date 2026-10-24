@@ -58,7 +58,7 @@ engine's workspace, a loader's staging — is in one directory of its own, creat
 - `the_warden_holds_nothing_of_the_servers` — the warden has no credential in its environment or
   memory, one thread, and no descriptor but the server's pipe and `/dev/null`.
 - `the_warden_is_forked_only_from_one_thread` — forking the warden from a process with a second
-  thread is refused.
+  thread is refused (Linux only: its threads are counted in /proc).
 - `a_signal_to_the_warden_is_not_the_server_going` — a signal to the warden does not end the
   session.
 - `a_load_that_times_out_leaves_no_connector_and_no_scratch` — a load past `--load-timeout`
@@ -281,7 +281,8 @@ operator listed.
   can write is refused: that is a credential handover.
 - `a_personal_group_may_write_the_connector` — a personal group, with nobody else in it, may
   write it.
-- `the_personal_group_is_recognised` — that lookup agrees with `id` and `getent`.
+- `the_personal_group_is_recognised` — that lookup agrees with `id` and `getent` (Linux only: macOS has no
+  `getent`).
 - `credentials_never_cross` — a resolved `${VAR}` reaches only its connector's loader; it is
   nowhere in the engine's environment, arguments or memory.
 - `the_engine_inherits_no_environment_and_no_descriptor` — the engine starts with an empty
@@ -383,13 +384,15 @@ configuration is locked after it is set. The threads are started after the engin
 so each of them is (REQ-3).
 
 - `the_engine_runs_agent_sql_on_the_threads_it_is_given` — one thread by default; with
-  `--threads 4` a grouped aggregate keeps more than one core busy.
+  `--threads 4` a grouped aggregate keeps more than one core busy (Linux only: the engine's
+  CPU is read from /proc).
 - `the_engines_threads_are_the_operators_to_set_once` — `--threads` or `[engine] threads`, never
   both, never 0.
 - `a_host_lowers_the_engines_threads_and_cannot_raise_them` — from protocol 7 a host may lower
   the threads, rebuilding the engine; raising them, 0, or sending them earlier ends the session.
 - `the_engines_threads_are_started_after_it_is_confined` — every worker is refused a file outside
-  the bench and a TCP connection; threads started before the confinement stop the engine.
+  the bench and a TCP connection; threads started before the confinement stop the engine
+  (Linux only, as Landlock is).
 - `a_deadline_of_zero_is_refused_at_startup` — at zero every query would fail at once.
 - `ceilings_enforced` — the row cap, byte cap, memory budget and deadline each give a named error
   or a stated truncation, and the server answers afterwards.
@@ -434,7 +437,8 @@ kill. So is one loader's: each is read the same way while it loads, with the con
   `--memory-ceiling` is killed within moments: `E_REBUILT`, naming the ceiling, scratch gone.
   Memory is read every 50 ms during a request, never between (0 ms of CPU idle).
 - `an_engine_left_past_its_memory_ceiling_is_rebuilt_at_once` — read once more as a request is
-  answered (5 µs), an engine past its ceiling is rebuilt then, not left idle past it.
+  answered (5 µs), an engine past its ceiling is rebuilt then, not left idle past it (Linux
+  only, where the ceiling is read from /proc).
 - `a_memory_ceiling_the_engine_cannot_live_under_is_refused_at_startup` — a ceiling below
   `--memory`, or a size that does not parse, stops startup. Unset, the ceiling is `--memory` and
   half again, at least 256 MiB over (legitimate queries reached 1,260 MB at a 1 GB budget).
@@ -547,8 +551,16 @@ fetched again by id.
 - `a_full_page_is_not_called_truncated` — exactly the row cap is complete; one more row is not.
 - `a_partial_result_is_never_presented_as_complete` — a read that stops early says so, even when
   every row kept fits (tested at the renderer).
-- `a_truncated_result_can_be_paged` — `get_result` with an offset reads on without re-running;
-  the first 2,000 rows (at most 1 MiB) of the last 32 results are kept.
+- `a_truncated_result_can_be_paged` — `get_result` with an offset reads on without re-running.
+- `a_result_keeps_its_first_2000_rows` — 2,000 rows are kept whole; of 2,001, the first 2,000.
+- `a_result_keeps_rows_until_they_reach_1_mib` — rows are kept until they come to 1 MiB, a value
+  counting its text and 3 bytes: the row that reaches it is the last kept, so a result can hold
+  up to a row more than 1 MiB.
+- `the_last_32_results_are_kept` — the 32nd result from the last can be paged, the 33rd cannot.
+- `the_response_cap_is_at_least_512_bytes` — `--max-bytes 511` is refused at startup; at 512 a
+  cut response fits and says it was cut.
+- `a_host_lowers_max_bytes_to_512_and_no_further` — a host's `caps.max_bytes` on a query or a
+  page may be 512, and not 511.
 - `a_page_cuts_values_at_its_own_cell_cap` — a page's lower `max_cell_bytes` cuts each value as
   the query would have, saying TRUNCATED.
 - `a_query_without_a_limit_reads_no_further_than_it_keeps` — a `SELECT` is read only as far as
@@ -730,7 +742,8 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_channel_and_a_descriptor_serve_one_session` — both streamed forms in one session and in one
   request.
 - `a_channel_and_a_descriptor_load_in_request_order_on_one_cpu` — with one CPU, a request's
-  tables load in list order, so one writer's channel and descriptor streams all load.
+  tables load in list order, so one writer's channel and descriptor streams all load (Linux
+  only: one CPU is had with `sched_setaffinity`).
 - `a_channel_reader_stops_at_each_streams_end_marker` — the channel's reader reads nothing past
   a stream's marker, whatever size its reads are.
 - `a_refused_stream_is_drained_to_its_marker_within_a_bound` — exactly the bound drains, a byte
@@ -748,7 +761,8 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_rebuild_says_in_its_detail_why_and_what_was_lost` — `E_REBUILT`'s `detail.reason`
   (`hard_deadline`, `engine_died`, `memory_ceiling` with `held` and `ceiling`) and `lost`
   (`results`, `agent_tables`); the message tells the model the results went, and past the
-  ceiling to say the work needs more rather than to restart benchy itself.
+  ceiling to say the work needs more rather than to restart benchy itself (Linux only, where
+  the ceiling is read from /proc).
 - `a_lost_engine_says_why_in_one_word` — every way the engine is lost, `pivot_type` included,
   has a reason of its own and loses the same.
 - `an_attach_past_a_limit_names_it_in_its_detail` — `E_LIMIT`'s `detail.limit` names the limit
@@ -863,8 +877,8 @@ statement, and the agent made them.
   exactly: 300,000 repeats are said as 300,000.
 - `describe_names_a_moment_every_series_shares` — a time when every series reads 0, or totals
   double; a clock-change day is said to be one.
-- `the_public_meter_data_shows_its_quirks` — on the eval's public data, when fetched: the dead
-  meter, late starters, pauses, the stop and both clock changes.
+- `the_public_meter_data_shows_its_quirks` — on seven meters of the eval's public data,
+  committed: the dead meter, late starters, pauses, the stop and both clock changes.
 - `a_stated_shape_wins_over_the_heuristic` — a stated time column and key are used and not
   called guesses.
 - `a_stated_column_that_is_not_there_refuses_the_load` — a missing stated column, or a non-time
@@ -997,7 +1011,7 @@ tried moved blocks between loads, and the one that kept them took 3.9 s where on
 - `a_hosts_describe_quotes_data_values_and_names_duckdbs_types` — the same through the host
   protocol's `describe`, with DuckDB's type names.
 - `the_clickhouse_source_looks_the_same_as_a_file` — the built-in ClickHouse source (REQ-16)
-  answers byte for byte as the CSV does.
+  answers byte for byte as the CSV does (Linux only, as the ClickHouse tests are).
 
 ## REQ-16 — ClickHouse is a built-in source
 
@@ -1102,7 +1116,8 @@ other's (REQ-5).
 - `an_http_error_reaches_the_operator_not_the_agent` — status, message, URL and host go to the
   operator log, an echoed key masked; the agent hears only that the table is not available.
 - `http_credentials_stay_in_the_loader` — the token is in neither the engine's environment,
-  arguments nor memory; an echoed key is masked in the log.
+  arguments nor memory; an echoed key is masked in the log (Linux only: the engine is read
+  through /proc).
 - `an_http_loader_is_confined_before_its_first_request` — the HTTP loader is Landlocked before
   its first answer (REQ-3), and still loads through its staging directory.
 - `a_failed_page_fails_the_source_with_no_partial_table` — a failed, cut or rowless page, or a

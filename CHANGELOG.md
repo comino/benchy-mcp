@@ -64,6 +64,14 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   still takes that one scan, and a session's helpers cost what they did at startup: the engine's
   listing as it attaches their file checks the file, not DuckDB's names. The check is as strict
   as before; docs/PERFORMANCE.md has the numbers.
+- **Tests that guard what REQUIREMENTS.md cites** (#22). REQ-10's retention limits (2,000 rows,
+  1 MiB, the last 32 results) and the 512-byte `max_bytes` floor each have a test that fails if
+  the limit moves either way. REQ-10 now says that the row reaching 1 MiB is kept. The retention
+  rule moved into `src/result.rs`, which the weekly mutation tests now examine. The meter-data
+  quirks test runs on seven committed meters of the eval's public data instead of only when it
+  was fetched; `hello`'s `benchy` and `sandbox` are checked for their values; and
+  `scripts/check_requirements.py` fails on a cited test that is ignored, or built only on
+  Linux, unless that is said.
 
 ## [0.3.1] — 2026-10-21
 

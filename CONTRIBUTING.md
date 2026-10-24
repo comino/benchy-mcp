@@ -180,9 +180,9 @@ there if manual approval is desired; otherwise a passing tag publishes automatic
 
 The one rule is checked by machine. `.github/workflows/mutants.yml` runs
 [cargo-mutants](https://mutants.rs) weekly, and on demand, over what the containment rests on:
-`guard`, `lockdown`, `sandbox`, `admission` and `loader`. It changes the code one mutant at a
-time — a function body replaced, a comparison flipped, a field left out — and runs the suite
-against each. **It is a gate:** a mutant the suite does not notice, or one that hangs it, fails
+`guard`, `lockdown`, `sandbox`, `admission` and `loader`, and `result`, which bounds what
+comes back (REQ-10). It changes the code one mutant at a time — a function body replaced, a
+comparison flipped, a field left out — and runs the suite against each. **It is a gate:** a mutant the suite does not notice, or one that hangs it, fails
 the run, and the fix is the test that should have caught it.
 
 `.cargo/mutants.toml` says what is mutated, and lists the few mutants no test can tell from the
@@ -191,8 +191,9 @@ why. Add to it only with that reason, and match by function and change, never by
 Code that exists only off Linux, where the mutants never run, goes in a file the globs there leave
 out, as `src/sandbox/elsewhere.rs` does.
 
-The whole set takes about 50 minutes across four shards on a hosted runner, and much longer on
-one machine; it is not part of `scripts/ci.sh`.
+The whole set took about 50 minutes across four shards on a hosted runner when it was 336
+mutants, before `result` added 248. It takes much longer on one machine (`result` alone, four
+hours on four shared cores against a part of the suite), and is not part of `scripts/ci.sh`.
 To check one mutant locally (the config supplies the files and `--release`):
 
 ```sh

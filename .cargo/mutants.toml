@@ -18,6 +18,10 @@ examine_globs = [
     "src/sandbox.rs",
     "src/admission.rs",
     "src/loader.rs",
+    # REQ-10: what a result keeps, and how the rest is cut and said. The retention rule and its
+    # limits are here, not in src/workspace.rs, so that they are examined without the 371
+    # mutants of the rest of that file (#22).
+    "src/result.rs",
 ]
 
 additional_cargo_args = ["--release"]
@@ -32,6 +36,10 @@ exclude_re = [
     # Equivalent: `elapsed() < grace` and `<= grace` differ only if the clock reads exactly
     # `grace` when sampled, and then for one 20 ms poll.
     'src/sandbox\.rs:\d+:\d+: replace < with <= in alone_by$',
+
+    # Equivalent: `serde_json::to_string` of a `&str` cannot fail (it writes into a `Vec`, and a
+    # str is always valid UTF-8), so `wire_len`'s fallback, six bytes for each, is never reached.
+    'src/result\.rs:\d+:\d+: replace \* with (\+|/) in wire_len$',
 ]
 
 # Not excluded since #64: the arms of `guard::type_name` no SQL reaches under the lock (measured
