@@ -628,6 +628,8 @@ error that can have one.
   deadline with a view whose bind would sleep past it in the catalogue.
 - `a_hint_lists_the_agents_objects_as_they_are_now` — the columns kept are of the agent's
   objects as they are after a view is replaced, a table made, dropped or altered.
+- `a_temporary_object_is_listed_with_its_own_columns` — a temporary table that hides the
+  agent's table of the same name is listed with its own columns, as the statement reads it.
 - `a_name_the_statement_gives_hides_the_table_of_that_name` — an alias, a subquery's or a
   column's, named like a table is not read where it is given or where it qualifies a column, and
   a CTE's name not outside its own body (nor in it, `RECURSIVE`): `meters.power_kw FROM rooms AS

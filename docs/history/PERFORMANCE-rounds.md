@@ -234,6 +234,19 @@ and no pointer to `describe`, which was 1,143 bytes more to call), `SELECT * FRO
 121, and `SELECT m.temp FROM meters m`'s 0 → 86. The wide table's is 1,094 bytes, its list held to
 1,024 (`the_columns_a_hint_lists_are_bounded`).
 
+**The agent's columns on its own connection.** `temp` is a catalog of each connection's own,
+so the host-facing connection's listing of the agent's temporary objects was empty, and a
+temporary table that hid the agent's table of the same name was listed with the hidden one's
+columns (`a_temporary_object_is_listed_with_its_own_columns`). The same `duckdb_columns()`
+listing now runs on the agent's connection, kept as before. Measured as above, `320c011`
+against the change, three runs each:
+
+| Each failing call | Host-facing connection | Agent's connection |
+|---|---|---|
+| `SELECT temp FROM meters` | 3.77–3.80 M | 3.73–3.77 M |
+| `SELECT temp FROM mine`, a view of the agent's | 4.40–4.43 M | 4.39–4.43 M |
+| `SELECT temp FROM mine`, a temporary table of the agent's | 3.75–3.79 M | 3.74–3.89 M |
+
 ### A query read only as far as it is kept
 
 A query's result was built whole (`duckdb_execute_prepared`) before its first 2,000 rows were

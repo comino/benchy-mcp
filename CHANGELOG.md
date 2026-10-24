@@ -53,7 +53,8 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   the tables the statement reads, `readings(series_id, t, n)`, and an unknown table the columns
   of what is here. A qualified reference, `SELECT r.temp FROM readings r`, had no hint at all; it
   is now told that `r` is `readings`, with its columns, and so is a column of a view, a CTE or a
-  subquery. Helper views and the agent's own tables are listed like loaded ones; an alias or a
+  subquery. Helper views and the agent's own tables are listed like loaded ones, a temporary
+  table with its own columns rather than those of the agent's table it hides; an alias or a
   CTE named like a table on the bench is not taken for that table, so `SELECT meters.power_kw
   FROM rooms AS meters` is told the columns of `rooms` alone. The list is held to 1,024 bytes,
   `(+N more)` included: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and

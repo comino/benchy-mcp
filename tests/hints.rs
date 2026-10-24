@@ -832,3 +832,30 @@ fn a_hint_takes_nothing_past_the_deadline() {
     );
     assert!(hint_of(&e).contains("a_slow(range)"), "{e}");
 }
+
+#[test]
+fn a_temporary_object_is_listed_with_its_own_columns() {
+    // A temporary object hides the agent's own of the same name, as DuckDB 1.5.5's search path
+    // finds the temporary catalog first. Its columns were read on the host-facing connection,
+    // whose temporary catalog is its own, so `SELECT persistent_col FROM mine`, which read the
+    // temporary table, was told `mine(persistent_col)`.
+    let mut ws = bench_with_tables();
+    for sql in [
+        "CREATE TABLE mine(persistent_col INTEGER)",
+        "CREATE TEMP TABLE mine(temp_col INTEGER)",
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+    }
+    for (sql, want) in [
+        (
+            "SELECT persistent_col FROM mine",
+            "That column is not in the tables the statement reads: mine(temp_col).",
+        ),
+        ("SELECT * FROM missing", "mine(temp_col)"),
+    ] {
+        let e = err_for(&mut ws, sql);
+        let h = hint_of(&e);
+        assert!(h.contains(want), "{sql}\n  wanted {want:?} in: {e}");
+        assert!(!h.contains("persistent_col"), "{sql}: {e}");
+    }
+}
