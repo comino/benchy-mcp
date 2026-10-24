@@ -71,7 +71,8 @@ impl<'a> Catalogue<'a> {
     /// the sentence that says where what was cut is, if anything was. Each table has an even
     /// share of what the ones before it left, so a wide first table cannot crowd out the names
     /// after it; one cut short ends `… [+N columns])`, and tables past [`SHOWN`] are counted,
-    /// `(+N more)`. A table the catalog gives no columns for is named alone.
+    /// `(+N more)`, inside the same bytes. A table the catalog gives no columns for is named
+    /// alone.
     ///
     /// #27: told only the tables' names, an agent spent its next step on `describe`, about 4 KB
     /// on a host's bench, to learn the one column it got wrong; and a host whose agent has no
@@ -83,30 +84,52 @@ impl<'a> Catalogue<'a> {
         }
         let named = &tables[..tables.len().min(SHOWN)];
         let found = self.columns.map(|f| f(named)).unwrap_or_default();
-        let mut parts: Vec<String> = Vec::new();
+        // ` (+N more)` is inside the bound. Past `SHOWN` tables it is said whatever fits, so its
+        // bytes for the fewest it can count are kept from the start, and the shares are of what
+        // is left; the entries took the whole bound before it was put after them, and thirteen
+        // tables were listed in 1,034 bytes (`the_list_a_hint_gives_is_held_to_1024_bytes_and_12_tables`).
+        let counted = |n: usize| match n {
+            0 => String::new(),
+            n => format!(" (+{n} more)"),
+        };
+        let bound = SHAPES - counted(tables.len() - named.len()).len();
+        let mut parts: Vec<(String, bool)> = Vec::new();
         let mut used = 0;
-        let mut short: Vec<&str> = Vec::new();
         for (i, t) in named.iter().enumerate() {
             let cols = found
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(t))
                 .map_or(&[][..], |(_, c)| c.as_slice());
             let sep = if parts.is_empty() { 0 } else { 2 };
-            let share = (SHAPES.saturating_sub(used) / (named.len() - i)).saturating_sub(sep);
+            let share = (bound.saturating_sub(used) / (named.len() - i)).saturating_sub(sep);
             let (entry, cut) = entry(t, cols, share)
                 .unwrap_or_else(|| (crate::profile::ident(t), !cols.is_empty()));
             // A name alone can be longer than its share; past the bound it is counted instead.
-            if used + sep + entry.len() > SHAPES {
+            if used + sep + entry.len() > bound {
                 break;
             }
-            if cut {
-                short.push(t);
-            }
             used += sep + entry.len();
-            parts.push(entry);
+            parts.push((entry, cut));
         }
-        let mut s = parts.join("; ");
+        // One counted that was not kept for — a name past the bound, or a count of more digits —
+        // takes the room of the entries before it, last first.
+        while used + counted(tables.len() - parts.len()).len() > SHAPES {
+            let Some((entry, _)) = parts.pop() else {
+                break;
+            };
+            used -= entry.len() + if parts.is_empty() { 0 } else { 2 };
+        }
+        let short: Vec<&str> = named
+            .iter()
+            .zip(&parts)
+            .filter_map(|(t, (_, cut))| cut.then_some(*t))
+            .collect();
         let more = tables.len() - parts.len();
+        let mut s = parts
+            .iter()
+            .map(|(entry, _)| entry.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
         if more > 0 {
             s.push_str(&format!(" (+{more} more)"));
         }

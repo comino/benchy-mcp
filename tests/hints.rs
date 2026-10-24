@@ -636,6 +636,75 @@ fn the_columns_a_hint_lists_are_bounded() {
     assert!(!names_the_describe_tool(h), "{e}");
 }
 
+/// A bench of tables `t00`, `t01`, … whose names are `lens` bytes long, each with one column,
+/// `kwh`, recorded as loaded.
+fn tables_named_to(lens: &[usize]) -> Workspace {
+    let mut bench = common::bench();
+    let names: Vec<String> = lens
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("t{i:02}{}", "x".repeat(n - 3)))
+        .collect();
+    let sql: Vec<String> = names
+        .iter()
+        .map(|t| format!("CREATE TABLE {t} AS SELECT 1 AS kwh"))
+        .collect();
+    bench.connection().execute_batch(&sql.join("; ")).unwrap();
+    for name in names {
+        bench
+            .record(benchy_mcp::LoadedTable {
+                name,
+                rows: 1,
+                columns: vec![("kwh".into(), "INTEGER".into())],
+                source: "test".into(),
+                profile: None,
+                seen: None,
+            })
+            .unwrap();
+    }
+    bench.seal("1GB").unwrap()
+}
+
+/// What an unknown table's hint lists as here, tables, columns and `(+N more)`.
+fn listed_here(ws: &mut Workspace) -> String {
+    let e = err_for(ws, "SELECT * FROM nowhere");
+    let h = hint_of(&e);
+    let here = h.split_once("What is here: ").expect(&e).1;
+    here.split_once('.').expect(&e).0.to_string()
+}
+
+#[test]
+fn the_list_a_hint_gives_is_held_to_1024_bytes_and_12_tables() {
+    // REQ-11: 1,024 bytes of tables and columns, `(+N more)` counted in them. The entries took
+    // the whole bound before the count was put after them: these thirteen tables, the first
+    // twelve each a share of it, were listed in 1,034 bytes. They now take exactly 1,024, and a
+    // byte more in a name still keeps to it; a bound one byte lower or higher would list the
+    // first in fewer bytes, or the second in more.
+    let edge = [80, 78, 78, 78, 78, 78, 78, 78, 79, 79, 79, 79, 3];
+    let here = listed_here(&mut tables_named_to(&edge));
+    assert_eq!(here.len(), 1024, "{here}");
+    assert_eq!(here.split("; ").count(), 12, "{here}");
+    assert!(here.ends_with("(kwh) (+1 more)"), "{here}");
+    let mut over = edge;
+    over[11] += 1;
+    let here = listed_here(&mut tables_named_to(&over));
+    assert!(here.len() <= 1024, "{} bytes: {here}", here.len());
+    assert!(here.ends_with(" (+1 more)"), "{here}");
+    // Twelve names too long for their shares: ten fit, and the count after them would not, so
+    // the tenth makes room for it.
+    let here = listed_here(&mut tables_named_to(&[100; 12]));
+    assert!(here.len() <= 1024, "{} bytes: {here}", here.len());
+    assert!(here.ends_with("x (+3 more)"), "{here}");
+
+    // Twelve tables are named, and a thirteenth counted: short names, far inside the bytes.
+    let here = listed_here(&mut tables_named_to(&[3; 12]));
+    assert_eq!(here.split("; ").count(), 12, "{here}");
+    assert!(!here.contains("more)"), "{here}");
+    let here = listed_here(&mut tables_named_to(&[3; 13]));
+    assert_eq!(here.split("; ").count(), 12, "{here}");
+    assert!(here.ends_with("t11(kwh) (+1 more)"), "{here}");
+}
+
 #[test]
 fn an_unknown_column_of_a_helper_view_lists_its_columns() {
     // #27, REQ-18: a helper view is a table to the agent, and its columns are the catalog's

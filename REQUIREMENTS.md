@@ -620,6 +620,9 @@ error that can have one.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.
+- `the_list_a_hint_gives_is_held_to_1024_bytes_and_12_tables` — `(+N more)` within the 1,024
+  bytes, to the byte: thirteen tables that took 1,034 take exactly 1,024, and a byte more in a
+  name keeps to it; 12 tables are named and a 13th counted.
 - `a_hosts_sql_error_gives_the_columns_and_sends_its_agent_to_no_tool` — these hints name no
   tool, so a host whose agent has no `describe` is not sent to one.
 - `a_correct_query_carries_no_hint` — a success is never padded.

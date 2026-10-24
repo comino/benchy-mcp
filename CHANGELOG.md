@@ -38,9 +38,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   is now told that `r` is `readings`, with its columns, and so is a column of a view, a CTE or a
   subquery. Helper views and the agent's own tables are listed like loaded ones; an alias or a
   CTE named like a table on the bench is not taken for that table, so `SELECT meters.power_kw
-  FROM rooms AS meters` is told the columns of `rooms` alone. The list is held to 1,024 bytes: a
-  table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint then names
-  `DESCRIBE <table>`. These hints name no tool, so a host whose agent has no
+  FROM rooms AS meters` is told the columns of `rooms` alone. The list is held to 1,024 bytes,
+  `(+N more)` included: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and
+  the hint then names `DESCRIBE <table>`. These hints name no tool, so a host whose agent has no
   `describe` is not sent to one; there is no protocol change. The columns come from what the
   attach kept, or a `SELECT *` prepared and not run, and a failing query costs what it did on a
   loaded table (docs/PERFORMANCE.md).
