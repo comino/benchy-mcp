@@ -3303,6 +3303,67 @@ fn an_attach_past_a_limit_names_it_in_its_detail() {
 }
 
 #[test]
+fn a_table_of_one_attach_is_told_what_the_tables_before_it_left() {
+    // The loaders of one attach each hold their table to what the budget had left before the
+    // request, since they run side by side; one that stops there is told, in its detail and its
+    // message, what the tables before it in the request left, which is what it would have been
+    // held to attached after them: the bound a host retries against.
+    let dir = unique("host-limit-in-order");
+    let rows =
+        |n: i64, tag: &str| arrows(&dir.join(format!("{tag}.arrows")), &readings(n, tag), true);
+    let (mut h, r) = hello_v3(
+        &[],
+        json!({"limits": {"attach_rows": 100, "session_rows": 8}}),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let r = attach_many(&mut h, &[("a", &rows(5, "five")), ("b", &rows(9, "nine"))]);
+    let answers = each(&r);
+    assert_eq!(answers[0]["rows"], 5, "{r}");
+    let e = &answers[1]["error"];
+    assert_eq!(e["code"], "E_LIMIT", "{r}");
+    assert_eq!(
+        e["detail"],
+        json!({"limit": "session_rows", "value": 3}),
+        "what `a` left, not the 8 before the request: {r}"
+    );
+    let said = e["message"].as_str().unwrap();
+    assert!(
+        said.contains("3 rows of its budget left after the tables before it"),
+        "{said}"
+    );
+    assert_eq!(h.call("describe", json!({}))["budget"]["rows_left"], 3);
+
+    // Bytes: a file the loader refuses for passing what the budget had left before the request.
+    let small = rows(5, "small");
+    let big = rows(100, "big");
+    let (s, b) = (
+        std::fs::metadata(&small).unwrap().len(),
+        std::fs::metadata(&big).unwrap().len(),
+    );
+    assert!(s < b - 1, "{s} {b}");
+    let (mut h, r) = hello_v3(&[], json!({"limits": {"session_bytes": b - 1}}));
+    assert_eq!(r["ok"], true, "{r}");
+    let r = attach_many(&mut h, &[("a", &small), ("b", &big)]);
+    let answers = each(&r);
+    assert_eq!(answers[0]["ok"], true, "{r}");
+    let e = &answers[1]["error"];
+    assert_eq!(
+        e["detail"],
+        json!({"limit": "session_bytes", "value": b - 1 - s}),
+        "{r}"
+    );
+    let said = e["message"].as_str().unwrap();
+    assert!(
+        said.contains(&format!(
+            "{} bytes of its budget left after the tables before it",
+            b - 1 - s
+        )),
+        "{said}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_load_past_its_timeout_says_why_in_its_detail() {
     // A writer that never closes its end: the load is stopped at --load-timeout, and nothing
     // changed.

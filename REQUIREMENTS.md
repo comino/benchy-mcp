@@ -768,6 +768,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `an_attach_past_a_limit_names_it_in_its_detail` — `E_LIMIT`'s `detail.limit` names the limit
   as `hello` does, for rows, bytes, a file, a stream and the table count, and `value` the bound
   it was held to.
+- `a_table_of_one_attach_is_told_what_the_tables_before_it_left` — one whose loader stopped it at
+  what the budget had left before the request is told, in `value` and its message, what the
+  tables before it left: with `session_rows: 8`, 5 rows then 9 tell the second 3, not 8; and in
+  bytes.
 - `a_load_past_its_timeout_says_why_in_its_detail` — an attach past `--load-timeout` is
   `E_DEADLINE` with `reason: load_timeout` and nothing lost.
 - `a_page_says_the_sql_of_its_result` — `page` returns the agent's own statement of its result,

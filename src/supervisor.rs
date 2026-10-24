@@ -1411,6 +1411,7 @@ impl Supervisor {
                 let bytes = measured.unwrap_or(done.fetched_bytes);
                 self.store_output(&job, done)
                     .map(|stored| (stored, rows, bytes))
+                    .map_err(|e| room.restate(e))
             });
             let _ = std::fs::remove_dir_all(job.stage());
             let admitted =
@@ -2269,6 +2270,34 @@ impl Room {
         self.bytes_left -= bytes;
         self.names.insert(name.to_string());
         Ok(())
+    }
+
+    /// `e` restated for where the table stands in its request. Its loader held it to what the
+    /// budget had left before the request, since the loaders of one attach run side by side; a
+    /// table it stopped there is past what the tables before it left too, which is less, and is
+    /// the bound it would have been held to attached after them: the one a host retries against.
+    /// `session_rows: 8` and tables of 5 and 9 rows in one request told the second it had 8 rows
+    /// left, not 3.
+    fn restate(&self, e: LoadError) -> LoadError {
+        let Some(detail) = &e.detail else {
+            return e;
+        };
+        let (limit, left, what, is) = match detail["limit"].as_str() {
+            Some("session_rows") => ("session_rows", self.rows_left, "rows", "holds"),
+            Some("session_bytes") => ("session_bytes", self.bytes_left, "bytes", "is"),
+            _ => return e,
+        };
+        match detail["value"].as_u64() {
+            Some(before) if left < before => over_limit(
+                limit,
+                left,
+                format!(
+                    "it {is} more than {before} {what}, and this session has {left} {what} of \
+                     its budget left after the tables before it"
+                ),
+            ),
+            _ => e,
+        }
     }
 }
 
