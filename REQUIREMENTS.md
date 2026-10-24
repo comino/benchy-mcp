@@ -613,6 +613,10 @@ error that can have one.
 - `a_qualified_unknown_column_resolves_its_alias` — `r.temp`, `t.temp` and a CTE's `c.temp`
   are told too, the alias said as its table, that table first.
 - `an_unknown_column_of_a_helper_view_lists_its_columns` — a helper view is listed like a table.
+- `a_name_the_statement_gives_hides_the_table_of_that_name` — an alias, a subquery's or a
+  column's, named like a table is not read where it is given or where it qualifies a column, and
+  a CTE's name not outside its own body (nor in it, `RECURSIVE`): `meters.power_kw FROM rooms AS
+  meters` is told `rooms` alone.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.

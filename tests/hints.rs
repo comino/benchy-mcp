@@ -476,6 +476,76 @@ fn a_qualified_unknown_column_resolves_its_alias() {
 }
 
 #[test]
+fn a_name_the_statement_gives_hides_the_table_of_that_name() {
+    // #27, REQ-11's "and of no others": an alias or a CTE named like a table on the bench is not
+    // that table. `FROM rooms AS meters` reads `rooms` alone, and its `meters.power_kw` is
+    // `rooms`'s; the hint listed `meters` first, as the table qualified, which the statement does
+    // not read.
+    let mut ws = bench_with_tables();
+    for (sql, want) in [
+        (
+            "SELECT meters.power_kw FROM rooms AS meters",
+            "`meters` is `rooms`. The tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "SELECT meters.power_kw FROM rooms meters",
+            "`meters` is `rooms`. The tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "SELECT power_kw FROM rooms AS meters",
+            "That column is not in the tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "WITH meters AS (SELECT * FROM rooms) SELECT meters.power_kw FROM meters",
+            "`meters` is a subquery or CTE of the statement. The tables the statement reads: \
+             rooms(meter, room).",
+        ),
+        (
+            "WITH meters AS (SELECT * FROM rooms) SELECT power_kw FROM meters",
+            "That column is not in the tables the statement reads: rooms(meter, room).",
+        ),
+        // In its own body a CTE's name is the table's.
+        (
+            "WITH meters AS (SELECT meter FROM meters) SELECT power_kw FROM meters",
+            "That column is not in the tables the statement reads: \
+             meters(observed_at, meter, power_kw).",
+        ),
+        // A recursive CTE's name is the CTE in its body too.
+        (
+            "WITH RECURSIVE meters AS (SELECT meter FROM rooms UNION ALL \
+             SELECT meter FROM meters WHERE false) SELECT power_kw FROM meters",
+            "That column is not in the tables the statement reads: rooms(meter, room).",
+        ),
+        // A subquery's alias, and a column's.
+        (
+            "SELECT meters.power_kw FROM (SELECT * FROM rooms) meters",
+            "The tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "SELECT meter AS rooms, temp FROM meters",
+            "That column is not in the tables the statement reads: \
+             meters(observed_at, meter, power_kw).",
+        ),
+        // Where the statement reads the table as well, under a name of its own, it is listed,
+        // and an alias called like it is still the table it stands for.
+        (
+            "SELECT m.temp FROM meters m JOIN rooms AS meters USING (meter)",
+            "`m` is `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw); rooms(meter, room).",
+        ),
+        (
+            "SELECT meters.temp FROM meters m JOIN rooms meters USING (meter)",
+            "`meters` is `rooms`. The tables the statement reads: \
+             rooms(meter, room); meters(observed_at, meter, power_kw).",
+        ),
+    ] {
+        let e = err_for(&mut ws, sql);
+        let h = hint_of(&e);
+        assert!(h.contains(want), "{sql}\n  wanted {want:?} in: {e}");
+    }
+}
+
+#[test]
 fn an_unknown_table_lists_the_columns_of_what_is_here() {
     // #27: the tables it could have meant, with their columns, so the next statement can be
     // right; and no `describe`, which a host's agent may not have.

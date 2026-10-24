@@ -379,13 +379,10 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
     };
     let statement = cx.statement.unwrap_or("");
     let mut read = tables_read(statement, catalogue.names);
-    let table = read
-        .iter()
-        .position(|t| t.eq_ignore_ascii_case(q))
-        .or_else(|| {
-            let t = aliased(statement, q, &read)?;
-            read.iter().position(|r| *r == t)
-        });
+    // The alias first: `FROM meters m JOIN rooms meters` qualifies `rooms`'s columns `meters.`.
+    let table = aliased(statement, q, &read)
+        .and_then(|t| read.iter().position(|r| *r == t))
+        .or_else(|| read.iter().position(|t| t.eq_ignore_ascii_case(q)));
     let said = match table {
         Some(i) => {
             // what the agent qualified the column with first: it is what it was looking at
@@ -456,16 +453,79 @@ fn words(statement: &str) -> Vec<String> {
 /// spells them. A name is matched as DuckDB matches one, ASCII case folded. A column of the same
 /// name as a table counts too: the hint then lists a table more, which costs bytes and misleads
 /// no one.
+///
+/// A name the statement gives is not the table of that name. An alias, `rooms AS meters` or
+/// `rooms meters`, a subquery's or a column's, is not read where it is given, nor where it
+/// qualifies a column, `meters.power_kw`: that is `rooms`'s, and listing `meters` first, as the
+/// table qualified, sent the agent to a table the statement does not read. A CTE's name is not
+/// read anywhere but in its own body, where DuckDB 1.5.5 binds it to the table, unless the CTE
+/// is `RECURSIVE` (`a_name_the_statement_gives_hides_the_table_of_that_name`).
 fn tables_read<'n>(statement: &str, names: &'n [String]) -> Vec<&'n str> {
+    let w = words(statement);
+    let is = |i: usize, s: &str| w.get(i).is_some_and(|x| x.eq_ignore_ascii_case(s));
+    let table = |x: &str| names.iter().find(|n| n.eq_ignore_ascii_case(x));
+    let given =
+        |i: usize| i > 0 && (is(i - 1, "as") || w[i - 1] == ")" || table(&w[i - 1]).is_some());
+    let ctes: Vec<(&str, std::ops::Range<usize>)> = (0..w.len())
+        .filter_map(|i| Some((w[i].as_str(), cte(&w, i)?)))
+        .collect();
+    let recursive = w.iter().any(|x| x.eq_ignore_ascii_case("recursive"));
     let mut read: Vec<&str> = Vec::new();
-    for w in words(statement) {
-        if let Some(n) = names.iter().find(|n| n.eq_ignore_ascii_case(&w)) {
-            if !read.contains(&n.as_str()) {
-                read.push(n);
-            }
+    for (i, x) in w.iter().enumerate() {
+        let Some(n) = table(x) else {
+            continue;
+        };
+        let a_cte = ctes
+            .iter()
+            .any(|(c, body)| c.eq_ignore_ascii_case(x) && (recursive || !body.contains(&i)));
+        let an_alias = is(i + 1, ".")
+            && (0..w.len()).any(|j| j != i && given(j) && w[j].eq_ignore_ascii_case(x));
+        if given(i) || a_cte || an_alias {
+            continue;
+        }
+        if !read.contains(&n.as_str()) {
+            read.push(n);
         }
     }
     read
+}
+
+/// The words of the body of the CTE that `w[i]` names, `name AS [NOT] [MATERIALIZED] (…)` or
+/// `name(a, b) AS (…)`, from its `(` to its `)`.
+fn cte(w: &[String], i: usize) -> Option<std::ops::Range<usize>> {
+    let mut j = i + 1;
+    if w.get(j)? == "(" {
+        j = closing(w, j)? + 1;
+    }
+    if !w.get(j)?.eq_ignore_ascii_case("as") {
+        return None;
+    }
+    j += 1;
+    for word in ["not", "materialized"] {
+        if w.get(j)?.eq_ignore_ascii_case(word) {
+            j += 1;
+        }
+    }
+    (w.get(j)? == "(").then_some(())?;
+    Some(j..closing(w, j)?)
+}
+
+/// Where the `(` at `w[open]` is closed.
+fn closing(w: &[String], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, x) in w.iter().enumerate().skip(open) {
+        match x.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The table of `read` that `alias` stands for in `statement`: `readings r` or `readings AS r`,
