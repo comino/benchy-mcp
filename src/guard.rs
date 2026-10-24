@@ -479,7 +479,8 @@ impl Calls {
 
     /// The refusals for the engine `con` belongs to. Read before the agent has made anything,
     /// and only on an engine [`TABLE_FUNCTIONS`] was not measured on: listing
-    /// `duckdb_functions()` costs about 0.19 G instructions (`Workspace::attach_all`).
+    /// `duckdb_functions()` costs about 0.1 G instructions on DuckDB 1.5.5 (97 M for its
+    /// built-ins, measured for #63; `Workspace::attach_all`).
     ///
     /// # Safety
     /// `con` must be a valid connection, not used concurrently.

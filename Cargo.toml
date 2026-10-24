@@ -39,7 +39,7 @@ rmcp = { version = "3.5.0", default-features = false, features = ["server", "tra
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53.1", default-features = false, features = ["rt", "io-std"] }
-toml = "0.8"
+toml = "1.1"
 # The ClickHouse source's HTTP client (src/sources/clickhouse.rs): small, blocking, and rustls
 # with ring for https, so no OpenSSL and no CMake on any platform the release builds. Its own
 # decompression is left off: src/decompress.rs decodes a body, as far as the reader's cap pulls it.

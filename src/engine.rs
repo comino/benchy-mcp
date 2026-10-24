@@ -261,27 +261,34 @@ pub fn run() -> ! {
                             let left = max_bytes.saturating_sub(
                                 crate::result::wire_len(&head) + crate::result::wire_len("\n\n"),
                             );
-                            let rest = crate::result::render_batch(
+                            let (rest, shown) = crate::result::render_batch_shown(
                                 ran,
                                 &Caps {
                                     max_bytes: left,
                                     ..caps.clone()
                                 },
                             );
+                            // What each result's part of the text shows, as a query reply says
+                            // it, so a host reads the results without the text (#26).
                             Reply {
                                 result_ids: ran.iter().map(|r| r.result_id.clone()).collect(),
+                                results: shown,
+                                statement: e.statement(),
                                 ..Reply::fail(code, format!("{head}\n\n{rest}"))
                             }
                         }
                         // An error is part of the response too, and the cap is a promise about
                         // the response.
-                        Err(e) => Reply::fail(
-                            match e {
-                                crate::workspace::WorkError::Deadline { .. } => "E_DEADLINE",
-                                _ => "E_SQL",
-                            },
-                            crate::result::fit(&e.to_string(), max_bytes),
-                        ),
+                        Err(e) => Reply {
+                            statement: e.statement(),
+                            ..Reply::fail(
+                                match e {
+                                    crate::workspace::WorkError::Deadline { .. } => "E_DEADLINE",
+                                    _ => "E_SQL",
+                                },
+                                crate::result::fit(&e.to_string(), max_bytes),
+                            )
+                        },
                     };
                     // `a_pivot_type_that_cannot_be_dropped_spoils_the_engine`
                     Reply {

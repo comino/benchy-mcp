@@ -589,6 +589,11 @@ fn a_host_lowers_the_loader_ceiling_and_cannot_raise_it() {
     assert_eq!(r["limits"]["loader_memory_ceiling"], 90 * MB, "{r}");
     let r = attach(&mut h, "wide", &wide);
     assert_eq!(code(&r), "E_LIMIT", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"limit": "loader_memory_ceiling", "value": 90 * MB}),
+        "{r}"
+    );
     let said = r["error"]["message"].as_str().unwrap_or("");
     assert!(
         said.contains("passed the loader memory ceiling") && said.contains("against 90 MB"),
@@ -1048,6 +1053,11 @@ fn a_dictionary_encoded_attachment_is_unpacked_within_the_bound() {
     assert!(std::fs::metadata(&file).unwrap().len() < 1024 * 1024);
     let r = attach(&mut h, "readings", &file);
     assert_eq!(code(&r), "E_LIMIT", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"limit": "attach_bytes", "value": 268_435_456u64}),
+        "what it decodes to is held to attach_bytes, not attach_rows: {r}"
+    );
     let message = r["error"]["message"].as_str().unwrap();
     assert!(message.contains("unpack"), "{message}");
     assert!(
@@ -2554,6 +2564,80 @@ const HOST_HELPERS: &str = "-- Rows per meter.\n\
     -- Twice a number.\n\
     CREATE MACRO twice(x) AS 2 * x;\n";
 
+/// #60: a waiting view's columns are in its `describe` line only once its table is attached and
+/// it is made, so a line that passes 320 bytes only then is told to the operator then, once.
+#[test]
+fn a_waiting_view_whose_line_is_cut_once_made_is_told_to_the_operator() {
+    let dir = unique("host-helper-cut");
+    let cols: Vec<String> = (1..=12)
+        .map(|i| format!("a_rather_long_column_{i:02}"))
+        .collect();
+    let select: Vec<String> = cols.iter().map(|c| format!("meter AS {c}")).collect();
+    // Beside it, a macro whose line is cut from the start and a view that still waits after the
+    // attach, whose line is cut too: each told at startup, and not again at the attach.
+    let far = "readings_of_the_weather_station_on_the_roof_of_the_lab_building";
+    let later = format!(
+        "  later — view: {}… [+40 bytes] (works once `{far}` is on the bench)",
+        "x".repeat(200)
+    );
+    assert!(later.len() > 320, "{}", later.len());
+    let cfg = helpers_config(
+        &dir,
+        &format!(
+            "-- Wide.\nCREATE VIEW wide AS SELECT {} FROM readings;\n\
+             -- Many.\nCREATE MACRO many({}) AS 1;\n\
+             -- {}\nCREATE VIEW later AS SELECT * FROM {far};\n",
+            select.join(", "),
+            cols.join(", "),
+            "x".repeat(240),
+        ),
+    );
+    let line = format!("  wide ({}) — view: Wide.", cols.join(", "));
+    assert!(line.len() > 320, "{}", line.len());
+    let log = dir.join("stderr.log");
+    let mut h = Host::spawn_with(
+        &["--config", cfg.to_str().unwrap()],
+        Stdio::from(std::fs::File::create(&log).unwrap()),
+        false,
+    );
+    let hello = h.call("hello", json!({"protocol": [1]}));
+    assert_eq!(hello["ok"], true, "{hello}");
+    let said = || std::fs::read_to_string(&log).unwrap();
+    // Waiting, its line is its name, its comment and what it waits for: nothing is cut.
+    assert!(said().contains("helper `wide` waits"), "{}", said());
+    assert!(!said().contains("helper `wide`'s"), "{}", said());
+    for other in ["helper `many`'s line", "helper `later`'s line"] {
+        assert_eq!(said().matches(other).count(), 1, "{}", said());
+    }
+    let r = attach(
+        &mut h,
+        "readings",
+        &arrows(&dir.join("a.arrows"), &readings(4, "a"), true),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let told = format!(
+        "helper `wide`'s line in `describe`, its signature, kind and comment, is {} bytes; \
+         `describe` shows the first 320 and marks the other {} cut",
+        line.len(),
+        line.len() - 320
+    );
+    assert_eq!(said().matches(&told).count(), 1, "{}", said());
+    for other in ["helper `many`'s line", "helper `later`'s line"] {
+        assert_eq!(said().matches(other).count(), 1, "{}", said());
+    }
+    let d = h.call("describe", json!({}));
+    assert!(
+        d["text"].as_str().unwrap().contains(&format!(
+            "{}… [+{} bytes]",
+            &line[..320],
+            line.len() - 320
+        )),
+        "{d}"
+    );
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// `describe` says what the helper waits for and calling it says so; detached again, the view
 /// says which table it misses. A macro over a missing table reads a table, and is refused.
 #[test]
@@ -2994,4 +3078,247 @@ fn result_ids_continue_across_a_rebuild() {
         let r = h.call("page", json!({ "result_id": id }));
         assert_eq!(code(&r), "E_NO_RESULT", "{id}: {r}");
     }
+}
+
+// #26: `error.message` is for the model, `error.detail` for the host, which then never parses
+// prose for a fact. Each test below fails with its field removed.
+
+#[test]
+fn a_version_refusal_lists_the_versions_in_its_detail() {
+    let mut h = Host::spawn(&[]);
+    let r = h.call("hello", json!({"protocol": [9]}));
+    assert_eq!(code(&r), "E_VERSION", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"protocols": [1, 2, 3, 4, 5, 6, 7]}),
+        "{r}"
+    );
+    assert!(h.ended(), "the session ended");
+}
+
+#[test]
+fn a_failed_batch_says_what_ran_in_its_detail() {
+    // A batch that fails at statement 2 has run statement 1, whose result is retained: the host
+    // is given its id and what it holds as a query reply gives them, not only in the text.
+    let mut h = Host::start(&["--deadline", "1"]);
+    let r = h.call(
+        "query",
+        json!({"sql": "SELECT 42 AS answer; SELECT nope FROM range(1)"}),
+    );
+    assert_eq!(code(&r), "E_SQL", "{r}");
+    let detail = &r["error"]["detail"];
+    assert_eq!(detail["statement"], 2, "{r}");
+    let ids = detail["result_ids"].as_array().expect("result_ids");
+    assert_eq!(ids.len(), 1, "{r}");
+    assert_eq!(
+        detail["results"],
+        json!([{"result_id": ids[0], "rows": 1, "complete": true, "shown": 1,
+                "truncated": false}]),
+        "{r}"
+    );
+    let said = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        said.starts_with("statement 2: ")
+            && said.contains("Statement 1 ran before it")
+            && said.contains(ids[0].as_str().unwrap()),
+        "the message keeps them, for the model and for MCP clients: {said}"
+    );
+    let page = h.call("page", json!({"result_id": ids[0]}));
+    assert!(page["text"].as_str().unwrap_or("").contains("42"), "{page}");
+
+    // Nothing ran before the first statement: which one failed is still a fact.
+    let r = h.call("query", json!({"sql": "SELECT nope FROM range(1)"}));
+    assert_eq!(code(&r), "E_SQL", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"statement": 1, "result_ids": [], "results": []}),
+        "{r}"
+    );
+    // A batch that does not parse failed at no statement, and has nothing more to say.
+    let r = h.call("query", json!({"sql": "SELEC 1"}));
+    assert_eq!(code(&r), "E_SQL", "{r}");
+    assert!(r["error"].get("detail").is_none(), "{r}");
+
+    // Past the deadline: why, that nothing was lost, and what ran before it.
+    let r = h.call(
+        "query",
+        json!({"sql": "SELECT 7 AS n; SELECT count(*) FROM range(100000000000) a"}),
+    );
+    assert_eq!(code(&r), "E_DEADLINE", "{r}");
+    let detail = &r["error"]["detail"];
+    assert_eq!(detail["reason"], "deadline", "{r}");
+    assert_eq!(detail["lost"], json!([]), "the bench is intact: {r}");
+    assert_eq!(detail["statement"], 2, "{r}");
+    assert_eq!(
+        detail["result_ids"].as_array().map(Vec::len),
+        Some(1),
+        "{r}"
+    );
+}
+
+/// A query the hard deadline kills, and not the memory ceiling: the engine is stopped, so it
+/// neither answers nor grows.
+#[cfg(target_os = "linux")]
+fn stopped_engine_query(h: &mut Host) -> Value {
+    let engine = common::engine_of(h.child.id()) as i32;
+    assert_eq!(unsafe { libc::kill(engine, libc::SIGSTOP) }, 0);
+    let r = h.call("query", json!({"sql": "SELECT 1"}));
+    unsafe { libc::kill(engine, libc::SIGKILL) };
+    r
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_rebuild_says_in_its_detail_why_and_what_was_lost() {
+    // REQ-8: what killed the engine, as a word a host can switch on, and exactly what went with
+    // it: the retained results and the agent's own tables. Every attached table is back.
+    const MB: u64 = 1_000_000;
+    let lost = json!(["results", "agent_tables"]);
+    let dir = unique("host-rebuild-detail");
+    let mut h = Host::start(&["--deadline", "1", "--hard-grace", "1"]);
+    attach(
+        &mut h,
+        "readings",
+        &arrows(&dir.join("a.arrows"), &readings(4, "a"), true),
+    );
+    let r = stopped_engine_query(&mut h);
+    assert_eq!(code(&r), "E_REBUILT", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"reason": "hard_deadline", "lost": lost}),
+        "{r}"
+    );
+    let said = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        said.contains("results from before it are gone"),
+        "the model is told its result ids went too: {said}"
+    );
+
+    // An engine that died between calls.
+    let engine = common::engine_of(h.child.id()) as i32;
+    assert_eq!(unsafe { libc::kill(engine, libc::SIGKILL) }, 0);
+    std::thread::sleep(Duration::from_millis(200));
+    let r = h.call("query", json!({"sql": "SELECT 1"}));
+    assert_eq!(code(&r), "E_REBUILT", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"reason": "engine_died", "lost": lost}),
+        "{r}"
+    );
+    let r = h.call(
+        "query",
+        json!({"sql": "SELECT count(*) + 800 AS n FROM readings"}),
+    );
+    assert!(r["text"].as_str().unwrap_or("").contains("804"), "{r}");
+
+    // Past the memory ceiling: what it held, against what.
+    let mut h = Host::start(&[
+        "--memory",
+        "64MB",
+        "--memory-ceiling",
+        "128MB",
+        "--deadline",
+        "60",
+    ]);
+    let mut ctes = vec!["l0 AS (SELECT 1 m)".to_string()];
+    for i in 1..18 {
+        ctes.push(format!("l{i} AS (SELECT MAP([m],[m]) m FROM l{})", i - 1));
+    }
+    let sql = format!("WITH {} SELECT m FROM l17", ctes.join(", "));
+    let r = h.call("query", json!({ "sql": sql }));
+    assert_eq!(code(&r), "E_REBUILT", "{r}");
+    let detail = &r["error"]["detail"];
+    assert_eq!(detail["reason"], "memory_ceiling", "{r}");
+    assert_eq!(detail["lost"], lost, "{r}");
+    assert_eq!(detail["ceiling"], 128 * MB, "{r}");
+    assert!(detail["held"].as_u64().is_some_and(|b| b > 128 * MB), "{r}");
+    let said = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        !said.contains("ask the operator") && said.contains("say so"),
+        "no advice the agent cannot act on: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_attach_past_a_limit_names_it_in_its_detail() {
+    // Which limit, by the name `hello` reports it under, and the value the table was held to:
+    // the limit's own, or what the session's budget had left.
+    let dir = unique("host-limit-detail");
+    let rows =
+        |n: i64, tag: &str| arrows(&dir.join(format!("{tag}.arrows")), &readings(n, tag), true);
+    let (mut h, r) = hello_v3(
+        &[],
+        json!({"limits": {"attach_rows": 5, "session_rows": 8, "attachments": 2}}),
+    );
+    assert_eq!(r["ok"], true, "{r}");
+    let limit = |r: &Value| r["error"]["detail"].clone();
+    let r = attach(&mut h, "a", &rows(6, "six"));
+    assert_eq!(code(&r), "E_LIMIT", "{r}");
+    assert_eq!(
+        limit(&r),
+        json!({"limit": "attach_rows", "value": 5}),
+        "{r}"
+    );
+    assert_eq!(attach(&mut h, "a", &rows(5, "five"))["ok"], true);
+    let r = attach(&mut h, "b", &rows(4, "four"));
+    assert_eq!(
+        limit(&r),
+        json!({"limit": "session_rows", "value": 3}),
+        "what the budget had left: {r}"
+    );
+    assert_eq!(attach(&mut h, "b", &rows(3, "three"))["ok"], true);
+    let r = attach(&mut h, "c", &rows(0, "none"));
+    assert_eq!(
+        limit(&r),
+        json!({"limit": "attachments", "value": 2}),
+        "{r}"
+    );
+
+    // Bytes: one attachment's, of a file and of a stream; and what the budget has left.
+    let big = rows(100, "hundred");
+    let size = std::fs::metadata(&big).unwrap().len();
+    for limit_name in ["attach_bytes", "session_bytes"] {
+        let mut lowered = json!({});
+        lowered[limit_name] = (size - 1).into();
+        let (mut h, r) = hello_v3(&[], json!({ "limits": lowered }));
+        assert_eq!(r["ok"], true, "{r}");
+        let r = attach(&mut h, "a", &big);
+        assert_eq!(
+            limit(&r),
+            json!({"limit": limit_name, "value": size - 1}),
+            "{r}"
+        );
+        let mut s = common::streamed::Streamer::spawn(&[]);
+        let hello = json!({"protocol": [3], "limits": lowered});
+        assert_eq!(s.call("hello", hello, &[])["ok"], true);
+        let (r, _) = s.attach_stream("a", std::fs::read(&big).unwrap());
+        assert_eq!(
+            limit(&r),
+            json!({"limit": limit_name, "value": size - 1}),
+            "streamed: {r}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_load_past_its_timeout_says_why_in_its_detail() {
+    // A writer that never closes its end: the load is stopped at --load-timeout, and nothing
+    // changed.
+    use std::os::fd::AsRawFd;
+    let mut s = common::streamed::Streamer::start(&["--load-timeout", "1"], &[3]);
+    let (read, write) = common::streamed::pipe();
+    let r = s.call(
+        "attach",
+        json!({"name": "a", "stream": true}),
+        &[read.as_raw_fd()],
+    );
+    drop((read, write));
+    assert_eq!(code(&r), "E_DEADLINE", "{r}");
+    assert_eq!(
+        r["error"]["detail"],
+        json!({"reason": "load_timeout", "lost": []}),
+        "{r}"
+    );
 }

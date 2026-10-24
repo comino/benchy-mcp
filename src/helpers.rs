@@ -56,8 +56,8 @@ pub struct Def {
     pub kind: Kind,
     /// The statement, without its `;`.
     pub sql: String,
-    /// The `--` lines directly above it, with no blank line between, joined into one line and cut
-    /// at [`COMMENT_BYTES`].
+    /// The `--` lines directly above it, with no blank line between, joined into one line, whole:
+    /// [`Shown`] cuts it at [`COMMENT_BYTES`], and [`cuts`] tells the operator what that cut.
     pub comment: Option<String>,
 }
 
@@ -100,6 +100,16 @@ impl Built {
 
 /// The longest comment `describe` carries for one helper.
 const COMMENT_BYTES: usize = 200;
+
+/// The longest line `describe` gives one helper, the cut mark aside: `  `, the signature, ` — `,
+/// the kind, `: ` and the comment, and for a waiting view what it waits for ([`line`]). Without
+/// the signature, a line is at most 2 + 5 + 11 (`table macro`) + 2 + 218 (a comment cut at
+/// [`COMMENT_BYTES`], and its mark of up to 18 bytes) = 238 bytes, so a signature of up to 82
+/// bytes keeps a whole comment: `dewpoint(t, rh)` is 15, `hourly (meter, hour, mean_kw, peak_kw,
+/// readings)` 51. Past that, a view of many columns or a macro of many parameters gives up the
+/// end of its comment, which keeps one helper from taking the room of several in `describe`'s
+/// byte budget; the operator is told which ([`cuts`]).
+const LINE_BYTES: usize = 320;
 
 /// The operator's helpers SQL, split into its statements, each checked to be `CREATE VIEW
 /// <name>` or `CREATE MACRO <name>` (or `CREATE FUNCTION`, DuckDB's other name for a macro), with
@@ -287,7 +297,7 @@ fn comment_above(text: &str) -> Option<String> {
         .filter(|l| !l.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    (!joined.is_empty()).then(|| crate::result::cut(joined, COMMENT_BYTES))
+    (!joined.is_empty()).then_some(joined)
 }
 
 /// `text` from its first word on: leading whitespace and comments gone.
@@ -624,7 +634,10 @@ fn build_in(
                 Kind::View => "view".into(),
                 Kind::Macro => "macro".into(),
             },
-            comment: d.comment.clone(),
+            comment: d
+                .comment
+                .clone()
+                .map(|c| crate::result::cut(c, COMMENT_BYTES)),
             waits: wait,
         });
     }
@@ -657,7 +670,8 @@ fn build_in(
     }
     // One listing of functions, DuckDB's built-ins with the helpers': `duckdb_functions()` builds
     // a row for each built-in before any filter applies, so each listing of it costs the same,
-    // about 115 M instructions. So the built-ins are read after the helpers are made, not before:
+    // about 100–115 M instructions on DuckDB 1.5.5 (97 M measured for #63: what the engine's own
+    // listing of the built-ins cost, before it was folded into the agent's). So the built-ins are read after the helpers are made, not before:
     // a helper named like one has stood in for it in the helpers after it, but it stops startup
     // all the same.
     let mut functions = Vec::new();
@@ -1184,6 +1198,79 @@ fn reads_a_table(name: &str, how: &str) -> String {
     )
 }
 
+/// Helper `s`'s line in `describe`, before it is cut at [`LINE_BYTES`].
+fn line(s: &Shown) -> String {
+    let mut line = format!("  {} — {}", s.signature, s.what);
+    if let Some(c) = &s.comment {
+        line.push_str(": ");
+        line.push_str(c);
+    }
+    if let Some(w) = &s.waits {
+        line.push_str(&format!(" (works once `{w}` is on the bench)"));
+    }
+    line
+}
+
+/// #60, REQ-18 `a_cut_helper_comment_or_line_is_told_to_the_operator`: for the operator's log,
+/// each helper of `shown` whose comment (as `defs` holds it, whole) or whole line `describe` cuts,
+/// and by how many bytes. `describe` marks a cut for the agent (`… [+51 bytes]`), but the agent
+/// never sees what was cut, and the operator who wrote it would otherwise learn of it only from
+/// the agent's answers. Told, not refused: a long comment reaches nothing it should not, and a
+/// deployment that started before would stop on the upgrade.
+pub fn cuts(defs: &[Def], shown: &[Shown]) -> Vec<String> {
+    let mut out = Vec::new();
+    for s in shown {
+        let whole = defs
+            .iter()
+            .find(|d| d.name == s.name)
+            .and_then(|d| d.comment.as_deref());
+        if let Some(c) = whole.filter(|c| c.len() > COMMENT_BYTES) {
+            let k = kept(c, COMMENT_BYTES);
+            out.push(format!(
+                "helper `{}`'s comment is {} bytes; `describe` shows the first {k} and marks the \
+                 other {} cut. A comment is cut at {COMMENT_BYTES} bytes: shorten it to keep all \
+                 of it.",
+                s.name,
+                c.len(),
+                c.len() - k
+            ));
+        }
+        out.extend(line_cut(s));
+    }
+    out
+}
+
+/// What [`cuts`] says of helper `s`'s whole line, if `describe` cuts it. Apart, for a waiting
+/// view: its columns are in its line only once its table is attached and it is made.
+pub fn line_cut(s: &Shown) -> Option<String> {
+    let l = line(s);
+    if l.len() <= LINE_BYTES {
+        return None;
+    }
+    let k = kept(&l, LINE_BYTES);
+    let parts = if s.waits.is_some() {
+        "signature, kind, comment and what it waits for"
+    } else {
+        "signature, kind and comment"
+    };
+    Some(format!(
+        "helper `{}`'s line in `describe`, its {parts}, is {} bytes; \
+         `describe` shows the first {k} and marks the other {} cut. A line is cut at \
+         {LINE_BYTES} bytes: shorten the comment, or the parameters' or columns' names.",
+        s.name,
+        l.len(),
+        l.len() - k
+    ))
+}
+
+/// How many of `s`'s bytes `crate::result::cut` keeps at `max`: up to the start of a character.
+fn kept(s: &str, max: usize) -> usize {
+    (0..=max.min(s.len()))
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0)
+}
+
 /// The helpers' part of `describe`: one line each, as many as fit in `room` bytes as the client
 /// gets them, and a line saying how many did not.
 pub fn render(shown: &[Shown], room: usize) -> String {
@@ -1194,15 +1281,7 @@ pub fn render(shown: &[Shown], room: usize) -> String {
     let mut out = head.to_string();
     let mut used = crate::result::wire_len(head);
     for (i, s) in shown.iter().enumerate() {
-        let mut line = format!("  {} — {}", s.signature, s.what);
-        if let Some(c) = &s.comment {
-            line.push_str(": ");
-            line.push_str(c);
-        }
-        if let Some(w) = &s.waits {
-            line.push_str(&format!(" (works once `{w}` is on the bench)"));
-        }
-        let line = crate::result::cut(line, 320) + "\n";
+        let line = crate::result::cut(line(s), LINE_BYTES) + "\n";
         let left = shown.len() - i;
         let tail = format!("  … {left} more helper(s) not shown.\n");
         if used + crate::result::wire_len(&line) + crate::result::wire_len(&tail) > room {
@@ -1237,6 +1316,50 @@ mod tests {
         );
         assert!(pieces[1].text.ends_with("FROM t"), "{}", pieces[1].text);
         assert!(split("CREATE MACRO a() AS 'open").is_err());
+    }
+
+    #[test]
+    fn a_cut_is_told_from_the_first_byte_past_a_cap() {
+        let shown = |name: &str, signature: &str, comment: &str| Shown {
+            name: name.into(),
+            signature: signature.into(),
+            what: "macro".into(),
+            comment: Some(crate::result::cut(comment.into(), COMMENT_BYTES)),
+            waits: None,
+        };
+        let def = |name: &str, comment: &str| Def {
+            name: name.into(),
+            kind: Kind::Macro,
+            sql: String::new(),
+            comment: Some(comment.into()),
+        };
+        // A comment at the cap is whole; one byte more is cut, and so said.
+        let at = "c".repeat(COMMENT_BYTES);
+        let past = "c".repeat(COMMENT_BYTES + 1);
+        assert!(cuts(&[def("f", &at)], &[shown("f", "f()", &at)]).is_empty());
+        let said = cuts(&[def("f", &past)], &[shown("f", "f()", &past)]);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("is 201 bytes; `describe` shows the first 200 and marks the other 1"),
+            "{said:?}"
+        );
+        // A character across the cap is kept whole or not at all, as `describe` cuts it.
+        let wide = format!("{}é", "c".repeat(COMMENT_BYTES - 1));
+        let said = cuts(&[def("f", &wide)], &[shown("f", "f()", &wide)]);
+        assert!(
+            said[0].contains("shows the first 199 and marks the other 2"),
+            "{said:?}"
+        );
+        // A line at the cap is whole; one byte more is cut, and so said.
+        let mut s = shown("f", "", "");
+        s.comment = None;
+        s.signature = "c".repeat(LINE_BYTES - "  ".len() - " — macro".len());
+        assert_eq!(line(&s).len(), LINE_BYTES);
+        assert!(line_cut(&s).is_none());
+        s.signature.push('c');
+        assert!(line_cut(&s)
+            .unwrap()
+            .contains("is 321 bytes; `describe` shows the first 320 and marks the other 1"));
     }
 
     #[test]

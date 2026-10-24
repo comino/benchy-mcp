@@ -186,6 +186,13 @@ def main(binary):
     r = h.call("query", sql="SELECT * FROM read_csv('/etc/passwd')")
     check("the bench stays sealed: file readers are refused",
           r.get("error", {}).get("code") == "E_SQL", r)
+    # The message is for the model; what the host acts on is in `detail`. A batch that fails at
+    # its second statement has run the first, whose result the host can page without the text.
+    r = h.call("query", sql="SELECT 42 AS answer; SELECT nope")
+    detail = r.get("error", {}).get("detail", {})
+    check("a failed batch gives the earlier results in its detail, not only in prose",
+          detail.get("statement") == 2 and len(detail.get("result_ids", [])) == 1
+          and h.call("page", result_id=detail["result_ids"][0]).get("ok") is True, r)
     r = h.call("query", sql="SELECT 1", max_row=5)
     check("a field benchy does not know is an error, not ignored",
           r.get("error", {}).get("code") == "E_REQUEST", r)

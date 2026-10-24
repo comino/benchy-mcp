@@ -66,6 +66,7 @@ impl Redact {
         Fault {
             code: f.code,
             detail: self.apply(&f.detail),
+            ..f
         }
     }
 }

@@ -6,6 +6,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **Dependencies:** tokio 1.53.3 (RUSTSEC-2026-0386: `AsyncFd` constructors were unsound), toml 1.1
+  (TOML 1.1; the config's rules are unchanged: unknown fields are still errors), libc 0.2.190,
+  serde_json 1.0.154.
 - **The load timeout covers handing a loader its job** (#61). The job was written to the
   loader's stdin before the timeout and the memory watch started, so a job larger than the pipe
   holds (64 KiB on Linux), such as an attach stating many series columns, to a loader that did
@@ -32,6 +35,35 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   `describe` is not sent to one; there is no protocol change. The columns come from what the
   attach kept, or a `SELECT *` prepared and not run, and a failing query costs what it did on a
   loaded table (docs/PERFORMANCE.md).
+- **A host's error replies carry `detail`, facts beside the model's message** (#26). A host
+  no longer parses prose: `E_REBUILT` says why the engine went (`reason`: `hard_deadline`,
+  `memory_ceiling`, `engine_died` or `pivot_type`) and what went with it (`lost`: `results`,
+  `agent_tables`); `E_DEADLINE` says `deadline` or `load_timeout`, with nothing lost; a batch
+  that fails at a statement gives that statement and the earlier results' `result_ids` and
+  `results`, in a query reply's shape; `E_LIMIT` names the limit as `hello` does and the value it
+  held the table to; `E_VERSION` lists the versions benchy speaks. docs/HOST-PROTOCOL.md has
+  the table of which code carries what. Additive: every field and message is as before, and no
+  new protocol version, since replies only grow. The model's message after a rebuild now says
+  the earlier results are gone too, and past the memory ceiling no longer tells the agent to ask
+  the operator to start benchy with a larger `--memory-ceiling`, which it cannot do: it is told to
+  use less, or to say that the work needs more.
+- **A helper comment `describe` cuts is told to the operator** (#60). `describe` cuts a helper's
+  comment at 200 bytes and its whole line (signature, kind and comment) at 320, and marked the cut
+  only for the agent, which never sees what was cut. Startup now says on stderr, beside
+  `benchy: N helper(s): …`, which helper is cut and by how many bytes, in `benchy-mcp <dir>` and
+  `benchy-mcp host` alike, and a waiting view whose line passes 320 once its columns are known is
+  told when the attach makes it (`a_cut_helper_comment_or_line_is_told_to_the_operator`). Told,
+  not refused: a long comment reaches nothing it should not, and a deployment that started
+  before still starts. No reply carries it. The README's "SQL helpers" now gives both caps; a
+  signature of up to 82 bytes keeps a whole comment.
+- **DuckDB's built-in function names are read once per engine, in the scan the shadowing check
+  makes anyway** (#63). The first `CREATE MACRO` of an engine listed `duckdb_functions()` twice,
+  once for DuckDB's names and once for the agent's, and each listing builds every built-in's row:
+  it now costs 185 M instructions rather than 282 M (`benchy-mcp host`, medians of seven). Every
+  later `CREATE MACRO` costs what it did, about 137 M, since learning the name the agent made
+  still takes that one scan, and a session's helpers cost what they did at startup: the engine's
+  listing as it attaches their file checks the file, not DuckDB's names. The check is as strict
+  as before; docs/PERFORMANCE.md has the numbers.
 - **Tests that guard what REQUIREMENTS.md cites** (#22). REQ-10's retention limits (2,000 rows,
   1 MiB, the last 32 results) and the 512-byte `max_bytes` floor each have a test that fails if
   the limit moves either way. REQ-10 now says that the row reaching 1 MiB is kept. The retention
