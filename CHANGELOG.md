@@ -26,6 +26,13 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 - **Dependencies:** tokio 1.53.3 (RUSTSEC-2026-0386: `AsyncFd` constructors were unsound), toml 1.1
   (TOML 1.1; the config's rules are unchanged: unknown fields are still errors), libc 0.2.190,
   serde_json 1.0.154.
+- **A table refused in an attach of several is told what the tables before it left.** The
+  loaders of one attach run side by side, so each holds its table to what the session's budget
+  had left before the request, and a table it stopped there was told that: with `session_rows:
+  8`, tables of 5 and 9 rows in one request told the second it had 8 rows left. It is now told 3,
+  in its message and in `detail.value`, which is the bound a host retries against; bytes alike.
+  What is enforced is unchanged: the tables of a request were already held to the budget in
+  request order (`a_table_of_one_attach_is_told_what_the_tables_before_it_left`).
 - **The load timeout covers handing a loader its job** (#61). The job was written to the
   loader's stdin before the timeout and the memory watch started, so a job larger than the pipe
   holds (64 KiB on Linux), such as an attach stating many series columns, to a loader that did
@@ -46,8 +53,10 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   the tables the statement reads, `readings(series_id, t, n)`, and an unknown table the columns
   of what is here. A qualified reference, `SELECT r.temp FROM readings r`, had no hint at all; it
   is now told that `r` is `readings`, with its columns, and so is a column of a view, a CTE or a
-  subquery. Helper views and the agent's own tables are listed like loaded ones. The list is
-  held to 1,024 bytes: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and
+  subquery. Helper views and the agent's own tables are listed like loaded ones; an alias or a
+  CTE named like a table on the bench is not taken for that table, so `SELECT meters.power_kw
+  FROM rooms AS meters` is told the columns of `rooms` alone. The list is held to 1,024 bytes,
+  `(+N more)` included: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and
   the hint then names `DESCRIBE <table>`. These hints name no tool, so a host whose agent has no
   `describe` is not sent to one; there is no protocol change. The columns come from what the
   attach kept, or the catalog's, which DuckDB keeps with a view when it is made; nothing is
@@ -61,7 +70,7 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   `agent_tables`); `E_DEADLINE` says `deadline` or `load_timeout`, with nothing lost; a batch
   that fails at a statement gives that statement and the earlier results' `result_ids` and
   `results`, in a query reply's shape; `E_LIMIT` names the limit as `hello` does and the value it
-  held the table to; `E_VERSION` lists the versions benchy speaks. docs/HOST-PROTOCOL.md has
+  held the table to, in an attach of several tables what the ones before it left; `E_VERSION` lists the versions benchy speaks. docs/HOST-PROTOCOL.md has
   the table of which code carries what. Additive: every field and message is as before, and no
   new protocol version, since replies only grow. The model's message after a rebuild now says
   the earlier results are gone too, and past the memory ceiling no longer tells the agent to ask

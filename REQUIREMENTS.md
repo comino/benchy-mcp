@@ -460,9 +460,10 @@ kill. So is one loader's: each is read the same way while it loads, with the con
 - `a_load_that_keeps_failing_is_not_retried_forever` — it fails once, after `--load-timeout`,
   and the server exits.
 - `a_job_the_loader_does_not_read_is_held_to_the_load_timeout` — the load timeout covers handing
-  the loader its job too: a 300 KiB job, more than the loader's stdin pipe holds, to a loader
-  that never reads it fails `E_DEADLINE` at the timeout, attaches nothing, and the session serves
-  on.
+  the loader its job too: a job four times what a pipe holds here (`F_GETPIPE_SZ`, 16 pages by
+  default; at least twice where a 1 MiB request cannot carry four), to a loader that never reads
+  it, fails `E_DEADLINE` at the timeout, attaches nothing, and the session serves on (Linux
+  only).
 - `an_engine_that_dies_at_every_attach_is_not_rebuilt_forever` — a rebuild that loses its engine
   counts as failed, and a lost engine is noticed when it goes.
 - `result_ids_never_outlive_their_workspace` — after a rebuild, ids from the lost workspace stop
@@ -627,9 +628,16 @@ error that can have one.
   deadline with a view whose bind would sleep past it in the catalogue.
 - `a_hint_lists_the_agents_objects_as_they_are_now` — the columns kept are of the agent's
   objects as they are after a view is replaced, a table made, dropped or altered.
+- `a_name_the_statement_gives_hides_the_table_of_that_name` — an alias, a subquery's or a
+  column's, named like a table is not read where it is given or where it qualifies a column, and
+  a CTE's name not outside its own body (nor in it, `RECURSIVE`): `meters.power_kw FROM rooms AS
+  meters` is told `rooms` alone.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.
+- `the_list_a_hint_gives_is_held_to_1024_bytes_and_12_tables` — `(+N more)` within the 1,024
+  bytes, to the byte: thirteen tables that took 1,034 take exactly 1,024, and a byte more in a
+  name keeps to it; 12 tables are named and a 13th counted.
 - `a_hosts_sql_error_gives_the_columns_and_sends_its_agent_to_no_tool` — these hints name no
   tool, so a host whose agent has no `describe` is not sent to one.
 - `a_correct_query_carries_no_hint` — a success is never padded.
@@ -789,6 +797,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `an_attach_past_a_limit_names_it_in_its_detail` — `E_LIMIT`'s `detail.limit` names the limit
   as `hello` does, for rows, bytes, a file, a stream and the table count, and `value` the bound
   it was held to.
+- `a_table_of_one_attach_is_told_what_the_tables_before_it_left` — one whose loader stopped it at
+  what the budget had left before the request is told, in `value` and its message, what the
+  tables before it left: with `session_rows: 8`, 5 rows then 9 tell the second 3, not 8; and in
+  bytes.
 - `a_load_past_its_timeout_says_why_in_its_detail` — an attach past `--load-timeout` is
   `E_DEADLINE` with `reason: load_timeout` and nothing lost.
 - `a_page_says_the_sql_of_its_result` — `page` returns the agent's own statement of its result,

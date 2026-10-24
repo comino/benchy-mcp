@@ -476,6 +476,76 @@ fn a_qualified_unknown_column_resolves_its_alias() {
 }
 
 #[test]
+fn a_name_the_statement_gives_hides_the_table_of_that_name() {
+    // #27, REQ-11's "and of no others": an alias or a CTE named like a table on the bench is not
+    // that table. `FROM rooms AS meters` reads `rooms` alone, and its `meters.power_kw` is
+    // `rooms`'s; the hint listed `meters` first, as the table qualified, which the statement does
+    // not read.
+    let mut ws = bench_with_tables();
+    for (sql, want) in [
+        (
+            "SELECT meters.power_kw FROM rooms AS meters",
+            "`meters` is `rooms`. The tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "SELECT meters.power_kw FROM rooms meters",
+            "`meters` is `rooms`. The tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "SELECT power_kw FROM rooms AS meters",
+            "That column is not in the tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "WITH meters AS (SELECT * FROM rooms) SELECT meters.power_kw FROM meters",
+            "`meters` is a subquery or CTE of the statement. The tables the statement reads: \
+             rooms(meter, room).",
+        ),
+        (
+            "WITH meters AS (SELECT * FROM rooms) SELECT power_kw FROM meters",
+            "That column is not in the tables the statement reads: rooms(meter, room).",
+        ),
+        // In its own body a CTE's name is the table's.
+        (
+            "WITH meters AS (SELECT meter FROM meters) SELECT power_kw FROM meters",
+            "That column is not in the tables the statement reads: \
+             meters(observed_at, meter, power_kw).",
+        ),
+        // A recursive CTE's name is the CTE in its body too.
+        (
+            "WITH RECURSIVE meters AS (SELECT meter FROM rooms UNION ALL \
+             SELECT meter FROM meters WHERE false) SELECT power_kw FROM meters",
+            "That column is not in the tables the statement reads: rooms(meter, room).",
+        ),
+        // A subquery's alias, and a column's.
+        (
+            "SELECT meters.power_kw FROM (SELECT * FROM rooms) meters",
+            "The tables the statement reads: rooms(meter, room).",
+        ),
+        (
+            "SELECT meter AS rooms, temp FROM meters",
+            "That column is not in the tables the statement reads: \
+             meters(observed_at, meter, power_kw).",
+        ),
+        // Where the statement reads the table as well, under a name of its own, it is listed,
+        // and an alias called like it is still the table it stands for.
+        (
+            "SELECT m.temp FROM meters m JOIN rooms AS meters USING (meter)",
+            "`m` is `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw); rooms(meter, room).",
+        ),
+        (
+            "SELECT meters.temp FROM meters m JOIN rooms meters USING (meter)",
+            "`meters` is `rooms`. The tables the statement reads: \
+             rooms(meter, room); meters(observed_at, meter, power_kw).",
+        ),
+    ] {
+        let e = err_for(&mut ws, sql);
+        let h = hint_of(&e);
+        assert!(h.contains(want), "{sql}\n  wanted {want:?} in: {e}");
+    }
+}
+
+#[test]
 fn an_unknown_table_lists_the_columns_of_what_is_here() {
     // #27: the tables it could have meant, with their columns, so the next statement can be
     // right; and no `describe`, which a host's agent may not have.
@@ -564,6 +634,75 @@ fn the_columns_a_hint_lists_are_bounded() {
     assert!(h.contains(" more)"), "says there are more: {e}");
     assert!(h.len() < 1300, "{} bytes: {e}", h.len());
     assert!(!names_the_describe_tool(h), "{e}");
+}
+
+/// A bench of tables `t00`, `t01`, … whose names are `lens` bytes long, each with one column,
+/// `kwh`, recorded as loaded.
+fn tables_named_to(lens: &[usize]) -> Workspace {
+    let mut bench = common::bench();
+    let names: Vec<String> = lens
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("t{i:02}{}", "x".repeat(n - 3)))
+        .collect();
+    let sql: Vec<String> = names
+        .iter()
+        .map(|t| format!("CREATE TABLE {t} AS SELECT 1 AS kwh"))
+        .collect();
+    bench.connection().execute_batch(&sql.join("; ")).unwrap();
+    for name in names {
+        bench
+            .record(benchy_mcp::LoadedTable {
+                name,
+                rows: 1,
+                columns: vec![("kwh".into(), "INTEGER".into())],
+                source: "test".into(),
+                profile: None,
+                seen: None,
+            })
+            .unwrap();
+    }
+    bench.seal("1GB").unwrap()
+}
+
+/// What an unknown table's hint lists as here, tables, columns and `(+N more)`.
+fn listed_here(ws: &mut Workspace) -> String {
+    let e = err_for(ws, "SELECT * FROM nowhere");
+    let h = hint_of(&e);
+    let here = h.split_once("What is here: ").expect(&e).1;
+    here.split_once('.').expect(&e).0.to_string()
+}
+
+#[test]
+fn the_list_a_hint_gives_is_held_to_1024_bytes_and_12_tables() {
+    // REQ-11: 1,024 bytes of tables and columns, `(+N more)` counted in them. The entries took
+    // the whole bound before the count was put after them: these thirteen tables, the first
+    // twelve each a share of it, were listed in 1,034 bytes. They now take exactly 1,024, and a
+    // byte more in a name still keeps to it; a bound one byte lower or higher would list the
+    // first in fewer bytes, or the second in more.
+    let edge = [80, 78, 78, 78, 78, 78, 78, 78, 79, 79, 79, 79, 3];
+    let here = listed_here(&mut tables_named_to(&edge));
+    assert_eq!(here.len(), 1024, "{here}");
+    assert_eq!(here.split("; ").count(), 12, "{here}");
+    assert!(here.ends_with("(kwh) (+1 more)"), "{here}");
+    let mut over = edge;
+    over[11] += 1;
+    let here = listed_here(&mut tables_named_to(&over));
+    assert!(here.len() <= 1024, "{} bytes: {here}", here.len());
+    assert!(here.ends_with(" (+1 more)"), "{here}");
+    // Twelve names too long for their shares: ten fit, and the count after them would not, so
+    // the tenth makes room for it.
+    let here = listed_here(&mut tables_named_to(&[100; 12]));
+    assert!(here.len() <= 1024, "{} bytes: {here}", here.len());
+    assert!(here.ends_with("x (+3 more)"), "{here}");
+
+    // Twelve tables are named, and a thirteenth counted: short names, far inside the bytes.
+    let here = listed_here(&mut tables_named_to(&[3; 12]));
+    assert_eq!(here.split("; ").count(), 12, "{here}");
+    assert!(!here.contains("more)"), "{here}");
+    let here = listed_here(&mut tables_named_to(&[3; 13]));
+    assert_eq!(here.split("; ").count(), 12, "{here}");
+    assert!(here.ends_with("t11(kwh) (+1 more)"), "{here}");
 }
 
 #[test]

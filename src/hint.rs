@@ -71,7 +71,8 @@ impl<'a> Catalogue<'a> {
     /// the sentence that says where what was cut is, if anything was. Each table has an even
     /// share of what the ones before it left, so a wide first table cannot crowd out the names
     /// after it; one cut short ends `… [+N columns])`, and tables past [`SHOWN`] are counted,
-    /// `(+N more)`. A table the catalog gives no columns for is named alone.
+    /// `(+N more)`, inside the same bytes. A table the catalog gives no columns for is named
+    /// alone.
     ///
     /// #27: told only the tables' names, an agent spent its next step on `describe`, about 4 KB
     /// on a host's bench, to learn the one column it got wrong; and a host whose agent has no
@@ -83,30 +84,52 @@ impl<'a> Catalogue<'a> {
         }
         let named = &tables[..tables.len().min(SHOWN)];
         let found = self.columns.map(|f| f(named)).unwrap_or_default();
-        let mut parts: Vec<String> = Vec::new();
+        // ` (+N more)` is inside the bound. Past `SHOWN` tables it is said whatever fits, so its
+        // bytes for the fewest it can count are kept from the start, and the shares are of what
+        // is left; the entries took the whole bound before it was put after them, and thirteen
+        // tables were listed in 1,034 bytes (`the_list_a_hint_gives_is_held_to_1024_bytes_and_12_tables`).
+        let counted = |n: usize| match n {
+            0 => String::new(),
+            n => format!(" (+{n} more)"),
+        };
+        let bound = SHAPES - counted(tables.len() - named.len()).len();
+        let mut parts: Vec<(String, bool)> = Vec::new();
         let mut used = 0;
-        let mut short: Vec<&str> = Vec::new();
         for (i, t) in named.iter().enumerate() {
             let cols = found
                 .iter()
                 .find(|(n, _)| n.eq_ignore_ascii_case(t))
                 .map_or(&[][..], |(_, c)| c.as_slice());
             let sep = if parts.is_empty() { 0 } else { 2 };
-            let share = (SHAPES.saturating_sub(used) / (named.len() - i)).saturating_sub(sep);
+            let share = (bound.saturating_sub(used) / (named.len() - i)).saturating_sub(sep);
             let (entry, cut) = entry(t, cols, share)
                 .unwrap_or_else(|| (crate::profile::ident(t), !cols.is_empty()));
             // A name alone can be longer than its share; past the bound it is counted instead.
-            if used + sep + entry.len() > SHAPES {
+            if used + sep + entry.len() > bound {
                 break;
             }
-            if cut {
-                short.push(t);
-            }
             used += sep + entry.len();
-            parts.push(entry);
+            parts.push((entry, cut));
         }
-        let mut s = parts.join("; ");
+        // One counted that was not kept for — a name past the bound, or a count of more digits —
+        // takes the room of the entries before it, last first.
+        while used + counted(tables.len() - parts.len()).len() > SHAPES {
+            let Some((entry, _)) = parts.pop() else {
+                break;
+            };
+            used -= entry.len() + if parts.is_empty() { 0 } else { 2 };
+        }
+        let short: Vec<&str> = named
+            .iter()
+            .zip(&parts)
+            .filter_map(|(t, (_, cut))| cut.then_some(*t))
+            .collect();
         let more = tables.len() - parts.len();
+        let mut s = parts
+            .iter()
+            .map(|(entry, _)| entry.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
         if more > 0 {
             s.push_str(&format!(" (+{more} more)"));
         }
@@ -379,13 +402,10 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
     };
     let statement = cx.statement.unwrap_or("");
     let mut read = tables_read(statement, catalogue.names);
-    let table = read
-        .iter()
-        .position(|t| t.eq_ignore_ascii_case(q))
-        .or_else(|| {
-            let t = aliased(statement, q, &read)?;
-            read.iter().position(|r| *r == t)
-        });
+    // The alias first: `FROM meters m JOIN rooms meters` qualifies `rooms`'s columns `meters.`.
+    let table = aliased(statement, q, &read)
+        .and_then(|t| read.iter().position(|r| *r == t))
+        .or_else(|| read.iter().position(|t| t.eq_ignore_ascii_case(q)));
     let said = match table {
         Some(i) => {
             // what the agent qualified the column with first: it is what it was looking at
@@ -456,16 +476,79 @@ fn words(statement: &str) -> Vec<String> {
 /// spells them. A name is matched as DuckDB matches one, ASCII case folded. A column of the same
 /// name as a table counts too: the hint then lists a table more, which costs bytes and misleads
 /// no one.
+///
+/// A name the statement gives is not the table of that name. An alias, `rooms AS meters` or
+/// `rooms meters`, a subquery's or a column's, is not read where it is given, nor where it
+/// qualifies a column, `meters.power_kw`: that is `rooms`'s, and listing `meters` first, as the
+/// table qualified, sent the agent to a table the statement does not read. A CTE's name is not
+/// read anywhere but in its own body, where DuckDB 1.5.5 binds it to the table, unless the CTE
+/// is `RECURSIVE` (`a_name_the_statement_gives_hides_the_table_of_that_name`).
 fn tables_read<'n>(statement: &str, names: &'n [String]) -> Vec<&'n str> {
+    let w = words(statement);
+    let is = |i: usize, s: &str| w.get(i).is_some_and(|x| x.eq_ignore_ascii_case(s));
+    let table = |x: &str| names.iter().find(|n| n.eq_ignore_ascii_case(x));
+    let given =
+        |i: usize| i > 0 && (is(i - 1, "as") || w[i - 1] == ")" || table(&w[i - 1]).is_some());
+    let ctes: Vec<(&str, std::ops::Range<usize>)> = (0..w.len())
+        .filter_map(|i| Some((w[i].as_str(), cte(&w, i)?)))
+        .collect();
+    let recursive = w.iter().any(|x| x.eq_ignore_ascii_case("recursive"));
     let mut read: Vec<&str> = Vec::new();
-    for w in words(statement) {
-        if let Some(n) = names.iter().find(|n| n.eq_ignore_ascii_case(&w)) {
-            if !read.contains(&n.as_str()) {
-                read.push(n);
-            }
+    for (i, x) in w.iter().enumerate() {
+        let Some(n) = table(x) else {
+            continue;
+        };
+        let a_cte = ctes
+            .iter()
+            .any(|(c, body)| c.eq_ignore_ascii_case(x) && (recursive || !body.contains(&i)));
+        let an_alias = is(i + 1, ".")
+            && (0..w.len()).any(|j| j != i && given(j) && w[j].eq_ignore_ascii_case(x));
+        if given(i) || a_cte || an_alias {
+            continue;
+        }
+        if !read.contains(&n.as_str()) {
+            read.push(n);
         }
     }
     read
+}
+
+/// The words of the body of the CTE that `w[i]` names, `name AS [NOT] [MATERIALIZED] (…)` or
+/// `name(a, b) AS (…)`, from its `(` to its `)`.
+fn cte(w: &[String], i: usize) -> Option<std::ops::Range<usize>> {
+    let mut j = i + 1;
+    if w.get(j)? == "(" {
+        j = closing(w, j)? + 1;
+    }
+    if !w.get(j)?.eq_ignore_ascii_case("as") {
+        return None;
+    }
+    j += 1;
+    for word in ["not", "materialized"] {
+        if w.get(j)?.eq_ignore_ascii_case(word) {
+            j += 1;
+        }
+    }
+    (w.get(j)? == "(").then_some(())?;
+    Some(j..closing(w, j)?)
+}
+
+/// Where the `(` at `w[open]` is closed.
+fn closing(w: &[String], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, x) in w.iter().enumerate().skip(open) {
+        match x.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The table of `read` that `alias` stands for in `statement`: `readings r` or `readings AS r`,
