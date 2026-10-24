@@ -520,6 +520,14 @@ Built-in type names need no check: DuckDB refuses `CREATE TYPE integer` itself.
   one, in the temporary catalog, and absent from the batch's SQL.
 - `benchys_catalog_reads_cannot_be_shadowed` — benchy's catalog reads name `system.main`, so no
   planted macro changes the attach check, `describe`, the hints or pivot detection.
+- `benchys_internal_sql_names_every_function_by_its_catalog` — every call in benchy's own SQL,
+  operators DuckDB binds as functions (`||`, LIKE, `count(*)`) included, names `system.main`, by
+  DuckDB's own parse of each.
+- `benchys_checks_cannot_be_blinded_by_a_planted_function` — macros planted under the names
+  those checks call change none of them: an ENUM column, a built-in's name, a pivot's type, an
+  attached table's rows and a file's extra view are still caught.
+- `a_listing_of_builtins_that_cannot_be_duckdbs_is_not_kept` — a listing of DuckDB's names that
+  lacks a function benchy's own SQL calls refuses the statement and is not kept.
 - `the_agent_cannot_forge_what_the_host_reads_from_the_catalog` — through the host protocol, an
   attach answers with the real columns.
 - `the_corpus_shadows_are_refused_and_undone` — every shadowing case in `corpus/escape.toml`.
@@ -1202,6 +1210,9 @@ that table is attached again.
   calls a function neither DuckDB nor a helper has, or one named by a schema or catalog (`s.f(x)`,
   `x.f()`), stops startup, naming the helper and the call; plain DuckDB makes such a macro and
   then calls the agent's macro of that name.
+- `a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins` — a macro of the
+  agent's named like a function benchy's check of its macros calls (`bool_or`), temporary,
+  dropped again or failing, frees no built-in's name, so the `abs` a helper calls stays DuckDB's.
 - `a_helper_view_never_calls_the_agents_function` — a helper view calling an unknown function
   stops startup, and a schema and macro of the agent's named like a view's `meter.upper()` leave
   its answer as it was.

@@ -370,11 +370,11 @@ pub const TABLE_FUNCTIONS: &[(&str, Use)] = &[
 pub const REFUSED_VIEWS: &[(&str, &str)] = &[("duckdb_logs", INSIDE)];
 
 /// The system catalog's table functions and table macros, for an engine this was not measured on.
-const CATALOG_FUNCTIONS: &CStr = c"SELECT DISTINCT function_name, '' \
+pub(crate) const CATALOG_FUNCTIONS: &CStr = c"SELECT DISTINCT function_name, '' \
       FROM system.main.duckdb_functions() \
       WHERE database_name = 'system' AND function_type IN ('table', 'table_macro')";
 /// The system catalog's views, and the SQL of each.
-const CATALOG_VIEWS: &CStr = c"SELECT view_name, coalesce(sql, '') \
+pub(crate) const CATALOG_VIEWS: &CStr = c"SELECT view_name, coalesce(sql, '') \
       FROM system.main.duckdb_views() WHERE database_name = 'system'";
 
 /// REQ-2: which of DuckDB's table functions the agent may not call, and which system views it

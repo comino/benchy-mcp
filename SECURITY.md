@@ -30,9 +30,11 @@ any of which may carry a prompt injection aimed at the agent.
   `the_engine_inherits_no_environment_and_no_descriptor`).
 - **Integrity of the loaded tables**, attached read-only and enforced by DuckDB, not by reading
   statement text (REQ-9 `loaded_is_readonly`, `the_agent_cannot_change_a_hosts_table`), and of
-  **benchy's own catalog reads**: each names `system.main`, so no object of the agent's changes
-  what the attach check, `describe` or the hints read (REQ-9
-  `benchys_catalog_reads_cannot_be_shadowed`), and an attached file brings its one table and
+  **benchy's own catalog reads**: each names every function it calls, operators included,
+  through `system.main`, so no object of the agent's changes what the attach check, the
+  shadowing and ENUM checks, `describe` or the hints read (REQ-9
+  `benchys_catalog_reads_cannot_be_shadowed`,
+  `benchys_internal_sql_names_every_function_by_its_catalog`), and an attached file brings its one table and
   nothing else (REQ-2 `an_attached_file_brings_its_table_and_nothing_else`).
 - **Availability.** A wall deadline, DuckDB's memory budget and a ceiling on the engine's and each
   loader's resident memory (REQ-7, REQ-8), capped results (REQ-10), and admission control before
