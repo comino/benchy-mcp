@@ -363,8 +363,10 @@ fn render_page(
             // The note gets what the page left, and no more: it can quote values of any length.
             // A complete page used at most `room`, so what is left is never less than
             // `FOOTER_ROOM` less this line, some 200 bytes: there is always room for a note.
-            let left = budget.saturating_sub(used + wire_len(&f) + wire_len(" — "));
+            // The separator is counted with the line it joins: subtracted on its own, an error in
+            // it was one the backstop below made up for, and no test could see.
             f.push_str(" — ");
+            let left = budget.saturating_sub(used + wire_len(&f));
             f.push_str(&fit(n, left));
         }
         f
