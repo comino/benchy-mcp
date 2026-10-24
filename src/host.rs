@@ -159,8 +159,17 @@ fn query_detail(r: &crate::proto::Reply) -> Option<Value> {
         d["statement"] = n.into();
         d["result_ids"] = json!(r.result_ids);
         d["results"] = json!(r.results);
+        omitted(d, r);
     }
     detail
+}
+
+/// Beside `result_ids` and `results`, which list only the results a page can read, how many of
+/// the batch's came before them, where any did (`a_reply_lists_only_the_results_that_can_be_paged`).
+fn omitted(listed: &mut Value, r: &crate::proto::Reply) {
+    if r.omitted > 0 {
+        listed["results_omitted"] = r.omitted.into();
+    }
 }
 
 fn caps_json(c: &Caps) -> Value {
@@ -1466,8 +1475,9 @@ fn run(
         }
         Call::Query { sql, caps } => {
             let r = supervisor.query(sql, &caps);
-            let ok = json!({"text": r.body, "result_ids": r.result_ids, "results": r.results,
-                            "caps": caps_json(&caps)});
+            let mut ok = json!({"text": r.body, "result_ids": r.result_ids, "results": r.results,
+                                "caps": caps_json(&caps)});
+            omitted(&mut ok, &r);
             from_reply(r, "E_SQL", ok)
         }
         Call::Page {

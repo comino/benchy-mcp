@@ -50,8 +50,11 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   held to 1,024 bytes: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and
   the hint then names `DESCRIBE <table>`. These hints name no tool, so a host whose agent has no
   `describe` is not sent to one; there is no protocol change. The columns come from what the
-  attach kept, or a `SELECT *` prepared and not run, and a failing query costs what it did on a
-  loaded table (docs/PERFORMANCE.md).
+  attach kept, or the catalog's, which DuckDB keeps with a view when it is made; nothing is
+  bound, as a bind evaluates a view's table-function arguments, which can call `nextval` or
+  sleep, and the hint is built after the deadline's watchdog has stopped. A failing query costs
+  what it did on a loaded table, and less where it lists a view but in a batch that has just
+  made one (docs/PERFORMANCE.md).
 - **A host's error replies carry `detail`, facts beside the model's message** (#26). A host
   no longer parses prose: `E_REBUILT` says why the engine went (`reason`: `hard_deadline`,
   `memory_ceiling`, `engine_died` or `pivot_type`) and what went with it (`lost`: `results`,
@@ -63,7 +66,14 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   new protocol version, since replies only grow. The model's message after a rebuild now says
   the earlier results are gone too, and past the memory ceiling no longer tells the agent to ask
   the operator to start benchy with a larger `--memory-ceiling`, which it cannot do: it is told to
-  use less, or to say that the work needs more.
+  use less, or to say that the work needs more. A query reply's `result_ids` and `results`, and
+  a failure's in its `detail`, now list at most the batch's last 32 results, the ones `page`
+  reads, and `results_omitted` counts those before them: they had an entry for every result
+  whatever `max_bytes` was, and 2,000 `SELECT 1`s at 512 bytes replied with 216 KB, most of it
+  ids `page` no longer knew. `max_bytes` bounds the text; the lists are bounded by that count.
+  A batch refused whole before any of it ran, `CREATE TABLE kept …; EXPLAIN …`, has no
+  `detail`: it gave `statement` 2, which says statement 1 ran, and its message said "nothing
+  after it ran"; it now says nothing in the batch ran.
 - **A helper comment `describe` cuts is told to the operator** (#60). `describe` cuts a helper's
   comment at 200 bytes and its whole line (signature, kind and comment) at 320, and marked the cut
   only for the agent, which never sees what was cut. Startup now says on stderr, beside

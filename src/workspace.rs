@@ -42,6 +42,9 @@ pub struct Bench {
     shapes: std::collections::BTreeMap<String, crate::profile::Shape>,
 }
 
+/// `(table, column)` of a catalog's tables and views, each table's columns in order.
+type Columns = Vec<(String, String)>;
+
 /// A sealed bench. The only thing that can run agent SQL, and it can only be reached through
 /// [`Bench::seal`] — so "load, then drop the filesystem" is the only expressible order.
 pub struct Workspace {
@@ -84,6 +87,14 @@ pub struct Workspace {
     /// The read-only catalog the helpers that are made live in, on the agent's search path
     /// between its own schema and the tables.
     helper_alias: Option<String>,
+    /// The columns of the helpers' views, read from their catalog the first time a hint lists
+    /// one and kept with that catalog's alias: it is read-only, and a new one has a new alias
+    /// (`Workspace::columns_of`).
+    helper_columns: std::cell::RefCell<Option<(String, Columns)>>,
+    /// `(catalog, table, column)` of the agent's own tables and views, read from the catalog the
+    /// first time a hint lists one, and forgotten when a statement that is not a SELECT is
+    /// prepared, as only such a statement can change them (`Workspace::columns_of`).
+    agent_columns: std::cell::OnceCell<Vec<(String, String, String)>>,
     /// Why this engine must not go on, once a batch has left it holding what it cannot let go:
     /// a dynamic PIVOT's type that could not be dropped (`Workspace::drop_pivot_types`).
     spoiled: Option<String>,
@@ -224,6 +235,7 @@ impl Wrap {
             index: at as usize + 1,
             kind: "TRANSACTION",
             allowed: ALLOWED,
+            whole: false,
         }
     }
 }
@@ -437,6 +449,10 @@ pub enum WorkError {
         index: usize,
         kind: &'static str,
         allowed: &'static str,
+        /// Refused with the whole batch, before any of it ran, as the classifier refuses a
+        /// statement it can bind; otherwise where it stands, once the statements before it ran
+        /// (`a_batch_refused_whole_says_no_statement_in_its_detail`).
+        whole: bool,
     },
     /// The batch did not parse.
     Parse(String, Option<String>),
@@ -479,7 +495,8 @@ impl WorkError {
     /// The statement the batch stopped at, counted from 1, where that is known: the one a
     /// refusal or DuckDB named, or, past the deadline, the one after those that ran, since every
     /// statement of the agent's that runs gives one result. A batch that did not parse, or a
-    /// refusal of the whole batch, stopped at none.
+    /// refusal of the whole batch, stopped at none: a host reads a statement as the one after
+    /// those that ran, and none did, though the refusal names the statement it refused.
     pub fn statement(&self) -> Option<usize> {
         self.statement_after(0)
     }
@@ -487,6 +504,7 @@ impl WorkError {
     fn statement_after(&self, ran: usize) -> Option<usize> {
         match self {
             WorkError::Partial { ran, error } => error.statement_after(ran.len()),
+            WorkError::Denied { whole: true, .. } => None,
             WorkError::Sql { index, .. } | WorkError::Denied { index, .. } => Some(*index),
             WorkError::Deadline { .. } => Some(ran + 1),
             _ => None,
@@ -497,20 +515,27 @@ impl WorkError {
 impl std::fmt::Display for WorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WorkError::Denied { index, kind, .. } if *kind == TIME_ZONE => write!(
+            WorkError::Denied {
+                index, kind, whole, ..
+            } if *kind == TIME_ZONE => write!(
                 f,
-                "statement {index} sets TimeZone, which is fixed; nothing after it ran. {}",
+                "statement {index} sets TimeZone, which is fixed; {}. {}",
+                ran(*whole),
                 crate::hint::UTC
             ),
             WorkError::Denied {
                 index,
                 kind,
                 allowed,
+                whole,
             } => {
                 write!(
-                f, "statement {index} is {kind}, which is not allowed here; nothing after it ran. \
+                    f,
+                    "statement {index} is {kind}, which is not allowed here; {}. \
                     Allowed: {allowed}. The data is already loaded as tables — file and network \
-                    functions are unavailable.")?;
+                    functions are unavailable.",
+                    ran(*whole)
+                )?;
                 // DuckDB's own transaction around a PIVOT into a table, over a table the same
                 // batch makes, is refused up front (`crate::guard`, `a_pivot_into_a_table_runs`).
                 if *kind == "TRANSACTION" {
@@ -662,43 +687,30 @@ unsafe fn raw_exec(con: ffi::duckdb_connection, sql: &str) -> Result<(), String>
     out
 }
 
-/// The names of the columns `sql` would return, from preparing it on `con` without running it;
-/// `None` if it does not prepare.
-unsafe fn bound_columns(con: ffi::duckdb_connection, sql: &str) -> Option<Vec<String>> {
-    let c = CString::new(sql).ok()?;
-    let mut prep: ffi::duckdb_prepared_statement = std::ptr::null_mut();
-    let prepared =
-        ffi::duckdb_prepare(con, c.as_ptr(), &mut prep) == ffi::duckdb_state_DuckDBSuccess;
-    let out = prepared.then(|| {
-        (0..ffi::duckdb_prepared_statement_column_count(prep))
-            .filter_map(|i| {
-                let p = ffi::duckdb_prepared_statement_column_name(prep, i);
-                if p.is_null() {
-                    return None;
-                }
-                let name = CStr::from_ptr(p).to_string_lossy().into_owned();
-                ffi::duckdb_free(p as *mut std::ffi::c_void);
-                Some(name)
-            })
-            .collect()
-    });
-    // A statement that did not prepare is destroyed too: it holds its error.
-    ffi::duckdb_destroy_prepare(&mut prep);
-    out
-}
-
 const ALLOWED: &str = "SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE, DROP, ALTER";
 
 /// Statement `index` (from 1) of the batch `sql`, a `kind` the agent may not run. A `SET` of
 /// `TimeZone` is told the session is UTC and how to reach local periods, not the statements
 /// allowed: the zone is the one setting an agent has a reason of its own to want (#52).
-fn denied(index: usize, kind: &'static str, sql: &str) -> WorkError {
+fn denied(index: usize, kind: &'static str, sql: &str, whole: bool) -> WorkError {
     let zone = kind == "SET"
         && crate::hint::statement(sql, index - 1).is_some_and(|s| crate::hint::sets_time_zone(&s));
     WorkError::Denied {
         index,
         kind: if zone { TIME_ZONE } else { kind },
         allowed: ALLOWED,
+        whole,
+    }
+}
+
+/// What a refusal says ran of its batch: none of it, when the batch was refused whole, though
+/// the statements before the refused one were well formed; told only "nothing after it", an
+/// agent took them to have run.
+fn ran(whole: bool) -> &'static str {
+    if whole {
+        "nothing in the batch ran"
+    } else {
+        "nothing after it ran"
     }
 }
 
@@ -1112,6 +1124,8 @@ impl Bench {
             seen: Default::default(),
             helpers: Vec::new(),
             helper_alias: None,
+            helper_columns: Default::default(),
+            agent_columns: Default::default(),
             spoiled: None,
             retained: std::collections::VecDeque::new(),
             loaded,
@@ -1188,6 +1202,8 @@ impl Workspace {
             seen: Default::default(),
             helpers: Vec::new(),
             helper_alias: None,
+            helper_columns: Default::default(),
+            agent_columns: Default::default(),
             spoiled: None,
             retained: std::collections::VecDeque::new(),
             loaded: Vec::new(),
@@ -1575,31 +1591,102 @@ impl Workspace {
     /// in their order, for REQ-11's hints (#27). Asked only by the hints that list columns, and
     /// no table is scanned. A loaded table's are the ones kept from its attach.
     ///
-    /// The rest are what `SELECT * FROM <name>` would give, prepared and never run on the
-    /// agent's connection, which is the one whose search path resolves a helper view's tables.
-    /// Measured on the bundled bench with its helpers, DuckDB 1.5.5, per failing query that
-    /// names a helper view, over the whole session: 5.1 M instructions before #27, 6.4 M so.
-    /// `duckdb_columns()` on the host-facing connection took it to 12.3 M, as it builds a row
-    /// for every column of every catalog, DuckDB's own 527 included, before any filter applies;
-    /// `pragma_table_info` there cannot bind a helper view, whose tables are named unqualified.
-    /// A loaded table's columns cost nothing measurable: 3.7–3.9 M before and after.
+    /// The rest are the catalog's, which DuckDB keeps with a view when it is made, and nothing
+    /// is bound: the hint is built after the batch's watchdog has stopped, and binding a view
+    /// evaluates its table functions' arguments, so a prepared `SELECT *` of one moved the
+    /// agent's sequence (`a_hint_runs_nothing_of_the_views_it_lists`) and slept past the deadline
+    /// (`a_hint_takes_nothing_past_the_deadline`). Read on the host-facing connection, in the
+    /// order the agent's search path finds a name: its temporary objects, its own, the helpers'.
+    ///
+    /// `duckdb_columns()` builds a row for every column of every catalog, DuckDB's own 527
+    /// included, before any filter applies, about 7 M instructions, so what it gives is kept: a
+    /// helper's for as long as its catalog is attached, the agent's until a statement that is not
+    /// a SELECT is prepared (`a_hint_lists_the_agents_objects_as_they_are_now`). Measured on the
+    /// bundled bench with its helpers, DuckDB 1.5.5, per failing call over the whole session,
+    /// against the prepared `SELECT *`: one that lists a helper view 6.5 M → 4.2–4.5 M, one of
+    /// the agent's views 4.8 M → 4.3 M; a batch that makes a view and then fails on it, and so
+    /// reads the catalog again each time, 21.4 M → 28.1 M.
     fn columns_of(&self, tables: &[&str]) -> Vec<(String, Vec<String>)> {
-        tables
-            .iter()
-            .filter_map(|t| {
-                if let Some(l) = self.loaded.iter().find(|l| l.name.eq_ignore_ascii_case(t)) {
-                    return Some((
-                        l.name.clone(),
-                        l.columns.iter().map(|(c, _)| c.clone()).collect(),
-                    ));
+        let mut out = Vec::new();
+        let mut helpers = Vec::new();
+        let mut rest = Vec::new();
+        for t in tables {
+            if let Some(l) = self.loaded.iter().find(|l| l.name.eq_ignore_ascii_case(t)) {
+                out.push((
+                    l.name.clone(),
+                    l.columns.iter().map(|(c, _)| c.clone()).collect(),
+                ));
+            } else if self
+                .helpers
+                .iter()
+                .any(|h| h.what == "view" && h.waits.is_none() && h.name.eq_ignore_ascii_case(t))
+            {
+                // A helper's name is taken in every namespace: no object of the agent's has it.
+                helpers.push(*t);
+            } else {
+                rest.push(t.to_ascii_lowercase());
+            }
+        }
+        if let (false, Some(alias)) = (helpers.is_empty(), &self.helper_alias) {
+            let mut cached = self.helper_columns.borrow_mut();
+            if cached.as_ref().is_none_or(|(a, _)| a != alias) {
+                let rows = self.catalog_columns(&[alias.as_str()]);
+                *cached = Some((
+                    alias.clone(),
+                    rows.into_iter().map(|(_, t, c)| (t, c)).collect(),
+                ));
+            }
+            let all = cached.as_ref().map_or(&[][..], |(_, r)| r.as_slice());
+            for t in helpers {
+                let mine = all.iter().filter(|(n, _)| n.eq_ignore_ascii_case(t));
+                if let Some((name, _)) = mine.clone().next() {
+                    out.push((name.clone(), mine.map(|(_, c)| c.clone()).collect()));
                 }
-                let sql = format!("SELECT * FROM \"{}\"", t.replace('"', "\"\""));
-                // SAFETY: the agent connection is this workspace's, and no query runs on it now:
-                // the statement that failed has returned. Prepared only, so nothing executes.
-                let cols = unsafe { bound_columns(self.agent, &sql) }?;
-                Some((t.to_string(), cols))
-            })
-            .collect()
+            }
+        }
+        if rest.is_empty() {
+            return out;
+        }
+        // In the order the agent's search path finds a name: a temporary object first.
+        let catalogs = ["temp", "memory"];
+        let rows = self
+            .agent_columns
+            .get_or_init(|| self.catalog_columns(&catalogs));
+        for t in &rest {
+            let Some(db) = catalogs.iter().find(|c| {
+                rows.iter()
+                    .any(|r| r.0 == **c && r.1.eq_ignore_ascii_case(t))
+            }) else {
+                continue;
+            };
+            let mine = rows
+                .iter()
+                .filter(|r| r.0 == *db && r.1.eq_ignore_ascii_case(t));
+            let name = mine.clone().next().map(|r| r.1.clone()).unwrap_or_default();
+            out.push((name, mine.map(|r| r.2.clone()).collect()));
+        }
+        out
+    }
+
+    /// `(catalog, table, column)` of every table and view in schema `main` of `catalogs`, each
+    /// table's columns in order. The catalog's, so nothing is bound (`columns_of`). Empty where
+    /// it could not be read: a convenience, as the names are (`nameable`), and a table is then
+    /// named alone.
+    fn catalog_columns(&self, catalogs: &[&str]) -> Vec<(String, String, String)> {
+        let sql = format!(
+            "SELECT database_name, table_name, column_name FROM system.main.duckdb_columns() \
+             WHERE schema_name = 'main' AND database_name IN ({}) \
+             ORDER BY database_name, table_name, column_index",
+            vec!["?"; catalogs.len()].join(", "),
+        );
+        (|| -> Result<Vec<(String, String, String)>, duckdb::Error> {
+            let mut st = self.ingest.prepare(&sql)?;
+            let rows = st.query_map(duckdb::params_from_iter(catalogs), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            rows.collect()
+        })()
+        .unwrap_or_default()
     }
 
     /// REQ-9: prove the loaded data really is read-only, rather than trusting the attach.
@@ -1729,7 +1816,7 @@ impl Workspace {
                 let hint = crate::hint::for_parse_error(&m, sql);
                 return Err(WorkError::Parse(m, hint));
             }
-            Verdict::Refuse { index, kind } => return Err(denied(index, kind, sql)),
+            Verdict::Refuse { index, kind } => return Err(denied(index, kind, sql, true)),
             Verdict::Allow(_) => {}
         }
         // REQ-7: one watchdog for the whole batch. Proven in probe 2 — an execution-phase
@@ -1833,6 +1920,9 @@ impl Workspace {
                 // statement that depends on an earlier one in this batch; now it is bound, so it
                 // can be classified — and a refused kind is refused here, before it executes.
                 let kind = ffi::duckdb_prepared_statement_type(prep);
+                if kind != ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT {
+                    self.agent_columns = Default::default();
+                }
                 // DuckDB's own transaction around a statement that keeps a dynamic PIVOT
                 // (`Wrap`): neither of its TRANSACTIONs runs, and what it wraps runs as every
                 // statement does, each CREATE in a transaction of benchy's. Any other TRANSACTION
@@ -1880,6 +1970,7 @@ impl Workspace {
                         mine as usize + 1,
                         crate::guard::type_name(kind),
                         sql,
+                        false,
                     ));
                     break;
                 }

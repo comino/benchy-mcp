@@ -77,7 +77,9 @@ starting a session, or by `benchy-mcp doctor --json`.
 ## Frames
 
 A four-byte big-endian length, then one JSON object. A request is at most 1 MiB — it is SQL or a
-path, and every frame is parsed — and a reply is bounded by the caps. A request over that length,
+path, and every frame is parsed — and a reply is bounded: its text by the caps, and what it
+lists beside the text by a count of its own, such as the 32 results a query reply lists at most
+([query](#query)). A request over that length,
 or one that is not a JSON object benchy can read — nested deeper than 128, say, or holding a
 number out of range — ends the session: a byte stream cannot be resynchronised.
 
@@ -351,7 +353,7 @@ on is in `detail`, an object beside it, wherever there is a fact to give; where 
 |---|---|
 | `E_VERSION` | `protocols`: every version this benchy speaks, as `compat.json`'s `host_protocols` |
 | `E_LIMIT` | `limit`: which, by its name in `hello`'s `limits` — `attach_rows`, `attach_bytes`, `attachments`, `session_rows`, `session_bytes` or `loader_memory_ceiling`. `value`: the bound the table was held to — the limit itself, or for `session_rows` and `session_bytes` what the session's budget had left after the tables before it |
-| `E_SQL` | where the batch stopped at a statement: `statement`, counted from 1; `result_ids` and `results`, the statements' before it, in a query reply's shape ([query](#query)), empty where none ran. Absent for a batch that did not parse, or one refused whole |
+| `E_SQL` | where the batch stopped at a statement: `statement`, counted from 1; `result_ids` and `results`, the statements' before it, in a query reply's shape ([query](#query)), empty where none ran, the last 32 at most, and `results_omitted` where there were more. So the statements before `statement` ran. Absent for a batch that did not parse, or one refused whole before any of it ran, as `CREATE …; EXPLAIN …` is: its message names the statement refused, and says nothing in the batch ran |
 | `E_DEADLINE` | `reason`: `deadline`, a query past its deadline, or `load_timeout`, an attach past `--load-timeout`. `lost`: `[]`, nothing. A query's has `statement`, `result_ids` and `results` too, as `E_SQL`'s |
 | `E_REBUILT` | `reason`: `hard_deadline`, `memory_ceiling`, `engine_died` (the engine stopped answering, as when something killed it) or `pivot_type` (a batch left a dynamic PIVOT's type that could not be dropped). `lost`: what the rebuild did not bring back, `["results", "agent_tables"]`: every retained result id, and the agent's own tables. For `memory_ceiling`, `held` and `ceiling` in bytes |
 | `E_UNAVAILABLE` | where this call lost the engine and the rebuild failed: `reason` and `lost`, as `E_REBUILT`'s. Absent where the bench was already unavailable |
@@ -671,6 +673,13 @@ explains only for an attached table and a host may explain for its own helpers:
   cell cap, a row cut at the byte cap, or rows past what was kept. It is when the text says
   `TRUNCATED`.
 
+`max_bytes` bounds `text`. `result_ids` and `results` are held to a count instead: they list the
+last 32 results of the batch, the ones benchy keeps and `page` reads, since an earlier one's id is
+`E_NO_RESULT` by the time the reply arrives. A batch that made more says how many came before
+those listed in `results_omitted`, which is absent where none did; the first listed is then the
+batch's result `results_omitted + 1`. So a reply is at most `max_bytes` of text and about 4 KB of
+entries, however many statements the batch holds.
+
 A cap in `caps` —
 `max_rows`, `max_bytes`, `max_cell_bytes` or `deadline_secs`, the four `hello` reports — may lower
 the session's for this call, never raise it; `max_bytes` stays at least 512 and `max_cell_bytes`
@@ -681,7 +690,8 @@ A batch stops at the first statement that fails, and the call is refused with `E
 error's message comes first, then their results, with their result ids in the text, all inside
 `max_bytes`. The error's `detail` gives the statement it stopped at, and the earlier results'
 `result_ids` and `results` as this reply would, so a host pages or logs them without reading the
-text ([Detail](#detail)).
+text ([Detail](#detail)). They are held to the same 32 as a reply's, with `results_omitted`
+beside them where the batch made more.
 
 ### page
 

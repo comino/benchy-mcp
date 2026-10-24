@@ -621,6 +621,12 @@ error that can have one.
 - `a_qualified_unknown_column_resolves_its_alias` — `r.temp`, `t.temp` and a CTE's `c.temp`
   are told too, the alias said as its table, that table first.
 - `an_unknown_column_of_a_helper_view_lists_its_columns` — a helper view is listed like a table.
+- `a_hint_runs_nothing_of_the_views_it_lists` — the columns are the catalog's: a view whose
+  table-function argument calls `nextval` is listed with its columns, and the sequence stays.
+- `a_hint_takes_nothing_past_the_deadline` — a missing table's error comes back within the
+  deadline with a view whose bind would sleep past it in the catalogue.
+- `a_hint_lists_the_agents_objects_as_they_are_now` — the columns kept are of the agent's
+  objects as they are after a view is replaced, a table made, dropped or altered.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.
@@ -761,11 +767,18 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   them, in protocol 3's `hello`.
 - `a_query_reply_counts_the_rows_of_each_result` — `results` gives each result's rows held,
   whether complete, rows shown and whether the text was cut.
+- `a_reply_lists_only_the_results_that_can_be_paged` — `result_ids` and `results`, of a reply
+  and of a failure's `detail`, list at most the last 32 results of a batch, the ones `page`
+  reads, and `results_omitted` counts those before them: a reply of 2,000 results at
+  `max_bytes` 512 stays under 5.3 KB.
 - `a_version_refusal_lists_the_versions_in_its_detail` — `E_VERSION`'s `detail.protocols` is
   every version benchy speaks.
 - `a_failed_batch_says_what_ran_in_its_detail` — a batch that fails gives the statement it
   stopped at, and the earlier results' `result_ids` and `results` in a query reply's shape, in
   `detail`, and still in the message; past the deadline, `reason` and an empty `lost` too.
+- `a_batch_refused_whole_says_no_statement_in_its_detail` — a batch refused before any of it
+  ran has no `detail`, its message says nothing in it ran, and its earlier `CREATE` made nothing;
+  a statement refused once the ones before it ran gives `statement` and their results.
 - `a_rebuild_says_in_its_detail_why_and_what_was_lost` — `E_REBUILT`'s `detail.reason`
   (`hard_deadline`, `engine_died`, `memory_ceiling` with `held` and `ceiling`) and `lost`
   (`results`, `agent_tables`); the message tells the model the results went, and past the

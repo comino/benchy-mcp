@@ -133,6 +133,10 @@ pub struct Reply {
     /// it in `result_ids` and `results`.
     #[serde(default)]
     pub statement: Option<usize>,
+    /// How many of a `Query`'s results came before those in `result_ids`, which lists only the
+    /// ones kept for paging (`crate::result::pageable`).
+    #[serde(default)]
+    pub omitted: usize,
     /// Facts about a failure the supervisor itself decided, for a host's `error.detail` (#26):
     /// why the engine was rebuilt and what went with it. Never on the wire, so an engine cannot
     /// put anything there: only a number (`statement`) and the result ids it already reports
@@ -156,6 +160,7 @@ impl Reply {
             sql: None,
             rebuild: None,
             statement: None,
+            omitted: 0,
             detail: None,
         }
     }

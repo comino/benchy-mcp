@@ -122,6 +122,16 @@ pub(crate) fn retain(kept: &mut std::collections::VecDeque<QueryResult>, r: Quer
     }
 }
 
+/// What a reply lists beside its text of a batch's results, `each` in order: the last
+/// [`RETAINED_RESULTS`], the ones [`retain`] keeps and a page can read, and how many before them
+/// it leaves out. Listed whole, 2,000 results took a reply at a 512-byte cap to 216 KB, its ids
+/// of results long gone (`a_reply_lists_only_the_results_that_can_be_paged`).
+pub fn pageable<T>(mut each: Vec<T>) -> (Vec<T>, usize) {
+    let omitted = each.len().saturating_sub(RETAINED_RESULTS);
+    each.drain(..omitted);
+    (each, omitted)
+}
+
 /// A result as the workspace keeps it: up to [`RETAIN_ROWS`] rows, every value already cut to the
 /// cell cap. Paging reads from here, so it never runs the query again.
 #[derive(Debug, Clone)]

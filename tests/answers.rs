@@ -174,6 +174,55 @@ fn a_query_reply_counts_the_rows_of_each_result() {
 }
 
 #[test]
+fn a_reply_lists_only_the_results_that_can_be_paged() {
+    // `result_ids` and `results` had an entry for every result of a batch, whatever its
+    // `max_bytes`: 2,000 `SELECT 1`s at 512 bytes gave a 216 KB reply, and a batch that failed
+    // after them as much in its `detail` (measured). Only the last 32 are kept for paging, so an
+    // earlier id is `E_NO_RESULT` to a host; those are counted in `results_omitted` instead.
+    let mut h = Host::start(&[]);
+    let caps = json!({"max_bytes": 512});
+    for n in [40, 2000] {
+        for fails in [false, true] {
+            let sql = "SELECT 1; ".repeat(n)
+                + if fails {
+                    "SELECT nope FROM range(1)"
+                } else {
+                    ""
+                };
+            let r = h.query(&sql, caps.clone());
+            let what = if fails {
+                "a failure's detail"
+            } else {
+                "a reply"
+            };
+            let listed = if fails {
+                assert_eq!(code(&r), "E_SQL", "{r}");
+                assert_eq!(r["error"]["detail"]["statement"], n + 1, "{r}");
+                &r["error"]["detail"]
+            } else {
+                assert_eq!(r["ok"], true, "{r}");
+                &r
+            };
+            let ids = listed["result_ids"].as_array().expect("result_ids");
+            let results = listed["results"].as_array().expect("results");
+            assert_eq!((ids.len(), results.len()), (32, 32), "{what} of {n}: {r}");
+            assert_eq!(listed["results_omitted"], n - 32, "{what} of {n}: {r}");
+            assert_eq!(results[0]["result_id"], ids[0], "{what} of {n}");
+            // 512 bytes of text, and 32 entries of about 100
+            let bytes = r.to_string().len();
+            assert!(bytes < 512 + 32 * 150, "{what} of {n}: {bytes} bytes");
+            // the last of the batch, every one of them retained
+            let first = h.call("page", json!({"result_id": ids[0]}));
+            assert_eq!(first["ok"], true, "{what} of {n}: {first}");
+        }
+    }
+    // A batch of no more than 32 results lists them all and says nothing was left out.
+    let r = h.query(&"SELECT 1; ".repeat(32), caps);
+    assert_eq!(r["result_ids"].as_array().map(Vec::len), Some(32), "{r}");
+    assert!(r.get("results_omitted").is_none(), "{r}");
+}
+
+#[test]
 fn a_page_says_the_sql_of_its_result() {
     // A host whose tool returns a result with its SQL keeps no mapping of its own. The SQL is the
     // agent's statement as it wrote it, one statement of a batch, and nothing an operator's helper

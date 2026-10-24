@@ -3156,6 +3156,49 @@ fn a_failed_batch_says_what_ran_in_its_detail() {
     );
 }
 
+#[test]
+fn a_batch_refused_whole_says_no_statement_in_its_detail() {
+    // The classifier refuses a batch before any of it runs when a statement it can bind is of a
+    // kind not allowed. That refusal gave `detail.statement` 2 for `CREATE …; EXPLAIN …`, which
+    // tells a host statement 1 ran, and the message said "nothing after it ran"; `kept` was never
+    // made. A statement that binds only once an earlier one has run is refused where it stands,
+    // after that one, and says so.
+    let mut h = Host::start(&[]);
+    let r = h.call(
+        "query",
+        json!({"sql": "CREATE TABLE kept AS SELECT 1; EXPLAIN SELECT 1"}),
+    );
+    assert_eq!(code(&r), "E_SQL", "{r}");
+    assert!(r["error"].get("detail").is_none(), "{r}");
+    let said = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        said.starts_with("statement 2 is EXPLAIN") && said.contains("nothing in the batch ran"),
+        "{said}"
+    );
+    let r = h.call("query", json!({"sql": "SELECT * FROM kept"}));
+    assert_eq!(code(&r), "E_SQL", "`kept` was not made: {r}");
+
+    let r = h.call(
+        "query",
+        json!({"sql": "CREATE TABLE made AS SELECT 1 AS x; EXPLAIN SELECT * FROM made"}),
+    );
+    assert_eq!(code(&r), "E_SQL", "{r}");
+    let detail = &r["error"]["detail"];
+    assert_eq!(detail["statement"], 2, "{r}");
+    assert_eq!(
+        detail["result_ids"].as_array().map(Vec::len),
+        Some(1),
+        "{r}"
+    );
+    let said = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        said.contains("nothing after it ran") && said.contains("Statement 1 ran before it"),
+        "{said}"
+    );
+    let r = h.call("query", json!({"sql": "SELECT * FROM made"}));
+    assert_eq!(r["ok"], true, "`made` was made: {r}");
+}
+
 /// A query the hard deadline kills, and not the memory ceiling: the engine is stopped, so it
 /// neither answers nor grows.
 #[cfg(target_os = "linux")]
