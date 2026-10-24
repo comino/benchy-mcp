@@ -51,7 +51,7 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 # 0.75 s (spike/decompress). The cost: a cold build about 75 s longer at 2 jobs, peaking at 241 MB.
 # No default features: no legacy formats, no dictionary builder. Cargo.lock holds zstd-sys at
 # 2.0.16, a release with a year of use behind it.
-zstd = { version = "0.13.3", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 # The HTTP source (src/sources/http/). JSON pages are decoded by arrow-json, the same version the
 # rest of arrow resolves: a page's rows decode straight into a list of structs whose child is the
 # batch, in half serde_json's instructions (docs/HTTP-SOURCE.md).
