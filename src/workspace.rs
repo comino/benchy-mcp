@@ -125,6 +125,45 @@ struct Builtin {
     parser: std::collections::HashSet<String>,
 }
 
+/// Functions benchy's own SQL calls, and so names DuckDB's listing of its own must hold; and a
+/// word its parser reads itself. A listing without one is not DuckDB's.
+const BUILTIN_SURE: &[&str] = &[
+    "bool_or",
+    "regexp_matches",
+    "concat",
+    "contains",
+    "starts_with",
+    "count_star",
+    "lower",
+    "duckdb_functions",
+];
+const PARSER_SURE: &[&str] = &["select", "coalesce"];
+
+impl Builtin {
+    /// DuckDB's own names from what the scans read, or why they are not kept. They are kept for
+    /// the engine's life, and every CREATE after is checked against them, so a listing that
+    /// cannot be DuckDB's, an empty one above all, refuses the statement and keeps nothing: the
+    /// next CREATE reads them again (`a_listing_of_builtins_that_cannot_be_duckdbs_is_not_kept`).
+    /// The check of the agent's macros once took an empty listing for DuckDB's names, kept for
+    /// the engine's life, so every built-in's name was free
+    /// (`a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins`).
+    fn read(
+        functions: std::collections::HashSet<String>,
+        parser: std::collections::HashSet<String>,
+    ) -> Result<Builtin, String> {
+        let missing = BUILTIN_SURE
+            .iter()
+            .find(|f| !functions.contains(**f))
+            .or_else(|| PARSER_SURE.iter().find(|k| !parser.contains(**k)));
+        match missing {
+            Some(name) => Err(format!(
+                "DuckDB's own names could not be read: the listing lacks `{name}`"
+            )),
+            None => Ok(Builtin { functions, parser }),
+        }
+    }
+}
+
 /// Whether a type of the temporary catalog named `name`, made in the batch `sql`, is a dynamic
 /// PIVOT's. DuckDB 1.5.5 names one `__pivot_enum_` and a random UUID, lower-case, in a CREATE
 /// TYPE it adds to the batch; the C API gives no statement's text or origin, so the name is what
@@ -206,10 +245,19 @@ enum Made {
 /// temporary catalog and of `memory`, each with its kind. A table in a schema of its own hides
 /// nothing.
 ///
-/// Every catalog read benchy makes names `system.main`. An unqualified `duckdb_tables()` resolved
-/// to an agent's table macro of that name, measured on DuckDB 1.5.5, on the host-facing
-/// connection too (`benchys_catalog_reads_cannot_be_shadowed`), and so would an unqualified
-/// scalar or aggregate: a macro `count()` broke `count(DISTINCT …)`. So these use none.
+/// Every function benchy's own SQL calls is named through `system.main`, the catalog the agent
+/// cannot write to. An unqualified `duckdb_tables()` resolved to an agent's table macro of that
+/// name, measured on DuckDB 1.5.5, on the host-facing connection too
+/// (`benchys_catalog_reads_cannot_be_shadowed`), and so does an unqualified scalar or aggregate,
+/// and an operator: DuckDB binds `a || b`, `a LIKE b`, `a + b` and `count(*)` as calls of the
+/// functions `||`, `~~`, `+` and `count_star`, which a macro of the agent's of that name answered
+/// for (a macro `=` or `coalesce` changed nothing, and `IN`, `NOT`, CASE and a cast parse to no
+/// call). A
+/// macro `bool_or(x) AS unnest([]::BOOLEAN[])` left the check of the agent's macros empty, so it
+/// and every built-in name after it were kept
+/// (`a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins`). So these call
+/// `system.main.concat`, not `||`, and `system.main.contains`, not LIKE
+/// (`benchys_internal_sql_names_every_function_by_its_catalog`).
 const AGENT_RELATIONS: &CStr = c"SELECT table_oid, table_name, 'table' \
       FROM system.main.duckdb_tables() \
       WHERE database_name IN ('temp', 'memory') AND schema_name = 'main' \
@@ -254,15 +302,16 @@ const fn c_str(s: &'static str) -> &'static CStr {
 /// A column of the agent's, in any of its tables or views and any schema, whose type holds an
 /// ENUM, said as `enum_refused` says it: DuckDB spells a nested one inside the outer type,
 /// `STRUCT(z ENUM('c'))[]`. Asked after every CREATE and ALTER.
-const AGENT_ENUM_COLUMNS: &CStr = c"SELECT 0, 'the column ' || table_name || '.' || column_name \
-      || ' of type ' || data_type, '' FROM system.main.duckdb_columns() \
-      WHERE database_name IN ('temp', 'memory') AND data_type LIKE '%ENUM(%' LIMIT 1";
+const AGENT_ENUM_COLUMNS: &CStr = c"SELECT 0, system.main.concat('the column ', table_name, '.', \
+        column_name, ' of type ', data_type), '' FROM system.main.duckdb_columns() \
+      WHERE database_name IN ('temp', 'memory') AND system.main.contains(data_type, 'ENUM(') \
+      LIMIT 1";
 /// A table of the agent's, in any schema, whose SQL spells an ENUM ([`enum_spelled`]): in a
 /// column's DEFAULT, a generated column or a CHECK, which DuckDB keeps bound
 /// (`an_object_that_keeps_an_enum_in_its_sql_is_refused`).
 const ENUM_IN_TABLES: &CStr = c_str(concat!(
-    "SELECT 0, 'the table ' || table_name, '' FROM system.main.duckdb_tables() \
-     WHERE database_name IN ('temp', 'memory') AND regexp_matches(sql, ",
+    "SELECT 0, system.main.concat('the table ', table_name), '' FROM system.main.duckdb_tables() \
+     WHERE database_name IN ('temp', 'memory') AND system.main.regexp_matches(sql, ",
     enum_spelled!(),
     ") LIMIT 1\0"
 ));
@@ -270,15 +319,17 @@ const ENUM_IN_TABLES: &CStr = c_str(concat!(
 /// views before any filter applies, about 2 ms here against 0.1 ms without it (DuckDB 1.5.5),
 /// so it is asked only when a view may have been made.
 const ENUM_IN_VIEWS: &CStr = c_str(concat!(
-    "SELECT 0, 'the view ' || view_name, '' FROM system.main.duckdb_views() \
-     WHERE database_name IN ('temp', 'memory') AND NOT internal AND regexp_matches(sql, ",
+    "SELECT 0, system.main.concat('the view ', view_name), '' FROM system.main.duckdb_views() \
+     WHERE database_name IN ('temp', 'memory') AND NOT internal \
+     AND system.main.regexp_matches(sql, ",
     enum_spelled!(),
     ") LIMIT 1\0"
 ));
 /// The same of an index's expressions.
 const ENUM_IN_INDEXES: &CStr = c_str(concat!(
-    "SELECT 0, 'the index ' || index_name, '' FROM system.main.duckdb_indexes() \
-     WHERE database_name IN ('temp', 'memory') AND regexp_matches(coalesce(sql, ''), ",
+    "SELECT 0, system.main.concat('the index ', index_name), '' \
+     FROM system.main.duckdb_indexes() \
+     WHERE database_name IN ('temp', 'memory') AND system.main.regexp_matches(coalesce(sql, ''), ",
     enum_spelled!(),
     ") LIMIT 1\0"
 ));
@@ -286,14 +337,15 @@ const ENUM_IN_INDEXES: &CStr = c_str(concat!(
 /// when the batch is over (`a_pivot_keeps_no_enum_after_its_batch`).
 const PIVOT_TYPES: &CStr = c"SELECT type_oid, type_name, database_name \
       FROM system.main.duckdb_types() \
-      WHERE database_name = 'temp' AND NOT internal AND starts_with(type_name, '__pivot_enum_')";
+      WHERE database_name = 'temp' AND NOT internal \
+      AND system.main.starts_with(type_name, '__pivot_enum_')";
 /// The agent's functions, in any schema: whether each is where an unqualified name finds it
 /// (`1` in its `main` schema), its name, and whether its body spells an ENUM (`true`,
 /// [`enum_spelled`]). `duckdb_functions()` builds a row for each of DuckDB's built-ins before
 /// any filter applies, which is why it is asked only when a CREATE made no table, view or type.
 const AGENT_FUNCTIONS: &CStr = c_str(concat!(
     "SELECT (schema_name = 'main')::INTEGER, function_name, \
-       bool_or(regexp_matches(coalesce(macro_definition, ''), ",
+       system.main.bool_or(system.main.regexp_matches(coalesce(macro_definition, ''), ",
     enum_spelled!(),
     "))::VARCHAR FROM system.main.duckdb_functions() \
      WHERE database_name IN ('temp', 'memory') GROUP BY ALL\0"
@@ -304,12 +356,14 @@ const AGENT_FUNCTIONS: &CStr = c_str(concat!(
 /// engine. A listing of the built-ins of their own cost a second scan, as much as the first (#63:
 /// the first `CREATE MACRO` of an engine, measured in docs/PERFORMANCE.md). Read where the
 /// agent's are, after its CREATE, as the agent's own listing is: nothing the agent makes is in
-/// the `system` catalog, which DuckDB keeps to itself.
+/// the `system` catalog, which DuckDB keeps to itself, and every function the scan calls is that
+/// catalog's, so nothing the agent made changes which rows are DuckDB's. What it reads is held to
+/// [`Builtin::read`] before it is kept.
 const AGENT_AND_BUILTIN_FUNCTIONS: &CStr = c_str(concat!(
     "SELECT CASE WHEN database_name = 'system' THEN -1 \
        ELSE (schema_name = 'main')::INTEGER END, function_name, \
-       bool_or(CASE WHEN database_name = 'system' THEN false \
-         ELSE regexp_matches(coalesce(macro_definition, ''), ",
+       system.main.bool_or(CASE WHEN database_name = 'system' THEN false \
+         ELSE system.main.regexp_matches(coalesce(macro_definition, ''), ",
     enum_spelled!(),
     ") END)::VARCHAR FROM system.main.duckdb_functions() \
      WHERE database_name IN ('temp', 'memory', 'system') GROUP BY ALL\0"
@@ -730,15 +784,96 @@ impl Listings {
 }
 
 fn comment_of(conn: &Connection, db: &str, name: &str) -> Option<crate::profile::Profile> {
-    let c: Option<String> = conn
-        .query_row(
-            "SELECT comment FROM system.main.duckdb_tables() \
-             WHERE database_name = ? AND table_name = ?",
-            [db, name],
-            |r| r.get(0),
-        )
-        .ok()?;
+    let c: Option<String> = conn.query_row(COMMENT_OF, [db, name], |r| r.get(0)).ok()?;
     crate::profile::Profile::from_comment(&c?)
+}
+
+/// The rest of the SQL benchy reads the engine with. The host-facing connection sees the agent's
+/// `memory.main` as the agent's does, so each names its functions through `system.main` as the
+/// listings above do ([`AGENT_RELATIONS`]). Here, rather than where each is asked, so
+/// `benchys_internal_sql_names_every_function_by_its_catalog` reads every one.
+const COMMENT_OF: &str = "SELECT comment FROM system.main.duckdb_tables() \
+     WHERE database_name = ? AND table_name = ?";
+const ENGINE_VERSION: &str = "SELECT system.main.version()";
+const ICU_LOADED: &str = "SELECT system.main.count_star() FROM system.main.duckdb_extensions() \
+     WHERE extension_name = 'icu' AND loaded";
+const THREADS_ON: &CStr = c"SELECT system.main.current_setting('threads')::VARCHAR";
+const ZONE_ON: &CStr = c"SELECT system.main.current_setting('TimeZone')";
+const NAMEABLE: &str = "SELECT table_name FROM system.main.duckdb_tables() WHERE NOT internal \
+     UNION SELECT view_name FROM system.main.duckdb_views() WHERE NOT internal \
+     ORDER BY 1";
+const OWN_TABLES: &str = "SELECT table_name FROM system.main.duckdb_tables() \
+     WHERE database_name = 'memory' AND NOT internal \
+     UNION SELECT view_name FROM system.main.duckdb_views() \
+     WHERE database_name = 'memory' AND NOT internal ORDER BY 1";
+
+/// What the helpers' catalog `alias` holds, of every kind (`Workspace::helpers_hold`).
+fn helpers_held_sql(alias: &str) -> String {
+    format!(
+        "SELECT 'view', system.main.lower(view_name) FROM system.main.duckdb_views() \
+           WHERE database_name = '{alias}' AND NOT internal \
+         UNION SELECT 'macro', system.main.lower(function_name) \
+           FROM system.main.duckdb_functions() \
+           WHERE database_name = '{alias}' \
+         UNION ALL SELECT 'table', table_name FROM system.main.duckdb_tables() \
+           WHERE database_name = '{alias}' \
+         UNION ALL SELECT 'sequence', sequence_name FROM system.main.duckdb_sequences() \
+           WHERE database_name = '{alias}' \
+         UNION ALL SELECT 'index', index_name FROM system.main.duckdb_indexes() \
+           WHERE database_name = '{alias}' \
+         UNION ALL SELECT 'type', type_name FROM system.main.duckdb_types() \
+           WHERE database_name = '{alias}' AND NOT internal \
+         UNION ALL SELECT 'schema', schema_name FROM system.main.duckdb_schemas() \
+           WHERE database_name = '{alias}' AND NOT internal"
+    )
+}
+
+/// The rows of table `ident` (quoted already) of catalog `alias`.
+fn rows_sql(alias: &str, ident: &str) -> String {
+    format!("SELECT system.main.count_star() FROM {alias}.main.\"{ident}\"")
+}
+
+/// Which of the catalogs `list` (benchy's own `benchy_<n>`, quoted) hold a function.
+fn catalogs_with_functions_sql(list: &str) -> String {
+    format!(
+        "SELECT DISTINCT database_name FROM system.main.duckdb_functions() \
+         WHERE database_name IN ({list})"
+    )
+}
+
+/// The tables, the count of everything else, and the columns, of the catalogs `list`
+/// (`Workspace::catalog_listings`).
+fn listings_sql(list: &str) -> [String; 3] {
+    let tables = format!(
+        "SELECT database_name, schema_name, table_name, comment FROM system.main.duckdb_tables() \
+         WHERE database_name IN ({list})"
+    );
+    let others = [
+        "system.main.duckdb_views()",
+        "system.main.duckdb_sequences()",
+        "system.main.duckdb_indexes()",
+    ]
+    .iter()
+    .map(|f| format!("SELECT database_name FROM {f} WHERE database_name IN ({list})"))
+    .chain(
+        ["system.main.duckdb_types()", "system.main.duckdb_schemas()"]
+            .iter()
+            .map(|f| {
+                format!(
+                    "SELECT database_name FROM {f} WHERE database_name IN ({list}) \
+                     AND NOT internal"
+                )
+            }),
+    )
+    .collect::<Vec<_>>()
+    .join(" UNION ALL ");
+    let others =
+        format!("SELECT database_name, system.main.count_star() FROM ({others}) GROUP BY ALL");
+    let columns = format!(
+        "SELECT database_name, table_name, column_name, data_type FROM system.main.duckdb_columns() \
+         WHERE database_name IN ({list}) ORDER BY database_name, table_name, column_index"
+    );
+    [tables, others, columns]
 }
 
 /// Whether the agent's connection is in UTC, given the zone it reports. A library without ICU
@@ -1213,10 +1348,7 @@ impl Workspace {
             .map(|a| format!("'{}'", a.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut st = self.ingest.prepare(&format!(
-            "SELECT DISTINCT database_name FROM system.main.duckdb_functions() \
-             WHERE database_name IN ({list})"
-        ))?;
+        let mut st = self.ingest.prepare(&catalogs_with_functions_sql(&list))?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
@@ -1306,11 +1438,7 @@ impl Workspace {
         let ident = name.replace('"', "\"\"");
         let rows: i64 = self
             .ingest
-            .query_row(
-                &format!("SELECT count(*) FROM {alias}.main.\"{ident}\""),
-                [],
-                |r| r.get(0),
-            )
+            .query_row(&rows_sql(alias, &ident), [], |r| r.get(0))
             .map_err(|e| WorkError::Open(format!("`{name}` is not in what was attached: {e}")))?;
         let columns = held.columns.clone();
         if self
@@ -1355,10 +1483,8 @@ impl Workspace {
             .map(|(_, a)| format!("'{}'", a.replace('\'', "''")))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut st = self.ingest.prepare(&format!(
-            "SELECT database_name, schema_name, table_name, comment FROM system.main.duckdb_tables() \
-             WHERE database_name IN ({list})"
-        ))?;
+        let [tables, others, columns] = listings_sql(&list);
+        let mut st = self.ingest.prepare(&tables)?;
         for t in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
             let (db, schema, table, comment): (String, String, String, Option<String>) = t?;
             out.tables
@@ -1366,36 +1492,12 @@ impl Workspace {
                 .or_default()
                 .push((schema, table, comment));
         }
-        let others = [
-            "system.main.duckdb_views()",
-            "system.main.duckdb_sequences()",
-            "system.main.duckdb_indexes()",
-        ]
-        .iter()
-        .map(|f| format!("SELECT database_name FROM {f} WHERE database_name IN ({list})"))
-        .chain(
-            ["system.main.duckdb_types()", "system.main.duckdb_schemas()"]
-                .iter()
-                .map(|f| {
-                    format!(
-                        "SELECT database_name FROM {f} WHERE database_name IN ({list}) \
-                     AND NOT internal"
-                    )
-                }),
-        )
-        .collect::<Vec<_>>()
-        .join(" UNION ALL ");
-        let mut st = self.ingest.prepare(&format!(
-            "SELECT database_name, count(*) FROM ({others}) GROUP BY ALL"
-        ))?;
+        let mut st = self.ingest.prepare(&others)?;
         for o in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
             let (db, n): (String, i64) = o?;
             out.others.insert(db, n as u64);
         }
-        let mut st = self.ingest.prepare(&format!(
-            "SELECT database_name, table_name, column_name, data_type FROM system.main.duckdb_columns() \
-             WHERE database_name IN ({list}) ORDER BY database_name, table_name, column_index"
-        ))?;
+        let mut st = self.ingest.prepare(&columns)?;
         for c in st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
             let (db, table, column, ty): (String, String, String, String) = c?;
             out.columns
@@ -1432,9 +1534,7 @@ impl Workspace {
     /// well informed, and a version baked into a string literal goes stale silently.
     pub fn engine_version(&self) -> String {
         self.ingest
-            .query_row("SELECT system.main.version()", [], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(ENGINE_VERSION, [], |r| r.get::<_, String>(0))
             .unwrap_or_else(|_| "unknown".into())
     }
 
@@ -1457,9 +1557,7 @@ impl Workspace {
     /// Read on the host-facing connection: it sees the same catalogs, and the agent connection
     /// has just failed a statement.
     fn nameable(&self) -> Vec<String> {
-        let sql = "SELECT table_name FROM system.main.duckdb_tables() WHERE NOT internal \
-                   UNION SELECT view_name FROM system.main.duckdb_views() WHERE NOT internal \
-                   ORDER BY 1";
+        let sql = NAMEABLE;
         let queried = (|| -> Result<Vec<String>, duckdb::Error> {
             let mut st = self.ingest.prepare(sql)?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?;
@@ -1563,7 +1661,7 @@ impl Workspace {
             }
         }
         let on = self
-            .agent_rows(c"SELECT current_setting('threads')::VARCHAR")
+            .agent_rows(THREADS_ON)
             .ok()
             .and_then(|rows| rows.into_iter().next())
             .map(|row| row.1);
@@ -1581,18 +1679,13 @@ impl Workspace {
     /// lockdown ran on (REQ-10 `the_agent_connection_is_utc_on_a_host_that_is_not`).
     fn verify_utc(&self) -> Result<(), WorkError> {
         let zone = self
-            .agent_rows(c"SELECT current_setting('TimeZone')")
+            .agent_rows(ZONE_ON)
             .ok()
             .and_then(|rows| rows.into_iter().next())
             .map(|row| row.1);
         let icu = || -> i64 {
             self.ingest
-                .query_row(
-                    "SELECT count(*) FROM system.main.duckdb_extensions() \
-                     WHERE extension_name = 'icu' AND loaded",
-                    [],
-                    |r| r.get(0),
-                )
+                .query_row(ICU_LOADED, [], |r| r.get(0))
                 .unwrap_or(1)
         };
         zone_held(zone.as_deref(), icu).map_err(WorkError::Open)
@@ -2083,22 +2176,7 @@ impl Workspace {
     fn helpers_hold(&self, alias: &str, shown: &[crate::helpers::Shown]) -> Result<(), WorkError> {
         let held = (|| -> Result<Vec<(String, String)>, duckdb::Error> {
             // benchy's own `benchy_<n>`
-            let mut st = self.ingest.prepare(&format!(
-                "SELECT 'view', lower(view_name) FROM system.main.duckdb_views() \
-                   WHERE database_name = '{alias}' AND NOT internal \
-                 UNION SELECT 'macro', lower(function_name) FROM system.main.duckdb_functions() \
-                   WHERE database_name = '{alias}' \
-                 UNION ALL SELECT 'table', table_name FROM system.main.duckdb_tables() \
-                   WHERE database_name = '{alias}' \
-                 UNION ALL SELECT 'sequence', sequence_name FROM system.main.duckdb_sequences() \
-                   WHERE database_name = '{alias}' \
-                 UNION ALL SELECT 'index', index_name FROM system.main.duckdb_indexes() \
-                   WHERE database_name = '{alias}' \
-                 UNION ALL SELECT 'type', type_name FROM system.main.duckdb_types() \
-                   WHERE database_name = '{alias}' AND NOT internal \
-                 UNION ALL SELECT 'schema', schema_name FROM system.main.duckdb_schemas() \
-                   WHERE database_name = '{alias}' AND NOT internal"
-            ))?;
+            let mut st = self.ingest.prepare(&helpers_held_sql(alias))?;
             let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect()
         })()
@@ -2325,13 +2403,13 @@ impl Workspace {
                 .into_iter()
                 .map(|r| r.1.to_ascii_lowercase())
                 .collect();
-            self.taken.builtin = Some(Builtin {
-                functions: system
+            self.taken.builtin = Some(Builtin::read(
+                system
                     .into_iter()
                     .map(|r| r.1.to_ascii_lowercase())
                     .collect(),
                 parser,
-            });
+            )?);
             agent
         };
         let builtin = self.taken.builtin.as_ref().expect("read above");
@@ -2991,10 +3069,7 @@ impl Workspace {
 
     /// The tables and views the agent made, by name.
     fn own_tables(&self) -> Vec<String> {
-        let sql = "SELECT table_name FROM system.main.duckdb_tables() \
-                   WHERE database_name = 'memory' AND NOT internal \
-                   UNION SELECT view_name FROM system.main.duckdb_views() \
-                   WHERE database_name = 'memory' AND NOT internal ORDER BY 1";
+        let sql = OWN_TABLES;
         (|| -> Result<Vec<String>, duckdb::Error> {
             let mut st = self.ingest.prepare(sql)?;
             let rows = st.query_map([], |r| r.get::<_, String>(0))?;
@@ -3335,6 +3410,175 @@ impl duckdb::arrow::util::display::DisplayIndex for TimeFormat<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The calls in `sql`, as DuckDB's own parser reads it, that name no catalog `system` and
+    /// schema `main`. An operator DuckDB binds as a function is one: `a || b` serializes as a
+    /// call of `||`.
+    fn unqualified(c: &Connection, sql: &str) -> Vec<String> {
+        fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    let at = |k: &str| o.get(k).and_then(|v| v.as_str());
+                    if at("class") == Some("FUNCTION")
+                        && (at("catalog") != Some("system") || at("schema") != Some("main"))
+                    {
+                        out.push(at("function_name").unwrap_or("?").to_string());
+                    }
+                    o.values().for_each(|v| walk(v, out));
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let j: String = c
+            .query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |r| r.get(0))
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap();
+        assert_eq!(v["error"], false, "{sql}: {j}");
+        let mut out = Vec::new();
+        walk(&v, &mut out);
+        out
+    }
+
+    #[test]
+    fn benchys_internal_sql_names_every_function_by_its_catalog() {
+        // REQ-9: what benchy asks the engine runs where the agent's macros are, on its own
+        // connection or the host-facing one, which sees `memory.main` too. A call that names no
+        // catalog is the agent's to answer for once it has a macro of that name: DuckDB 1.5.5
+        // resolves the agent's catalogs first. Held here by DuckDB's own parse of each, so a
+        // call added later without `system.main` fails this; a query added later belongs in
+        // this list. The parse shows operators too: `||`, `~~` (LIKE) and `count_star`
+        // (`count(*)`) are calls a macro of the agent's answered for.
+        let c = Connection::open_in_memory().unwrap();
+        assert_eq!(
+            unqualified(
+                &c,
+                "SELECT 'a' || 'b', 'a' LIKE 'b', count(*), bool_or(true)"
+            ),
+            ["||", "~~", "count_star", "bool_or"],
+            "the parse no longer shows what it is read for"
+        );
+        let list = "'benchy_1', 'benchy_2'";
+        let mut all: Vec<String> = [
+            AGENT_RELATIONS,
+            AGENT_TYPES,
+            AGENT_ENUM_COLUMNS,
+            ENUM_IN_TABLES,
+            ENUM_IN_VIEWS,
+            ENUM_IN_INDEXES,
+            PIVOT_TYPES,
+            AGENT_FUNCTIONS,
+            AGENT_AND_BUILTIN_FUNCTIONS,
+            SYSTEM_VIEWS,
+            PARSER_NAMES,
+            THREADS_ON,
+            ZONE_ON,
+            crate::guard::CATALOG_FUNCTIONS,
+            crate::guard::CATALOG_VIEWS,
+        ]
+        .iter()
+        .map(|s| s.to_str().unwrap().to_string())
+        .chain([COMMENT_OF, ENGINE_VERSION, ICU_LOADED, NAMEABLE, OWN_TABLES].map(str::to_string))
+        .collect();
+        all.push(catalogs_with_functions_sql(list));
+        all.extend(listings_sql(list));
+        all.push(helpers_held_sql("benchy_1"));
+        all.push(rows_sql("benchy_1", "readings"));
+        for sql in &all {
+            assert_eq!(unqualified(&c, sql), Vec::<String>::new(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_listing_of_builtins_that_cannot_be_duckdbs_is_not_kept() {
+        // The listing was once kept whatever it held, an empty one too, for the engine's life
+        // (`a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins`).
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect();
+        let e = Builtin::read(set(&[]), set(&[]))
+            .err()
+            .expect("an empty listing");
+        assert!(e.contains("could not be read"), "{e}");
+        assert!(Builtin::read(set(BUILTIN_SURE), set(&[])).is_err());
+        let mut short = BUILTIN_SURE.to_vec();
+        short.pop();
+        assert!(Builtin::read(set(&short), set(PARSER_SURE)).is_err());
+        let b = Builtin::read(set(BUILTIN_SURE), set(PARSER_SURE)).expect("DuckDB's");
+        assert!(b.functions.contains("bool_or") && b.parser.contains("select"));
+    }
+
+    #[test]
+    fn benchys_checks_cannot_be_blinded_by_a_planted_function() {
+        // Each function benchy's checks called unqualified, planted past the guard as a macro of
+        // the agent's that answers nothing, which is what an agent's macro under that name did
+        // on DuckDB 1.5.5 once the check of the agent's macros was blinded
+        // (`a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins`): an
+        // ENUM column was kept, a CREATE MACRO under a built-in's name was kept, a dynamic
+        // PIVOT's type outlived its batch, and an attached file holding a view besides its table
+        // was taken for one holding the table alone.
+        let dir = std::env::temp_dir().join(fresh_name("benchy-blinded-checks"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ws = Workspace::open_sealed(&dir, "1GB").unwrap();
+        let caps = crate::result::Caps::default();
+        ws.work(
+            "CREATE TABLE m AS SELECT 'lab' AS meter, 1.0 AS kw \
+             UNION ALL SELECT 'office', 2.0",
+            &caps,
+        )
+        .expect("runs");
+        for plant in [
+            "CREATE MACRO bool_or(x) AS unnest([]::BOOLEAN[])",
+            "CREATE MACRO regexp_matches(a, b) AS false",
+            "CREATE MACRO \"~~\"(a, b) AS false",
+            "CREATE MACRO contains(a, b) AS false",
+            "CREATE MACRO starts_with(a, b) AS false",
+            "CREATE MACRO \"||\"(a, b) AS NULL",
+            "CREATE MACRO count_star() AS 0",
+            "CREATE MACRO lower(x) AS 'forged'",
+        ] {
+            ws.raw_exec_unchecked(plant)
+                .unwrap_or_else(|e| panic!("{plant}: {e}"));
+        }
+        let e = ws
+            .work("CREATE TABLE e AS SELECT 'a'::ENUM('a') AS c", &caps)
+            .expect_err("an ENUM column is not kept")
+            .to_string();
+        assert!(e.contains("ENUM types are not kept"), "{e}");
+        // The first reads DuckDB's names and the agent's in one scan, the second the agent's
+        // alone.
+        for _ in 0..2 {
+            let e = ws
+                .work("CREATE MACRO abs(x) AS 424242", &caps)
+                .expect_err("a built-in's name is taken")
+                .to_string();
+            assert!(e.contains("is taken"), "{e}");
+        }
+        ws.work("PIVOT m ON meter USING sum(kw)", &caps)
+            .expect("the pivot answers");
+        let kept = ws
+            .agent_rows(
+                c"SELECT 0, system.main.count_star()::VARCHAR, '' \
+                  FROM system.main.duckdb_types() WHERE database_name = 'temp' AND NOT internal",
+            )
+            .unwrap();
+        assert_eq!(kept[0].1, "0", "the pivot's type outlived its batch");
+
+        let f = dir.join("readings.duckdb");
+        let c = Connection::open(&f).unwrap();
+        c.execute_batch("CREATE TABLE readings AS SELECT 1 AS id")
+            .unwrap();
+        drop(c);
+        assert_eq!(ws.attach("readings", &f).expect("attached").rows, 1);
+        let f = dir.join("extra.duckdb");
+        let c = Connection::open(&f).unwrap();
+        c.execute_batch("CREATE TABLE extra AS SELECT 1 AS id; CREATE VIEW v AS SELECT 1 AS x")
+            .unwrap();
+        drop(c);
+        assert!(
+            ws.attach("extra", &f).is_err(),
+            "a file holding a view besides its table is refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn benchys_catalog_reads_cannot_be_shadowed() {

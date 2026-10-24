@@ -6,6 +6,23 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **Security: a macro of the agent's could blind the check that keeps built-in names taken.**
+  benchy's own SQL, run on connections that see the agent's objects, called some functions
+  unqualified, and DuckDB 1.5.5 resolves an unqualified call, an operator such as `||`, LIKE or
+  `count(*)` included, to the agent's macro of that name first. The check run after every
+  `CREATE` listed the agent's macros with `bool_or(...)`, so `CREATE MACRO bool_or(x) AS
+  unnest([]::BOOLEAN[])` made the listing empty: that macro was kept, and every built-in's name
+  was free after it. A macro `abs` then answered for DuckDB's `abs` in every query, an operator's
+  helper that calls `abs` included, and macros under `~~`, `regexp_matches`, `starts_with` or
+  `count_star` blinded the ENUM checks, the dropping of a dynamic PIVOT's type and the attach
+  check's counts. The listing was unqualified since 0.1.0, and the attack reproduced on 0.3.1. Since the built-in names were
+  read in the same scan (#63), an engine's first `CREATE` could also keep the empty listing as
+  DuckDB's names for the engine's life, even after the macro was dropped. Every function benchy's
+  own SQL calls is now named through `system.main` (`system.main.concat` in place of `||`,
+  `system.main.contains` in place of LIKE), held by a test that reads each query with DuckDB's own
+  parser, and a listing of DuckDB's names that lacks one of those functions refuses the statement
+  and is not kept (`a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins`,
+  `benchys_internal_sql_names_every_function_by_its_catalog`).
 - **Dependencies:** tokio 1.53.3 (RUSTSEC-2026-0386: `AsyncFd` constructors were unsound), toml 1.1
   (TOML 1.1; the config's rules are unchanged: unknown fields are still errors), libc 0.2.190,
   serde_json 1.0.154.

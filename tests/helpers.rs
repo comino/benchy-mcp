@@ -744,6 +744,53 @@ fn an_agent_cannot_replace_or_shadow_a_helper() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A helper calls DuckDB's `abs` by name, which the agent may not take (REQ-9). benchy's check of
+/// the agent's macros called `bool_or` and `regexp_matches` unqualified, after the agent's
+/// CREATE, so a macro of the agent's under one of those names answered for it: measured on
+/// DuckDB 1.5.5, `CREATE MACRO bool_or(x) AS unnest([]::BOOLEAN[])` left the listing empty. The
+/// macro was kept, and every CREATE after it was checked against nothing, so a macro `abs`
+/// answered for the helper's call, `h(-1)` 424242. On the engine's first CREATE the same empty
+/// listing was kept as DuckDB's own names for the engine's life, and the dropped `bool_or` left
+/// them so. A table macro of the name does not answer for an aggregate's call, and one whose
+/// body fails failed the check, which refused the statement; both are held here too.
+#[test]
+fn a_macro_of_the_agents_cannot_blind_the_check_that_keeps_a_helpers_builtins() {
+    let helper = "CREATE MACRO h(x) AS abs(x);";
+    let empty = "CREATE MACRO bool_or(x) AS unnest([]::BOOLEAN[])";
+    for chain in [
+        // the engine's first CREATE: what it read became DuckDB's names for the engine's life
+        &[empty, "DROP MACRO bool_or"][..],
+        &[empty][..],
+        // after the names were read: the agent's listing alone
+        &["CREATE MACRO mine(x) AS x", empty][..],
+        &["CREATE TEMP MACRO bool_or(x) AS unnest([]::BOOLEAN[])"][..],
+        &["CREATE MACRO bool_or(x) AS (SELECT true WHERE false)"][..],
+        &["CREATE MACRO regexp_matches(a, b) AS false"][..],
+        &["CREATE MACRO bool_or(x) AS error('the check fails')"][..],
+        &["CREATE MACRO bool_or(x) AS TABLE SELECT true AS b WHERE false"][..],
+    ] {
+        let (mut s, dir) = start(helper, &[]);
+        for sql in chain {
+            let (_, body, _) = s.query(sql);
+            if sql.starts_with("CREATE") && !sql.contains("mine") {
+                assert!(
+                    body.contains("is taken") || body.contains("the check fails"),
+                    "{chain:?}: {sql} was kept: {body}"
+                );
+            }
+        }
+        let e = err(&mut s, "CREATE MACRO abs(x) AS 424242");
+        assert!(e.contains("`abs` is taken"), "{chain:?}: {e}");
+        assert_eq!(
+            rows(&ok(&mut s, "SELECT h(-1) AS r, abs(-2) AS a")),
+            ["1 2"],
+            "{chain:?}"
+        );
+        drop(s);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 #[test]
 fn helpers_survive_a_rebuild() {
     // REQ-8: a query that wedges the planner, or swells the engine past its memory ceiling, costs
