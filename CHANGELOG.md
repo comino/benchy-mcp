@@ -6,6 +6,23 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **Security: every HTTP redirect destination is checked, and credentials stay masked.**
+  Destination validation previously stopped after the first allowed cross-origin hop, and
+  lowercase percent escapes could keep a secret in a redirected query parameter. HTTP and
+  ClickHouse error messages now redact credentials before display truncation and mask partial
+  secrets at the error-body read limit, including ClickHouse's `check` command.
+- **Truncated Arrow streams cannot pass as complete because a value resembles an end marker.**
+  Completion requires a parsed end-of-stream message. A second schema before that marker
+  closes a stream channel instead of consuming the next attachment during recovery.
+- **Results preserve wide integers and report values they cannot render faithfully.** Signed
+  and unsigned 128-bit scalars keep every digit; nested values whose Arrow representation loses
+  meaning are explicitly marked. BC timestamps use DuckDB's era spelling, cut headers set the
+  truncation flag, and a final page with cut values says `TRUNCATED`.
+- **HTTP pagination, profiles and configuration handle their boundary values.** Quoted Link
+  titles no longer hide later pages, and relative links use the URL after redirects. Control
+  characters in series keys cannot merge distinct tuples or NULL with a real string; profiles
+  omit absent finite extents and retain dates with five-digit years. Source names are unique
+  under ASCII case folding, and Unicode duration suffixes return a configuration error.
 - **Security: a macro of the agent's could blind the check that keeps built-in names taken.**
   benchy's own SQL, run on connections that see the agent's objects, called some functions
   unqualified, and DuckDB 1.5.5 resolves an unqualified call, an operator such as `||`, LIKE or

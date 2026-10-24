@@ -394,7 +394,9 @@ impl Where<'_> {
             .map_err(|e| Fault::host("E_CONFIG", format!("{shown}: {e}")))?;
         let url = pager.first();
         let mut buf = Vec::new();
-        let link = self.client.page(&url, &mut buf, self.max_bytes, budget)?;
+        let response = self.client.page(&url, &mut buf, self.max_bytes, budget)?;
+        pager.received(&response.url);
+        let link = response.link;
         let mut decls: Vec<FieldDecl> = spec.schema.clone();
         let bench: &Bench = bench;
         if decls.is_empty() {
@@ -579,7 +581,10 @@ impl Where<'_> {
                         .client
                         .page(&next, &mut buf, self.max_bytes - bytes, budget)
                     {
-                        Ok(l) => link = l,
+                        Ok(response) => {
+                            pager.received(&response.url);
+                            link = response.link;
+                        }
                         Err(f) => return fail(f),
                     }
                     page += 1;

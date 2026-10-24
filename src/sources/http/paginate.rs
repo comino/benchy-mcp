@@ -166,6 +166,13 @@ impl Pager {
         url
     }
 
+    /// A page arrived at this URL after the HTTP client validated all its redirects. Relative
+    /// links use this final response URL; next pages still must stay on the source's origin.
+    pub fn received(&mut self, url: &str) {
+        self.current = url.to_string();
+        self.followed.insert(url.to_string());
+    }
+
     fn page_url(&self) -> String {
         let Style::Page {
             page_param, size, ..
@@ -362,24 +369,20 @@ pub fn encode(s: &str) -> String {
 
 /// The `rel="next"` target of a `Link` header value (RFC 8288), several links comma-separated.
 pub fn link_next(header: &str) -> Option<String> {
-    let mut rest = header;
-    loop {
-        let open = rest.find('<')?;
-        let close = open + rest[open..].find('>')?;
-        let target = &rest[open + 1..close];
-        let after = &rest[close + 1..];
-        // This link's parameters run to the next link, which starts with `<`; a comma inside a
-        // quoted parameter is not a separator, and `<` cannot appear outside the target.
-        let end = after.find('<').unwrap_or(after.len());
-        let params = &after[..end];
-        let is_next = params.split(';').any(|p| {
+    for link in split_quoted(header, b',') {
+        let Some((target, params)) = link
+            .trim()
+            .strip_prefix('<')
+            .and_then(|s| s.split_once('>'))
+        else {
+            continue;
+        };
+        let is_next = split_quoted(params, b';').into_iter().any(|p| {
             let Some((k, v)) = p.split_once('=') else {
                 return false;
             };
             k.trim().eq_ignore_ascii_case("rel")
                 && v.trim()
-                    .trim_end_matches(',')
-                    .trim()
                     .trim_matches('"')
                     .split_ascii_whitespace()
                     .any(|r| r.eq_ignore_ascii_case("next"))
@@ -387,8 +390,37 @@ pub fn link_next(header: &str) -> Option<String> {
         if is_next {
             return Some(target.trim().to_string());
         }
-        rest = &after[end..];
     }
+    None
+}
+
+/// Delimiters inside URI targets and quoted parameter values belong to the value. Escaped
+/// quotes do not close a quoted value, and `<` in one does not open another link.
+fn split_quoted(text: &str, separator: u8) -> Vec<&str> {
+    let (mut quoted, mut escaped, mut target) = (false, false, false);
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (at, b) in text.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+        } else if quoted && b == b'\\' {
+            escaped = true;
+        } else if b == b'"' && !target {
+            quoted = !quoted;
+        } else if !quoted {
+            match b {
+                b'<' => target = true,
+                b'>' => target = false,
+                b if b == separator && !target => {
+                    parts.push(&text[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 /// `next` resolved against `base` (RFC 3986 §5.2, for the forms APIs send: absolute,

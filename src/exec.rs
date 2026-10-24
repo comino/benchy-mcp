@@ -441,21 +441,18 @@ fn spawn(
     Ok(child)
 }
 
-/// A reader that stops the world at `cap` bytes and remembers the last eight it saw.
+/// A reader that stops the world at `cap` bytes.
 ///
 /// The cap bounds memory: arrow's reader allocates per message from the stream it is given, so a
 /// reader that refuses to yield more than `cap` bytes bounds every allocation behind it without
 /// this code having to parse flatbuffer headers itself.
 ///
-/// The tail is how a truncated stream is caught. Measured on pyarrow 25.0.1: a stream cut at an
-/// exact message boundary parses clean and silently returns half the rows, and a connector that
-/// dies between pages cuts exactly there. The end-of-stream marker is the only thing that
-/// distinguishes "finished" from "stopped".
+/// Completion is checked by the message parser in [`read_opened`]. A raw byte suffix is not
+/// evidence of an end marker: a record batch's final value can have exactly those bytes.
 struct Capped<R> {
     inner: R,
     seen: u64,
     cap: u64,
-    tail: [u8; 8],
     over: bool,
     /// The connector closed its end: everything it wrote has been read. When a read fails before
     /// this, benchy stopped reading, and whatever the connector does next is a consequence.
@@ -472,14 +469,10 @@ impl<R: Read> Capped<R> {
             inner,
             seen: 0,
             cap,
-            tail: [0; 8],
             over: false,
             eof: false,
             abort,
         }
-    }
-    fn ended_cleanly(&self) -> bool {
-        self.tail == EOS
     }
 }
 
@@ -504,16 +497,6 @@ impl<R: Read> Read for Capped<R> {
         }
         if n == 0 && room > 0 {
             self.eof = true;
-        }
-        if n > 0 {
-            let got = &buf[..n];
-            if got.len() >= 8 {
-                self.tail.copy_from_slice(&got[got.len() - 8..]);
-            } else {
-                self.tail.rotate_left(got.len());
-                let at = 8 - got.len();
-                self.tail[at..].copy_from_slice(got);
-            }
         }
         Ok(n)
     }
@@ -1162,7 +1145,6 @@ pub fn fetch_within(
     );
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let timed_out = watchdog.join().unwrap_or(false);
-    let clean = capped.ended_cleanly();
     let seen = capped.seen;
     let reached_eof = capped.eof;
     drop(capped); // closes our end; a connector still writing gets EPIPE
@@ -1304,19 +1286,6 @@ pub fn fetch_within(
         batches,
         rows,
     } = read?;
-    if !clean {
-        // The measured case: a clean-boundary cut parses without complaint and returns half the
-        // rows. Only the end-of-stream marker separates "finished" from "stopped".
-        return Err(Fault::host(
-            "E_HOST_TRUNCATED",
-            format!(
-                "{}: the stream ended without its end-of-stream marker after {rows} row(s). \
-                 The connector exited 0, so it believes it succeeded — it is most likely dying \
-                 between pages and not reporting it.",
-                src.name
-            ),
-        ));
-    }
     Ok(Fetched {
         schema,
         batches,
@@ -1543,8 +1512,8 @@ pub fn open_host_stream(path: &Path, max_bytes: u64) -> Result<HostStream, Fault
             format!("it is {bytes} bytes, and an attachment may be at most {max_bytes}"),
         ));
     }
-    // A stream cut at a message boundary parses as a valid, shorter one; only the marker tells
-    // them apart.
+    // A quick rejection before loading, not proof of completion: a batch's last value can
+    // have these bytes too. `read_opened` requires a separate parsed end-marker message.
     let mut tail = [0u8; 8];
     let ends = bytes >= 8
         && f.seek(SeekFrom::End(-8)).is_ok()
@@ -1689,11 +1658,6 @@ impl HostStream {
                     return Err(pipe_over(max_bytes, budget_bytes));
                 }
                 let stream = read.map_err(|e| refused(e, rows))?;
-                // A pipe closed at a message boundary reads as a shorter stream: only the marker
-                // tells the two apart, as for a file.
-                if !capped.ended_cleanly() {
-                    return Err(Fault::host("E_DATA", CUT_SHORT));
-                }
                 Ok((stream, capped.seen))
             }
         }
@@ -1776,12 +1740,6 @@ pub fn read_arrow<R: Read>(
         batches,
         rows,
     } = read?;
-    if !capped.ended_cleanly() {
-        return Err(Fault::host(
-            "E_HOST_TRUNCATED",
-            format!("the stream ended without its end-of-stream marker after {rows} row(s)"),
-        ));
-    }
     Ok(Fetched {
         schema,
         batches,
@@ -1850,8 +1808,8 @@ fn read_opened<R: Read>(
     let bad = |e: arrow::error::ArrowError| {
         Fault::host("E_HOST_PROTOCOL", format!("bad Arrow stream: {e}"))
     };
-    // A stream that stops without its marker ends the loop as one that has it does: the caller
-    // tells them apart by the marker (`Capped::ended_cleanly`).
+    // Only a parsed end-marker message completes the stream. Arrow accepts EOF at a message
+    // boundary as a shorter stream, and a batch's final value can look exactly like EOS bytes.
     while let Some(message) = crate::ipc::next(r, &mut decoded)? {
         let end = message.end;
         let mut buffer = arrow::buffer::Buffer::from_vec(message.bytes);
@@ -1889,11 +1847,10 @@ fn read_opened<R: Read>(
             });
         }
     }
-    Ok(Stream {
-        schema,
-        batches,
-        rows: *rows,
-    })
+    Err(Fault::host(
+        "E_HOST_TRUNCATED",
+        format!("the stream ended without its end-of-stream marker after {rows} row(s)"),
+    ))
 }
 
 /// The end-of-stream marker ends the input too. Read up to the first marker, a connector that

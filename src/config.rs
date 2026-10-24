@@ -305,7 +305,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Sources, String> {
         inert_keys(&s, path)?;
         let names = table_names(&s, path)?;
         for name in &names {
-            if !seen.insert(name.clone()) {
+            if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(format!(
                     "{}: two sources are both named `{name}`. A name is what the agent and the \
                      engine see, so it has to be unique.",
@@ -975,7 +975,7 @@ fn build_narrowing(n: Narrow, source: &str, path: &Path) -> Result<crate::exec::
 /// is a window an operator gets wrong.
 fn parse_duration(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
-    let (n, unit) = s.split_at(s.len().checked_sub(1)?);
+    let (n, unit) = s.split_at_checked(s.len().checked_sub(1)?)?;
     let n: u64 = n.parse().ok()?;
     let secs = match unit {
         "d" => n.checked_mul(86_400)?,

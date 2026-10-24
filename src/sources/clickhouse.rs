@@ -695,6 +695,16 @@ impl Source {
         self.env.get("CLICKHOUSE_USER").map(String::as_str)
     }
 
+    fn redact(&self) -> super::http::client::Redact {
+        super::http::client::Redact::from_values(self.env.values().map(String::as_str))
+    }
+
+    fn fault_for(&self, status: u16, code: Option<u32>, text: &str) -> Fault {
+        let redact = self.redact();
+        // Redact the complete text before fault_for takes its 2,000-character excerpt.
+        redact.fault(fault_for(status, code, &redact.apply(text), &self.origin()))
+    }
+
     /// POST `sql`, with `params` and the settings every request carries, on the URL. A status
     /// other than 200 is turned into a fault here, with ClickHouse's own message for the log.
     ///
@@ -808,15 +818,17 @@ impl Source {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse().ok());
         let mut text = Vec::new();
-        let _ = resp
+        let read = resp
             .into_body()
             .into_reader()
             .take(64 * 1024)
             .read_to_end(&mut text);
+        let cut = text.len() == 64 * 1024 || read.is_err();
         let text = String::from_utf8_lossy(&text);
         let code = code.or_else(|| exception_code(&text));
+        let text = self.redact().window(&text, false, cut);
         Err(Refused {
-            fault: fault_for(status, code, &text, &self.origin()),
+            fault: self.fault_for(status, code, &text),
             code,
         })
     }
@@ -854,7 +866,7 @@ impl Source {
     }
 
     fn transport(&self, why: &str, timed_out: bool) -> Fault {
-        if timed_out {
+        let fault = if timed_out {
             Fault::host(
                 "E_HOST_TIMEOUT",
                 format!(
@@ -868,7 +880,8 @@ impl Source {
                 "E_UNAVAILABLE",
                 format!("{}: could not reach ClickHouse: {why}", self.origin()),
             )
-        }
+        };
+        self.redact().fault(fault)
     }
 
     /// A small text answer: `DESCRIBE`, a count.
@@ -881,7 +894,11 @@ impl Source {
             .read_to_string(&mut text)
             .map_err(|e| self.transport(&e.to_string(), timed_out(&e)))?;
         if text.contains("DB::Exception") {
-            return Err(fault_for(200, exception_code(&text), &text, &self.origin()));
+            let code = exception_code(&text);
+            let text = self
+                .redact()
+                .window(&text, false, text.len() == 16 * 1024 * 1024);
+            return Err(self.fault_for(200, code, &text));
         }
         Ok(text)
     }
@@ -909,8 +926,9 @@ impl Source {
 
     /// Read the schema, map it, and write the query.
     pub fn plan(&self) -> Result<Plan, Fault> {
-        let described = self.describe()?;
-        self.plan_from(described)
+        self.describe()
+            .and_then(|described| self.plan_from(described))
+            .map_err(|f| self.redact().fault(f))
     }
 
     /// The plan for the columns `DESCRIBE` gave: name, type, and how it is filled.
@@ -1142,6 +1160,9 @@ impl Source {
         let text = self.ask(&sql, &plan.params)?;
         let fields: Vec<&str> = text.trim().split('\t').collect();
         let rows: u64 = fields.first().and_then(|r| r.parse().ok()).ok_or_else(|| {
+            let text = self
+                .redact()
+                .window(&text, false, text.len() == 16 * 1024 * 1024);
             Fault::host(
                 "E_HOST_PROTOCOL",
                 format!("{}: the count answered {text:?}", self.origin()),
@@ -1197,6 +1218,19 @@ impl Source {
 
     /// [`Source::fetch`], and the bytes that crossed the network.
     pub fn fetch_counted(
+        &self,
+        plan: &Plan,
+        max_rows: u64,
+        max_bytes: u64,
+        limit: Option<u64>,
+        budget: &crate::admission::Budget,
+        sink: &mut crate::exec::Sink,
+    ) -> Result<(Fetched, u64), Fault> {
+        self.fetch_counted_inner(plan, max_rows, max_bytes, limit, budget, sink)
+            .map_err(|f| self.redact().fault(f))
+    }
+
+    fn fetch_counted_inner(
         &self,
         plan: &Plan,
         max_rows: u64,
@@ -1289,7 +1323,8 @@ impl Source {
                 // where ClickHouse writes an exception that comes after the stream has started.
                 // A little more is read so its text, and its code, reach the operator's log;
                 // a stream that ended without its marker may have one there too.
-                let _ = std::io::copy(&mut (&mut body).take(4096), &mut std::io::sink());
+                let read = std::io::copy(&mut (&mut body).take(4096), &mut std::io::sink());
+                let cut = read.map_or(true, |n| n == 4096);
                 let s = seen.lock().unwrap();
                 // ClickHouse writes an exception that comes after the response has started into
                 // the body, after whatever Arrow it had sent.
@@ -1297,7 +1332,11 @@ impl Source {
                     .into_owned();
                 if let Some(at) = tail.find("Code: ") {
                     let text = &tail[at..];
-                    return Err(fault_for(200, exception_code(text), text, &self.origin()));
+                    let code = exception_code(text);
+                    let text = self
+                        .redact()
+                        .window(text, at == 0 && s.tail.len() == 4096, cut);
+                    return Err(self.fault_for(200, code, &text));
                 }
                 if let Some((timeout, why)) = &s.error {
                     return Err(self.transport(why, *timeout));
@@ -1325,7 +1364,9 @@ impl Source {
             warn: false,
             skipped: false,
             label: label.into(),
-            detail: format!("[{}] {}\n     {fix}", f.code, f.detail),
+            detail: self
+                .redact()
+                .apply(&format!("[{}] {}\n     {fix}", f.code, f.detail)),
         };
 
         // Reach: /ping answers without credentials.
@@ -1335,7 +1376,7 @@ impl Source {
             Ok(r) => {
                 out.push(bad(
                     "reach",
-                    &fault_for(r.status().as_u16(), None, "", &self.origin()),
+                    &self.fault_for(r.status().as_u16(), None, ""),
                     "Something answers at that address, but not ClickHouse's HTTP interface. \
                      Check the host, the port (8123, or 8443 with TLS) and any path in `url`.",
                 ));
@@ -1419,15 +1460,17 @@ impl Source {
                 plan.columns.len(),
                 self.name
             ),
-            detail: lines,
+            detail: self.redact().apply(&lines),
         });
         for (n, t, why) in &plan.dropped {
             out.push(Check {
                 ok: true,
                 warn: true,
                 skipped: false,
-                label: format!("column `{n}` ({t}) is not loaded"),
-                detail: why.clone(),
+                label: self
+                    .redact()
+                    .apply(&format!("column `{n}` ({t}) is not loaded")),
+                detail: self.redact().apply(why),
             });
         }
 
@@ -1526,8 +1569,11 @@ impl super::Fetch for Source {
         let plan = Source::plan(self)?;
         for (n, t, why) in &plan.dropped {
             eprintln!(
-                "benchy: source `{}`: column `{n}` ({t}) is not loaded: {why}",
-                self.name
+                "{}",
+                self.redact().apply(&format!(
+                    "benchy: source `{}`: column `{n}` ({t}) is not loaded: {why}",
+                    self.name
+                ))
             );
         }
         Ok(plan)

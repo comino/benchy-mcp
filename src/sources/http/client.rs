@@ -33,18 +33,24 @@ pub struct Redact(Vec<String>);
 
 impl Redact {
     pub fn of(spec: &Spec) -> Redact {
-        let mut out: Vec<String> = Vec::new();
-        for v in spec.env.values().filter(|v| !v.is_empty()) {
-            out.push(v.clone());
-            out.push(paginate::encode(v));
-        }
+        let mut values: Vec<String> = spec.env.values().cloned().collect();
         if let Auth::Basic { user, password } = &spec.auth {
             let pair = format!(
                 "{}:{}",
                 spec.env.get(user).map_or("", String::as_str),
                 spec.env.get(password).map_or("", String::as_str)
             );
-            out.push(base64(pair.as_bytes()));
+            values.push(base64(pair.as_bytes()));
+        }
+        Self::from_values(values.iter().map(String::as_str))
+    }
+
+    /// Shared with ClickHouse, whose credential-bearing headers may be echoed in an error.
+    pub(crate) fn from_values<'a>(values: impl IntoIterator<Item = &'a str>) -> Redact {
+        let mut out = Vec::new();
+        for value in values.into_iter().filter(|v| !v.is_empty()) {
+            out.push(value.to_string());
+            out.push(paginate::encode(value));
         }
         // Longest first, so a secret that contains another is masked whole.
         out.sort_by_key(|s| std::cmp::Reverse(s.len()));
@@ -60,6 +66,44 @@ impl Redact {
             }
         }
         t
+    }
+
+    /// A bounded reader may retain only a suffix or prefix of a credential. Mask those edge
+    /// fragments too, before trimming whitespace or shortening the diagnostic for display.
+    pub(crate) fn window(&self, text: &str, cut_start: bool, cut_end: bool) -> String {
+        let text = self.apply(text);
+        let mut start = 0;
+        let mut end = text.len();
+        for secret in &self.0 {
+            // The read cap counts bytes, so it can split a UTF-8 character. Compare the same
+            // lossy representation the diagnostic uses, including its replacement character.
+            for at in 1..secret.len() {
+                if cut_start {
+                    let suffix = String::from_utf8_lossy(&secret.as_bytes()[at..]);
+                    if text.starts_with(suffix.as_ref()) {
+                        start = start.max(suffix.len());
+                    }
+                }
+                if cut_end {
+                    let prefix = String::from_utf8_lossy(&secret.as_bytes()[..at]);
+                    if text.ends_with(prefix.as_ref()) {
+                        end = end.min(text.len() - prefix.len());
+                    }
+                }
+            }
+        }
+        if start == 0 && end == text.len() {
+            return text;
+        }
+        if start >= end {
+            return "***".into();
+        }
+        format!(
+            "{}{}{}",
+            if start > 0 { "***" } else { "" },
+            &text[start..end],
+            if end < text.len() { "***" } else { "" }
+        )
     }
 
     pub fn fault(&self, f: Fault) -> Fault {
@@ -96,11 +140,19 @@ pub struct Body {
 
 /// A response that was a success.
 pub struct Answer {
+    /// The response's final URL, after validated redirects, for relative pagination links.
+    pub url: String,
     /// The `Link` header's values, joined with `, `.
     pub link: Option<String>,
     /// `Content-Length`, when the body arrives as it was sent: what admission can ask for.
     pub length: Option<u64>,
     pub body: Body,
+}
+
+/// The response metadata needed after a JSON page's body has been read.
+pub struct Page {
+    pub url: String,
+    pub link: Option<String>,
 }
 
 /// Bytes off the wire, before any decoding: counted, and the first transport error kept.
@@ -255,14 +307,17 @@ impl<'a> Client<'a> {
         buf: &mut Vec<u8>,
         cap: u64,
         budget: &crate::admission::Budget,
-    ) -> Result<Option<String>, Fault> {
+    ) -> Result<Page, Fault> {
         self.with_retries(|| {
             let mut answer = self.exchange(url, cap)?;
             buf.clear();
             let read = answer.body.reader.read_to_end(buf);
             budget.spend(0, buf.len() as u64);
             match read {
-                Ok(_) => Ok(answer.link.take()),
+                Ok(_) => Ok(Page {
+                    url: answer.url,
+                    link: answer.link.take(),
+                }),
                 Err(e) => {
                     let s = answer.body.state.lock().unwrap();
                     let f = self
@@ -372,6 +427,7 @@ impl<'a> Client<'a> {
 
     /// `url` without any query parameter whose value is one of this source's secrets.
     fn without_secrets(&self, url: &str) -> String {
+        let url = url.split('#').next().unwrap_or(url);
         let Some((path, query)) = url.split_once('?') else {
             return url.to_string();
         };
@@ -379,7 +435,13 @@ impl<'a> Client<'a> {
             .split('&')
             .filter(|kv| {
                 let v = kv.split_once('=').map_or("", |(_, v)| v);
-                !kv.is_empty() && !self.redact.0.iter().any(|s| s == v)
+                let decoded = decode_query_value(v);
+                !kv.is_empty()
+                    && !self
+                        .redact
+                        .0
+                        .iter()
+                        .any(|s| s == v || s.as_bytes() == decoded)
             })
             .collect();
         if kept.is_empty() {
@@ -453,7 +515,7 @@ impl<'a> Client<'a> {
             };
             let status = resp.status().as_u16();
             if (200..300).contains(&status) {
-                return self.answer(resp, cap);
+                return self.answer(resp, cap, url);
             }
             if matches!(status, 301 | 302 | 303 | 307 | 308) {
                 let location = resp
@@ -478,7 +540,9 @@ impl<'a> Client<'a> {
                         ),
                     )
                 })?;
-                credential = credential && self.follow(&next)?;
+                // Validation must run on every hop, including after credentials were removed.
+                let carry = self.follow(&next)?;
+                credential &= carry;
                 if status == 303 {
                     post = None;
                 }
@@ -562,12 +626,15 @@ impl<'a> Client<'a> {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| retry_after(v, SystemTime::now()));
         let mut text = Vec::new();
-        let _ = resp
+        let read = resp
             .into_body()
             .into_reader()
             .take(64 * 1024)
             .read_to_end(&mut text);
-        let text: String = String::from_utf8_lossy(&text)
+        let cut = text.len() == 64 * 1024 || read.is_err();
+        let text: String = self
+            .redact
+            .window(&String::from_utf8_lossy(&text), false, cut)
             .trim()
             .chars()
             .take(ERROR_TEXT)
@@ -581,7 +648,7 @@ impl<'a> Client<'a> {
                     if text.is_empty() {
                         String::new()
                     } else {
-                        format!(": {}", self.redact.apply(&text))
+                        format!(": {text}")
                     }
                 ),
             )
@@ -616,7 +683,12 @@ impl<'a> Client<'a> {
 
     /// A success: its body, decoded as `Content-Encoding` and `compression` say, counted, and
     /// held to `cap` decoded bytes.
-    fn answer(&self, resp: ureq::http::Response<ureq::Body>, cap: u64) -> Result<Answer, Try> {
+    fn answer(
+        &self,
+        resp: ureq::http::Response<ureq::Body>,
+        cap: u64,
+        url: String,
+    ) -> Result<Answer, Try> {
         let header = |k: &str| -> Vec<String> {
             resp.headers()
                 .get_all(k)
@@ -666,6 +738,7 @@ impl<'a> Client<'a> {
             )
         })?;
         Ok(Answer {
+            url,
             link,
             length: if codec.is_none() { length } else { None },
             body: Body {
@@ -737,6 +810,27 @@ fn decompress(
         Some(_) => crate::decompress::Encoding::Zstd,
     };
     crate::decompress::decoder(encoding, BufReader::with_capacity(64 * 1024, wire))
+}
+
+/// Decode a query component for comparisons, keeping malformed escapes literal. Both hex
+/// cases are equivalent, and form-style `+` represents a space.
+fn decode_query_value(value: &str) -> Vec<u8> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 2 < bytes.len() {
+            let digit = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+            if let (Some(hi), Some(lo)) = (digit(bytes[at + 1]), digit(bytes[at + 2])) {
+                out.push((hi << 4) | lo);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(if bytes[at] == b'+' { b' ' } else { bytes[at] });
+        at += 1;
+    }
+    out
 }
 
 /// `url` without its query parameter `key`: what a redirect off the origin is sent to, when its
@@ -814,6 +908,29 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credential_cut_inside_utf8_is_redacted_at_both_body_edges() {
+        let secret = "credential-prefix-é-sensitive-tail";
+        let redact = Redact::from_values([secret]);
+        let inside = secret.find('é').unwrap() + 1;
+        // Both bounded HTTP error readers and ClickHouse's tail turn clipped bytes into
+        // lossy UTF-8 before reporting them. The replacement character is not the secret.
+        let prefix = String::from_utf8_lossy(&secret.as_bytes()[..inside]);
+        let suffix = String::from_utf8_lossy(&secret.as_bytes()[inside..]);
+        assert!(prefix.ends_with('\u{fffd}'));
+        assert!(suffix.starts_with('\u{fffd}'));
+        let masked_prefix = redact.window(&format!("error: {prefix}"), false, true);
+        assert!(
+            !masked_prefix.contains("credential-prefix"),
+            "a clipped UTF-8 credential exposed its prefix: {masked_prefix}"
+        );
+        let masked_suffix = redact.window(&format!("{suffix}: error"), true, false);
+        assert!(
+            !masked_suffix.contains("sensitive-tail"),
+            "a clipped UTF-8 credential exposed its suffix: {masked_suffix}"
+        );
+    }
 
     #[test]
     fn retry_after_is_seconds_or_an_http_date() {

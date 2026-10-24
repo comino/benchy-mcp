@@ -2970,14 +2970,31 @@ fn not_rendered(what: &str) -> Cell {
     ))
 }
 
-/// DuckDB types whose Arrow form loses their meaning: BIT and BIGNUM arrive as DuckDB's own
-/// internal bytes, and TIME WITH TIME ZONE arrives without its offset. Formatting those gives a
-/// confident wrong value — `04f5` for the bits `0101` — so they are marked instead.
-fn unfaithful_in_arrow(t: ffi::duckdb_type) -> Option<&'static str> {
-    match t {
+/// DuckDB types whose Arrow form loses their meaning, including inside a container: BIT and
+/// BIGNUM arrive as internal bytes, and TIME WITH TIME ZONE loses its offset. A top-level
+/// 128-bit integer has its own renderer; nested ones cannot use Arrow's decimal formatter,
+/// which assumes signed values with at most 38 digits.
+unsafe fn unfaithful_in_arrow(t: ffi::duckdb_logical_type, nested: bool) -> Option<&'static str> {
+    let child = |mut owned| {
+        let why = unfaithful_in_arrow(owned, true);
+        ffi::duckdb_destroy_logical_type(&mut owned);
+        why
+    };
+    match ffi::duckdb_get_type_id(t) {
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_BIT => Some("BIT"),
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_BIGNUM => Some("BIGNUM"),
         ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIME_TZ => Some("TIME WITH TIME ZONE"),
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_HUGEINT if nested => Some("nested HUGEINT"),
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_UHUGEINT if nested => Some("nested UHUGEINT"),
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_LIST | ffi::DUCKDB_TYPE_DUCKDB_TYPE_MAP => {
+            // This accessor explicitly accepts MAP, yielding its key/value struct.
+            child(ffi::duckdb_list_type_child_type(t))
+        }
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_ARRAY => child(ffi::duckdb_array_type_child_type(t)),
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_STRUCT => (0..ffi::duckdb_struct_type_child_count(t))
+            .find_map(|i| child(ffi::duckdb_struct_type_child_type(t, i))),
+        ffi::DUCKDB_TYPE_DUCKDB_TYPE_UNION => (0..ffi::duckdb_union_type_member_count(t))
+            .find_map(|i| child(ffi::duckdb_union_type_member_type(t, i))),
         _ => None,
     }
 }
@@ -3282,7 +3299,7 @@ unsafe fn collect_arrow(
     id: &str,
     cap: &crate::result::Caps,
 ) -> Option<Result<QueryResult, String>> {
-    use duckdb::arrow::array::{Array, StructArray};
+    use duckdb::arrow::array::{Array, Decimal128Array, StructArray};
     use duckdb::arrow::ffi::{from_ffi, FFI_ArrowArray, FFI_ArrowSchema};
     use duckdb::arrow::util::display::{ArrayFormatter, ArrayFormatterFactory, FormatOptions};
 
@@ -3295,6 +3312,7 @@ unsafe fn collect_arrow(
     let mut owned_names = Vec::with_capacity(cols);
     let mut types: Vec<ffi::duckdb_logical_type> = Vec::with_capacity(cols);
     let mut unfaithful: Vec<Option<&'static str>> = Vec::with_capacity(cols);
+    let mut wide_int: Vec<Option<bool>> = Vec::with_capacity(cols);
     for c in 0..cols {
         let n = ffi::duckdb_column_name(r, c as u64);
         let owned = if n.is_null() {
@@ -3304,8 +3322,14 @@ unsafe fn collect_arrow(
         };
         names.push(owned.as_ptr());
         owned_names.push(owned);
-        types.push(ffi::duckdb_column_logical_type(r, c as u64));
-        unfaithful.push(unfaithful_in_arrow(ffi::duckdb_column_type(r, c as u64)));
+        let logical = ffi::duckdb_column_logical_type(r, c as u64);
+        unfaithful.push(unfaithful_in_arrow(logical, false));
+        wide_int.push(match ffi::duckdb_get_type_id(logical) {
+            ffi::DUCKDB_TYPE_DUCKDB_TYPE_HUGEINT => Some(false),
+            ffi::DUCKDB_TYPE_DUCKDB_TYPE_UHUGEINT => Some(true),
+            _ => None,
+        });
+        types.push(logical);
     }
 
     let opts = ffi::duckdb_result_get_arrow_options(r);
@@ -3394,6 +3418,23 @@ unsafe fn collect_arrow(
                     Cell::Null
                 } else if let Some(what) = unfaithful.get(col).copied().flatten() {
                     not_rendered(what)
+                } else if let Some(unsigned) = wide_int.get(col).copied().flatten() {
+                    // DuckDB exposes both through Decimal128(38, 0). The bits are intact,
+                    // but its sign/precision are insufficient for the full integer domain.
+                    match batch.column(col).as_any().downcast_ref::<Decimal128Array>() {
+                        Some(a) if a.scale() == 0 => {
+                            let value = a.value(row);
+                            keep.value(
+                                if unsigned {
+                                    (value as u128).to_string()
+                                } else {
+                                    value.to_string()
+                                },
+                                cap.max_cell_bytes,
+                            )
+                        }
+                        _ => not_rendered(if unsigned { "UHUGEINT" } else { "HUGEINT" }),
+                    }
                 } else {
                     match f {
                         Ok(f) => keep.value(f.value(row).to_string(), cap.max_cell_bytes),

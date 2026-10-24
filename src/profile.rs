@@ -95,6 +95,20 @@ const DAY_US: i64 = 86_400_000_000;
 /// Between the columns of a series key held as one text, and a null column's value in it.
 const KEY_SEP: char = '\u{1f}';
 const NULL_PART: &str = "\u{1e}";
+const KEY_ESCAPE: char = '\u{1d}';
+
+/// A non-null key part after the SQL encoding below. Decode the escape last so a literal
+/// escape followed by `e` or `f` cannot turn into a null or a separator on the way back.
+fn key_part(part: &str) -> std::borrow::Cow<'_, str> {
+    if !part.contains(KEY_ESCAPE) {
+        return std::borrow::Cow::Borrowed(part);
+    }
+    std::borrow::Cow::Owned(
+        part.replace("\u{1d}f", "\u{1f}")
+            .replace("\u{1d}e", "\u{1e}")
+            .replace("\u{1d}d", "\u{1d}"),
+    )
+}
 /// Runs of 0 or null listed per series before a line is elided to fit.
 const RUNS_LISTED: usize = 1000;
 
@@ -477,7 +491,10 @@ impl Clock {
         let full = crate::result::timestamp_utc(us); // `YYYY-MM-DD HH:MM:SS[.f]+00`
         let naive = full.trim_end_matches("+00");
         match self.0 {
-            Kind::Date => naive[..10].to_string(),
+            Kind::Date => naive
+                .rsplit_once(' ')
+                .map_or(naive, |(date, _)| date)
+                .to_string(),
             Kind::TimestampTz => full,
             _ => naive.to_string(),
         }
@@ -489,11 +506,16 @@ impl Clock {
             return format!("at {}", self.at(a));
         }
         let (x, y) = (self.at(a), self.at(b));
-        if !matches!(self.0, Kind::Date) && x.get(..10) == y.get(..10) {
-            format!("at {x} to {}", &y[11..])
-        } else {
-            format!("at {x} to {y}")
+        if !matches!(self.0, Kind::Date) {
+            if let (Some((a_date, _)), Some((b_date, b_time))) =
+                (x.rsplit_once(' '), y.rsplit_once(' '))
+            {
+                if a_date == b_date {
+                    return format!("at {x} to {b_time}");
+                }
+            }
         }
+        format!("at {x} to {y}")
     }
 }
 
@@ -1083,14 +1105,25 @@ fn profile(
     };
     let clock = Clock(tk);
     let t_us = t_us.unwrap_or_default();
-    // The key as one text: each column's value, a null as [`NULL_PART`], joined by
-    // [`KEY_SEP`]. Both are control characters, so no printable value is mistaken for them, and
-    // the key is split back into its values to be shown (`key_shown`).
+    // Each part escapes the separator, null sentinel and escape itself before joining. Data
+    // may contain control characters too: raw concatenation merges distinct tuples, or a
+    // literal chr(30) with NULL. Ordinary keys keep their original bytes and ordering.
     let k = match series_cols.len() {
         0 => "''".to_string(),
         _ => series_cols
             .iter()
-            .map(|c| format!("coalesce(CAST({} AS VARCHAR), chr(30))", quote(c)))
+            .map(|c| {
+                let raw = format!("CAST({} AS VARCHAR)", quote(c));
+                let part = if has_kind(&kinds, c) == Some(Kind::Integer) {
+                    raw
+                } else {
+                    format!(
+                        "replace(replace(replace({raw}, chr(29), chr(29) || 'd'), \
+                         chr(30), chr(29) || 'e'), chr(31), chr(29) || 'f')"
+                    )
+                };
+                format!("coalesce({part}, chr(30))")
+            })
             .collect::<Vec<_>>()
             .join(" || chr(31) || "),
     };
@@ -1107,7 +1140,7 @@ fn profile(
                 } else if integer_key.get(i) == Some(&true) && part.parse::<i128>().is_ok() {
                     part.to_string()
                 } else {
-                    value(part)
+                    value(&key_part(part))
                 }
             })
             .collect::<Vec<_>>()
@@ -1195,11 +1228,12 @@ fn profile(
 
     // The table's extent, from the scan: past `SERIES_MAX`, the series kept are the first by key,
     // and their extent was said as the table's (`many_series_keep_the_tables_own_extent`).
-    let (first, last) = if timed > 0 {
-        (Some(origin), Some(end))
-    } else {
-        (None, None)
-    };
+    // Infinity is a non-null timestamp but has no epoch_us value. Keep the absent finite
+    // extent absent rather than displaying the zero used internally by cadence arithmetic.
+    let (first, last) = (
+        exact.first().copied().flatten(),
+        exact.get(1).copied().flatten(),
+    );
     // Past three billion steps from the first time, a series is not proven regular: an index
     // squared, summed over as many rows as a table can hold, must stay inside an i128.
     let step = step.filter(|st| {
@@ -2098,6 +2132,8 @@ struct Tally {
     /// series per row.
     series_max: usize,
     alive: bool,
+    /// A raw key contains reserved bytes, including the possibly ambiguous NULL sentinel.
+    needs_key_encoding: bool,
     last: Option<usize>,
     /// Whether the last row's series came after the one before it: meters in a fixed cycle, as
     /// every meter reading at each minute is. Then the next series is tried first, and a row
@@ -2378,6 +2414,7 @@ impl Tally {
             flat_max,
             series_max,
             alive: true,
+            needs_key_encoding: false,
             last: None,
             cycling: false,
             xs: Vec::new(),
@@ -2632,6 +2669,11 @@ impl Tally {
         };
         if let Some(x) = found {
             return Found::At(*x);
+        }
+        // Inspect a key only when first placing it, off the per-row tally path. A raw NULL
+        // sentinel may also be a real text value, so those tables need the SQL encoding too.
+        if int.is_none() && key.contains([KEY_ESCAPE, KEY_SEP, '\u{1e}']) {
+            self.needs_key_encoding = true;
         }
         let text = match int {
             Some(x) => {
@@ -3237,6 +3279,13 @@ impl Seen {
                 && m.len() == measures.len()
                 && m.iter().zip(measures).all(|(a, b)| *a == b.name)
         })?;
+        // The ingestion tally uses raw single-column keys. Reserved characters need the
+        // unambiguous SQL encoding above. The flag is set when placing a new key, leaving the
+        // per-row hot path unchanged; NULL keys also fall back because their raw sentinel can
+        // stand for an actual text value.
+        if tally.needs_key_encoding {
+            return None;
+        }
         let mut p = tally.finish(step, origin);
         if !per_time {
             p.times = None;

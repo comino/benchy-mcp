@@ -401,6 +401,9 @@ pub struct Frame<R> {
     meta: Vec<u8>,
     meta_len: usize,
     body_left: u64,
+    /// A stream has exactly one schema, before any batches. Another schema before EOS means
+    /// the next stream has started without the previous stream's boundary being present.
+    schema_seen: bool,
     /// The input ended.
     eof: bool,
 }
@@ -426,6 +429,7 @@ impl<R: Read> Framed<R> {
             meta: Vec::new(),
             meta_len: 0,
             body_left: 0,
+            schema_seen: false,
             eof: false,
         })))
     }
@@ -543,7 +547,19 @@ impl<R: Read> Frame<R> {
                     return;
                 }
                 let body = arrow::ipc::root_as_message(&self.meta)
-                    .map(|m| m.bodyLength())
+                    .ok()
+                    .and_then(|m| {
+                        use arrow::ipc::MessageHeader;
+                        match (self.schema_seen, m.header_type()) {
+                            (false, MessageHeader::Schema) => self.schema_seen = true,
+                            (true, MessageHeader::RecordBatch | MessageHeader::DictionaryBatch) => {
+                            }
+                            // Do not drain through a second stream and mistake its end marker
+                            // for this one's: every later attachment would take the wrong data.
+                            _ => return None,
+                        }
+                        Some(m.bodyLength())
+                    })
                     .unwrap_or(-1);
                 self.have = 0;
                 self.at = match body {
@@ -643,6 +659,28 @@ mod tests {
         assert!(Framed::new(&mut cut).drain(u64::MAX / 2).is_err());
         let mut csv = std::io::Cursor::new(b"id,meter\n1,lab\n".to_vec());
         assert!(Framed::new(&mut csv).drain(u64::MAX / 2).is_err());
+    }
+
+    #[test]
+    fn draining_a_truncated_stream_does_not_consume_the_next_stream() {
+        let (first, next) = (ints(8, 8), ints(5, 5));
+        let cut = &first[..first.len() - 8];
+        let mut both = cut.to_vec();
+        both.extend(&next);
+        // A load can be refused before it reads, within its schema, or after its last batch.
+        // Recovery must recognize the second schema wherever draining begins.
+        for consumed in [0, 1, 16, cut.len()] {
+            let mut input = std::io::Cursor::new(both.clone());
+            let framed = Framed::new(&mut input);
+            framed.clone().read_exact(&mut vec![0u8; consumed]).unwrap();
+            assert!(framed.drain(both.len() as u64).is_err(), "{consumed}");
+            assert!(!framed.ended(), "{consumed}");
+            drop(framed);
+            assert!(
+                input.position() < both.len() as u64,
+                "the next stream's end marker must remain unread: {consumed}"
+            );
+        }
     }
 
     fn lz4(data: &[u8]) -> Vec<u8> {

@@ -299,7 +299,7 @@ fn render_page(
     let mut body = String::new();
     let mut shown = 0usize;
     let mut out_of_bytes = false;
-    let mut cut_here = false;
+    let mut cut_here = r.columns.iter().any(|c| c.len() > max_cell);
     if wire_len(&header) > room {
         header = format!(
             "{}\n",
@@ -408,6 +408,11 @@ fn render_page(
         format!(
             "\nrows {first}–{last}, result_id {} — TRUNCATED: more rows exist than are kept for \
              paging. Narrow the query, or aggregate.",
+            r.result_id
+        )
+    } else if cut_values {
+        format!(
+            "\nrows {first}–{last} of {kept}, result_id {} — TRUNCATED: values or column names were cut. Select substrings or shorter aliases to read the rest.",
             r.result_id
         )
     } else {
@@ -530,7 +535,8 @@ pub fn timestamp_utc(micros: i64) -> String {
             frac.pop();
         }
     }
-    format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}{frac}+00")
+    let (year, era) = if y <= 0 { (1 - y, " (BC)") } else { (y, "") };
+    format!("{year:04}-{m:02}-{d:02}{era} {h:02}:{mi:02}:{s:02}{frac}+00")
 }
 
 /// Days since 1970-01-01 to a proleptic Gregorian date. Howard Hinnant's `civil_from_days`,

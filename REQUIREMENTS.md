@@ -243,6 +243,12 @@ agent's job, so it costs the agent no steps. Three tiers exist — files, built-
 - `narrowing_holds_on_the_served_path` — narrowing applies on the server's loader path.
 - `config_rejects_what_it_cannot_apply` — unknown keys, missing schemas, a column declared twice
   in any case, unresolvable variables and secrets outside `env` stop startup.
+- `source_names_that_differ_only_by_ascii_case_are_duplicates` — source names are unique under
+  the engine's ASCII case folding.
+- `a_case_colliding_configuration_is_refused_before_serving_mcp` — the same check stops the
+  shipped binary before it serves a conflicting catalogue.
+- `a_non_ascii_duration_suffix_is_a_config_error_not_a_panic` — an invalid Unicode suffix is a
+  normal configuration error.
 - `a_key_that_does_nothing_is_refused` — a key that cannot apply to its kind of source stops
   startup.
 - `a_file_source_may_be_declared` — a file source's `[[source.schema]]` and `delimiter` are
@@ -324,6 +330,15 @@ and never a type that could change a value (REQ-15).
   from the Arrow field flag.
 - `a_stream_without_its_end_marker_is_refused` — only the end-of-stream marker tells a finished
   stream from one cut at a message boundary.
+- `an_eos_bit_pattern_in_a_value_does_not_finish_an_arrow_file` — marker-like data at the end
+  of a truncated file cannot stand in for a parsed end-of-stream message (Linux only).
+- `an_eos_bit_pattern_in_a_value_does_not_finish_an_arrow_pipe` — the same holds for a pipe
+  (Linux only).
+- `a_second_schema_before_eos_closes_the_channel_instead_of_eating_the_next_stream` — a lost
+  stream boundary closes the channel, so a later attachment cannot receive the wrong stream
+  (Linux only).
+- `draining_a_truncated_stream_does_not_consume_the_next_stream` — recovery detects the lost
+  boundary whether a refusal happens before reading, inside the schema, or after the last batch.
 - `a_stream_that_fails_after_its_rows_leaves_no_table` — the table commits only on the stream's
   verdict, so a stream refused after its rows leaves no table.
 - `a_stream_must_end_at_its_end_marker` — one byte after the marker refuses the load, and a
@@ -572,6 +587,9 @@ fetched again by id.
   page may be 512, and not 511.
 - `a_page_cuts_values_at_its_own_cell_cap` — a page's lower `max_cell_bytes` cuts each value as
   the query would have, saying TRUNCATED.
+- `the_last_page_still_reports_cut_values` — the final page says TRUNCATED too when its values
+  were cut.
+- `a_cut_column_name_marks_the_result_truncated` — cutting a header sets the truncation flag.
 - `a_query_without_a_limit_reads_no_further_than_it_keeps` — a `SELECT` is read only as far as
   its rows are kept: a trillion-row `range` answers `of 2000+`. Other statements run to the end.
 - `a_query_without_a_limit_holds_no_more_than_it_keeps` — such a `SELECT` over ten million rows
@@ -588,6 +606,15 @@ fetched again by id.
   rows end, not an error.
 - `a_value_arrow_cannot_carry_faithfully_says_so` — BIT, BIGNUM and TIME WITH TIME ZONE render
   correctly or as a marker naming `::VARCHAR`, never a wrong value.
+- `a_nested_bit_is_faithful_or_explicitly_unrenderable` — nested BIT values have the same guard.
+- `a_nested_bignum_is_faithful_or_explicitly_unrenderable` — so do nested BIGNUM values.
+- `a_nested_timetz_keeps_its_offset_or_says_it_cannot_render` — a nested time with a zone does
+  not silently lose its offset.
+- `a_39_digit_hugeint_keeps_every_digit_or_says_it_cannot_render` — the full signed 128-bit
+  range is rendered faithfully or explicitly marked unrenderable.
+- `an_uhugeint_above_the_signed_range_keeps_its_value_or_says_it_cannot_render` — an unsigned
+  128-bit integer does not become a negative signed integer.
+- `a_bc_timestamptz_renders_as_duckdb_writes_it` — BC timestamps use DuckDB's year and era.
 - `time_zone_conversion_works_in_the_shipped_build` — converting to a named zone works in the
   shipped build, sealed.
 - `a_refused_time_zone_fails_only_where_icu_is_loaded` — results are UTC; with ICU loaded, a
@@ -933,6 +960,14 @@ statement, and the agent made them.
   reaches them is exact up to 100,000 rows, "about" above.
 - `an_integer_series_key_is_listed_in_number_order` — keys are listed in their type's order;
   past 200,000 series the key gets no range.
+- `composite_series_keys_do_not_alias_on_the_internal_separator` — control characters in a
+  key cannot merge distinct tuples into one series.
+- `a_loaded_null_series_key_is_distinct_from_a_literal_record_separator` — the loader keeps
+  NULL separate from a real string containing the internal null sentinel.
+- `an_infinite_only_time_column_does_not_invent_an_epoch_extent` — absent finite extrema stay
+  absent instead of becoming an epoch timestamp.
+- `dates_with_five_digit_years_keep_the_whole_date_in_the_profile` — date extents keep the
+  complete year, month and day.
 - `many_series_keep_the_tables_own_extent` — past 200,000 series the extent is the table's, and
   the series not examined are said to be so.
 - `the_shape_is_summarised_never_cut_silently` — what does not fit is counted or said to be
@@ -1111,6 +1146,11 @@ the official binary, pinned by version and SHA-512.
   before the next source is fetched.
 - `clickhouse_credentials_stay_in_the_loader` — the password signs in from benchy's environment
   and is in neither the engine's environment, arguments nor memory, nor the operator log.
+- `a_clickhouse_error_cannot_echo_its_password_into_the_operator_log` — server error text is
+  redacted even when it repeats the credential used to authenticate.
+- `a_clickhouse_error_cannot_leak_a_secret_cut_by_the_body_read_limit` — a bounded error-body
+  read cannot expose a credential prefix.
+- `clickhouse_check_redacts_an_echoed_password` — the diagnostic command masks it too.
 - `a_read_only_clickhouse_user_loads_what_any_user_loads` — a `readonly = 1` user loads the same
   columns and rows as any user; a profile it cannot change that makes unreadable Arrow refuses
   the load before a row, naming the setting.
@@ -1190,6 +1230,22 @@ other's (REQ-5).
 - `retry_after_is_seconds_or_an_http_date` — `Retry-After` in either of RFC 9110's forms.
 - `a_redirect_off_the_origin_carries_no_credential` — a redirect is followed with the credential
   on the origin, without it to a `redirect_hosts` entry, and nowhere else.
+- `every_redirect_hop_is_checked_after_a_listed_cross_origin_hop` — destination validation
+  continues after credentials have been removed.
+- `an_echoed_secret_is_stripped_when_percent_escapes_use_lowercase_hex` — equivalent query
+  encodings cannot carry a credential to another origin.
+- `a_quoted_link_title_does_not_hide_the_next_relation` — quoted Link parameters are parsed
+  without mistaking their contents for link boundaries.
+- `link_pagination_loads_every_page_when_a_title_contains_an_angle_bracket` — that syntax does
+  not silently commit only the first page.
+- `a_relative_next_link_uses_the_final_response_url_after_a_redirect` — a relative next link
+  is resolved against the response's final URL.
+- `an_http_error_is_redacted_before_its_text_is_truncated` — display limits cannot expose a
+  prefix of an echoed credential.
+- `an_http_error_cannot_leak_a_secret_cut_by_the_body_read_limit` — neither can the bounded
+  error-body read.
+- `a_credential_cut_inside_utf8_is_redacted_at_both_body_edges` — masking handles a partial
+  multibyte character at either edge of a retained error-body fragment.
 - `check_shows_the_request_the_schema_to_pin_and_the_first_pages_rows` — `benchy-mcp check`
   prints the masked request, the first page's rows and the schema to pin, from one page.
 
