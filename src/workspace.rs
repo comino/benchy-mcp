@@ -845,6 +845,17 @@ fn rows_sql(alias: &str, ident: &str) -> String {
     format!("SELECT system.main.count_star() FROM {alias}.main.\"{ident}\"")
 }
 
+/// The query [`Workspace::catalog_columns`] runs, for `n` catalogs: a function of its own so that
+/// REQ-9 `benchys_internal_sql_names_every_function_by_its_catalog` reads it too.
+fn catalog_columns_sql(n: usize) -> String {
+    format!(
+        "SELECT database_name, table_name, column_name FROM system.main.duckdb_columns() \
+         WHERE schema_name = 'main' AND database_name IN ({}) \
+         ORDER BY database_name, table_name, column_index",
+        vec!["?"; n].join(", "),
+    )
+}
+
 /// Which of the catalogs `list` (benchy's own `benchy_<n>`, quoted) hold a function.
 fn catalogs_with_functions_sql(list: &str) -> String {
     format!(
@@ -1673,12 +1684,7 @@ impl Workspace {
     /// it could not be read: a convenience, as the names are (`nameable`), and a table is then
     /// named alone.
     fn catalog_columns(&self, catalogs: &[&str]) -> Vec<(String, String, String)> {
-        let sql = format!(
-            "SELECT database_name, table_name, column_name FROM system.main.duckdb_columns() \
-             WHERE schema_name = 'main' AND database_name IN ({}) \
-             ORDER BY database_name, table_name, column_index",
-            vec!["?"; catalogs.len()].join(", "),
-        );
+        let sql = catalog_columns_sql(catalogs.len());
         (|| -> Result<Vec<(String, String, String)>, duckdb::Error> {
             let mut st = self.ingest.prepare(&sql)?;
             let rows = st.query_map(duckdb::params_from_iter(catalogs), |r| {
@@ -3575,6 +3581,7 @@ mod tests {
         all.extend(listings_sql(list));
         all.push(helpers_held_sql("benchy_1"));
         all.push(rows_sql("benchy_1", "readings"));
+        all.push(catalog_columns_sql(2));
         for sql in &all {
             assert_eq!(unqualified(&c, sql), Vec::<String>::new(), "{sql}");
         }
