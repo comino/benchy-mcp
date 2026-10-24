@@ -761,7 +761,8 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_rebuild_says_in_its_detail_why_and_what_was_lost` — `E_REBUILT`'s `detail.reason`
   (`hard_deadline`, `engine_died`, `memory_ceiling` with `held` and `ceiling`) and `lost`
   (`results`, `agent_tables`); the message tells the model the results went, and past the
-  ceiling to say the work needs more rather than to restart benchy itself.
+  ceiling to say the work needs more rather than to restart benchy itself (Linux only, where
+  the ceiling is read from /proc).
 - `a_lost_engine_says_why_in_one_word` — every way the engine is lost, `pivot_type` included,
   has a reason of its own and loses the same.
 - `an_attach_past_a_limit_names_it_in_its_detail` — `E_LIMIT`'s `detail.limit` names the limit
