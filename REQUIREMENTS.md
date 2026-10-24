@@ -624,14 +624,24 @@ error that can have one.
 - `an_unknown_column_of_a_helper_view_lists_its_columns` — a helper view is listed like a table.
 - `a_hint_runs_nothing_of_the_views_it_lists` — the columns are the catalog's: a view whose
   table-function argument calls `nextval` is listed with its columns, and the sequence stays.
+- `a_view_is_listed_with_the_columns_it_was_made_with` — a view is listed with the columns
+  the catalog keeps for it, also once a table it reads is dropped and reading it fails; nothing
+  short of a bind would tell.
 - `a_hint_takes_nothing_past_the_deadline` — a missing table's error comes back within the
   deadline with a view whose bind would sleep past it in the catalogue.
 - `a_hint_lists_the_agents_objects_as_they_are_now` — the columns kept are of the agent's
   objects as they are after a view is replaced, a table made, dropped or altered.
+- `a_temporary_object_is_listed_with_its_own_columns` — a temporary table that hides the
+  agent's table of the same name is listed with its own columns, as the statement reads it.
 - `a_name_the_statement_gives_hides_the_table_of_that_name` — an alias, a subquery's or a
   column's, named like a table is not read where it is given or where it qualifies a column, and
   a CTE's name not outside its own body (nor in it, `RECURSIVE`): `meters.power_kw FROM rooms AS
   meters` is told `rooms` alone.
+- `a_name_is_read_as_the_table_duckdb_binds_it_to` — what a statement reads is DuckDB's parse
+  of it: `main.meters` is the table whatever CTE is named `meters`, and a CTE inside a subquery
+  hides no table outside it.
+- `a_long_statement_gets_its_hint_at_once` — a failing SELECT of 280 KB comes back within its
+  deadline; past 8 KiB a statement is not read for its tables and is told the bench.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.

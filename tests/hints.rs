@@ -832,3 +832,135 @@ fn a_hint_takes_nothing_past_the_deadline() {
     );
     assert!(hint_of(&e).contains("a_slow(range)"), "{e}");
 }
+
+#[test]
+fn a_temporary_object_is_listed_with_its_own_columns() {
+    // A temporary object hides the agent's own of the same name, as DuckDB 1.5.5's search path
+    // finds the temporary catalog first. Its columns were read on the host-facing connection,
+    // whose temporary catalog is its own, so `SELECT persistent_col FROM mine`, which read the
+    // temporary table, was told `mine(persistent_col)`.
+    let mut ws = bench_with_tables();
+    for sql in [
+        "CREATE TABLE mine(persistent_col INTEGER)",
+        "CREATE TEMP TABLE mine(temp_col INTEGER)",
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+    }
+    for (sql, want) in [
+        (
+            "SELECT persistent_col FROM mine",
+            "That column is not in the tables the statement reads: mine(temp_col).",
+        ),
+        ("SELECT * FROM missing", "mine(temp_col)"),
+    ] {
+        let e = err_for(&mut ws, sql);
+        let h = hint_of(&e);
+        assert!(h.contains(want), "{sql}\n  wanted {want:?} in: {e}");
+        assert!(!h.contains("persistent_col"), "{sql}: {e}");
+    }
+}
+
+#[test]
+fn a_long_statement_gets_its_hint_at_once() {
+    // A SELECT of 20,000 `meters.meter` and a `meters.missing`, 280 KB: each name of a table
+    // that qualified a column was looked for as an alias over every word of the statement,
+    // about 1.6 G comparisons, after the watchdog had stopped, so nothing bounded them.
+    let mut ws = bench_with_tables();
+    let sql = format!(
+        "SELECT {}meters.missing FROM meters",
+        "meters.meter, ".repeat(20_000)
+    );
+    assert!(sql.len() > 100_000);
+    let deadline = std::time::Duration::from_secs(2);
+    let caps = Caps {
+        deadline,
+        ..Caps::default()
+    };
+    let t = std::time::Instant::now();
+    let e = ws
+        .work(&sql, &caps)
+        .expect_err("no such column")
+        .to_string();
+    let took = t.elapsed();
+    assert!(
+        took < deadline,
+        "a long statement's error took {took:?} against a deadline of {deadline:?}"
+    );
+    assert!(
+        e.contains("does not have a column named \"missing\""),
+        "{e}"
+    );
+    // Past 8 KiB the statement is not read for its tables, and the hint is of the bench.
+    assert!(
+        hint_of(&e).starts_with(
+            "That column is not in what the statement reads. On the bench: \
+             meters(observed_at, meter, power_kw); rooms(meter, room)."
+        ),
+        "{e}"
+    );
+    let sql = format!(
+        "SELECT {}meters.missing FROM meters",
+        "meters.meter, ".repeat(500)
+    );
+    assert!(sql.len() < 8 * 1024);
+    let e = err_for(&mut ws, &sql);
+    assert!(
+        hint_of(&e).starts_with(
+            "That column is not in `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw)."
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_name_is_read_as_the_table_duckdb_binds_it_to() {
+    // DuckDB 1.5.5 binds a qualified name to the table, whatever CTE has that name, and a CTE
+    // is the table's name only in its own scope: the hint took `main.meters` for the CTE and
+    // listed `rooms`, and dropped the outer `meters` for a CTE inside a subquery.
+    let mut ws = bench_with_tables();
+    for (sql, want) in [
+        (
+            "WITH meters AS (SELECT * FROM rooms) SELECT main.meters.bad FROM main.meters",
+            "That column is not in `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw)",
+        ),
+        (
+            "SELECT m.bad FROM meters m \
+             JOIN (WITH meters AS (SELECT * FROM rooms) SELECT * FROM meters) q ON true",
+            "`m` is `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw); rooms(meter, room).",
+        ),
+        (
+            "SELECT m.bad FROM (WITH meters AS (SELECT * FROM rooms) SELECT * FROM meters) q \
+             JOIN meters m ON true",
+            "`m` is `meters`. The tables the statement reads: \
+             meters(observed_at, meter, power_kw); rooms(meter, room).",
+        ),
+    ] {
+        let e = err_for(&mut ws, sql);
+        let h = hint_of(&e);
+        assert!(h.contains(want), "{sql}\n  wanted {want:?} in: {e}");
+    }
+}
+
+#[test]
+fn a_view_is_listed_with_the_columns_it_was_made_with() {
+    // The columns are the catalog's, kept with a view when it is made, and DuckDB 1.5.5 keeps
+    // them when a table the view reads is dropped: `duckdb_dependencies()` lists nothing of the
+    // agent's, so that the view can no longer be read could be learned only by binding it, which
+    // runs its code (`a_hint_runs_nothing_of_the_views_it_lists`). The view is listed as it was
+    // made, and reading it says what is gone.
+    let mut ws = bench_with_tables();
+    for sql in [
+        "CREATE TABLE base(a INTEGER)",
+        "CREATE VIEW v AS SELECT * FROM base",
+        "DROP TABLE base",
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+    }
+    let e = err_for(&mut ws, "SELECT * FROM missing");
+    assert!(hint_of(&e).contains("v(a)"), "{e}");
+    let e = err_for(&mut ws, "SELECT * FROM v");
+    assert!(e.contains("base"), "{e}");
+}

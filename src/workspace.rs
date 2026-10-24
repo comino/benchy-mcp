@@ -91,10 +91,11 @@ pub struct Workspace {
     /// one and kept with that catalog's alias: it is read-only, and a new one has a new alias
     /// (`Workspace::columns_of`).
     helper_columns: std::cell::RefCell<Option<(String, Columns)>>,
-    /// `(catalog, table, column)` of the agent's own tables and views, read from the catalog the
-    /// first time a hint lists one, and forgotten when a statement that is not a SELECT is
-    /// prepared, as only such a statement can change them (`Workspace::columns_of`).
-    agent_columns: std::cell::OnceCell<Vec<(String, String, String)>>,
+    /// `(catalog, table, column)` of the agent's own tables and views ([`AGENT_COLUMNS`]), read
+    /// from the catalog the first time a hint lists one, and forgotten when a statement that is
+    /// not a SELECT is prepared, as only such a statement can change them
+    /// (`Workspace::columns_of`).
+    agent_columns: std::cell::OnceCell<Vec<(i64, String, String)>>,
     /// Why this engine must not go on, once a batch has left it holding what it cannot let go:
     /// a dynamic PIVOT's type that could not be dropped (`Workspace::drop_pivot_types`).
     spoiled: Option<String>,
@@ -637,9 +638,11 @@ fn fault(
             };
         }
         let columns = |tables: &[&str]| ws.columns_of(tables);
+        let parse = |statement: &str| ws.parsed(statement);
         let catalogue = crate::hint::Catalogue {
             names: &names,
             columns: Some(&columns),
+            parse: Some(&parse),
         };
         WorkError::Sql {
             index: index as usize + 1,
@@ -845,14 +848,47 @@ fn rows_sql(alias: &str, ident: &str) -> String {
     format!("SELECT system.main.count_star() FROM {alias}.main.\"{ident}\"")
 }
 
-/// The query [`Workspace::catalog_columns`] runs, for `n` catalogs: a function of its own so that
+/// The query [`Workspace::catalog_columns`] runs, for one catalog: a function of its own so that
 /// REQ-9 `benchys_internal_sql_names_every_function_by_its_catalog` reads it too.
-fn catalog_columns_sql(n: usize) -> String {
+fn catalog_columns_sql() -> String {
+    "SELECT table_name, column_name FROM system.main.duckdb_columns() \
+     WHERE schema_name = 'main' AND database_name = ? ORDER BY table_name, column_index"
+        .into()
+}
+
+/// `(catalog, table, column)` of the agent's own tables and views, in schema `main`, the catalog
+/// 0 for its temporary one and 1 for `memory`, each table's columns in order: asked on the
+/// agent's own connection, as each connection has a temporary catalog of its own. On the
+/// host-facing one `temp` is that connection's, empty, so a temporary table of the agent's that
+/// hides its table of the same name was listed with the hidden table's columns
+/// (`a_temporary_object_is_listed_with_its_own_columns`).
+const AGENT_COLUMNS: &CStr = c"SELECT CASE WHEN database_name = 'temp' THEN 0 ELSE 1 END, \
+        table_name, column_name FROM system.main.duckdb_columns() \
+      WHERE schema_name = 'main' AND database_name IN ('temp', 'memory') \
+      ORDER BY 1, table_name, column_index";
+
+/// DuckDB's parse of one statement, for the hints that list what it reads
+/// (`crate::hint::Reads`). It parses and binds nothing, so it runs none of the agent's code and
+/// reads a statement that failed to bind; on the host-facing connection, which sees the agent's
+/// macros, through `system.main` as every call of benchy's is.
+const SERIALIZED: &str = "SELECT system.main.json_serialize_sql(?::VARCHAR)";
+
+/// At most `limit` distinct values of `column` among the first [`NOTE_HEAD_ROWS`] of `from`, both
+/// quoted already (`Workspace::distinct`): a function of its own so that REQ-9
+/// `benchys_internal_sql_names_every_function_by_its_catalog` reads it too.
+fn distinct_head_sql(from: &str, column: &str, limit: usize) -> String {
     format!(
-        "SELECT database_name, table_name, column_name FROM system.main.duckdb_columns() \
-         WHERE schema_name = 'main' AND database_name IN ({}) \
-         ORDER BY database_name, table_name, column_index",
-        vec!["?"; n].join(", "),
+        "SELECT DISTINCT {column} FROM (SELECT {column} FROM {from} \
+         WHERE {column} IS NOT NULL LIMIT {NOTE_HEAD_ROWS}) LIMIT {limit}"
+    )
+}
+
+/// The first `limit` distinct values of `column` in all of `from`, in order
+/// (`Workspace::distinct`).
+fn distinct_sql(from: &str, column: &str, limit: usize) -> String {
+    format!(
+        "SELECT DISTINCT {column} FROM {from} WHERE {column} IS NOT NULL \
+         ORDER BY 1 LIMIT {limit}"
     )
 }
 
@@ -1598,16 +1634,23 @@ impl Workspace {
         }
     }
 
-    /// The columns of each of `tables` the agent can name — loaded, its own, a helper view —
-    /// in their order, for REQ-11's hints (#27). Asked only by the hints that list columns, and
-    /// no table is scanned. A loaded table's are the ones kept from its attach.
+    /// The columns of each of `tables` — loaded, the agent's own, a helper view — in their
+    /// order, for REQ-11's hints (#27). Asked only by the hints that list columns, and no table
+    /// is scanned. A loaded table's are the ones kept from its attach.
     ///
     /// The rest are the catalog's, which DuckDB keeps with a view when it is made, and nothing
-    /// is bound: the hint is built after the batch's watchdog has stopped, and binding a view
-    /// evaluates its table functions' arguments, so a prepared `SELECT *` of one moved the
-    /// agent's sequence (`a_hint_runs_nothing_of_the_views_it_lists`) and slept past the deadline
-    /// (`a_hint_takes_nothing_past_the_deadline`). Read on the host-facing connection, in the
-    /// order the agent's search path finds a name: its temporary objects, its own, the helpers'.
+    /// is bound. So a view is listed with the columns it was made with, even once a table it
+    /// reads is gone and it can no longer be read: DuckDB 1.5.5 keeps them, and
+    /// `duckdb_dependencies()` lists nothing of the agent's to tell (measured: empty for a view
+    /// of `memory.main`), so only a bind could
+    /// (`a_view_is_listed_with_the_columns_it_was_made_with`). Not bound, because the hint is
+    /// built after the batch's watchdog has stopped, and binding a view evaluates its table
+    /// functions' arguments, so a prepared `SELECT *` of one moved the agent's sequence
+    /// (`a_hint_runs_nothing_of_the_views_it_lists`) and slept past the deadline
+    /// (`a_hint_takes_nothing_past_the_deadline`). In the order the agent's search path finds a
+    /// name: its temporary objects, its own, the helpers'. The agent's are read on its own
+    /// connection, the only one that sees its temporary catalog ([`AGENT_COLUMNS`]); the helpers'
+    /// on the host-facing one.
     ///
     /// `duckdb_columns()` builds a row for every column of every catalog, DuckDB's own 527
     /// included, before any filter applies, about 7 M instructions, so what it gives is kept: a
@@ -1641,11 +1684,7 @@ impl Workspace {
         if let (false, Some(alias)) = (helpers.is_empty(), &self.helper_alias) {
             let mut cached = self.helper_columns.borrow_mut();
             if cached.as_ref().is_none_or(|(a, _)| a != alias) {
-                let rows = self.catalog_columns(&[alias.as_str()]);
-                *cached = Some((
-                    alias.clone(),
-                    rows.into_iter().map(|(_, t, c)| (t, c)).collect(),
-                ));
+                *cached = Some((alias.clone(), self.catalog_columns(alias)));
             }
             let all = cached.as_ref().map_or(&[][..], |(_, r)| r.as_slice());
             for t in helpers {
@@ -1658,38 +1697,49 @@ impl Workspace {
         if rest.is_empty() {
             return out;
         }
-        // In the order the agent's search path finds a name: a temporary object first.
-        let catalogs = ["temp", "memory"];
+        // In the order the agent's search path finds a name: a temporary object first. Empty
+        // where the catalog could not be read, a convenience as the names are (`nameable`), and
+        // a table is then named alone.
         let rows = self
             .agent_columns
-            .get_or_init(|| self.catalog_columns(&catalogs));
+            .get_or_init(|| self.agent_rows(AGENT_COLUMNS).unwrap_or_default());
         for t in &rest {
-            let Some(db) = catalogs.iter().find(|c| {
+            let Some(db) = [0, 1].into_iter().find(|c| {
                 rows.iter()
-                    .any(|r| r.0 == **c && r.1.eq_ignore_ascii_case(t))
+                    .any(|r| r.0 == *c && r.1.eq_ignore_ascii_case(t))
             }) else {
                 continue;
             };
             let mine = rows
                 .iter()
-                .filter(|r| r.0 == *db && r.1.eq_ignore_ascii_case(t));
+                .filter(|r| r.0 == db && r.1.eq_ignore_ascii_case(t));
             let name = mine.clone().next().map(|r| r.1.clone()).unwrap_or_default();
             out.push((name, mine.map(|r| r.2.clone()).collect()));
         }
         out
     }
 
-    /// `(catalog, table, column)` of every table and view in schema `main` of `catalogs`, each
-    /// table's columns in order. The catalog's, so nothing is bound (`columns_of`). Empty where
-    /// it could not be read: a convenience, as the names are (`nameable`), and a table is then
+    /// `json_serialize_sql` of `statement` ([`SERIALIZED`]), or `None` where it could not be
+    /// asked. Prepared once for the engine's life: prepared each time, it cost each failing call
+    /// about 0.3 M more (4.3 M against 4.0 M, `SELECT temp FROM meters` through MCP).
+    fn parsed(&self, statement: &str) -> Option<String> {
+        self.ingest
+            .prepare_cached(SERIALIZED)
+            .ok()?
+            .query_row([statement], |r| r.get(0))
+            .ok()
+    }
+
+    /// `(table, column)` of every table and view in schema `main` of the helpers' catalog
+    /// `alias`, each table's columns in order, read on the host-facing connection, which sees
+    /// it as the agent's does. The catalog's, so nothing is bound (`columns_of`). Empty where it
+    /// could not be read: a convenience, as the names are (`nameable`), and a table is then
     /// named alone.
-    fn catalog_columns(&self, catalogs: &[&str]) -> Vec<(String, String, String)> {
-        let sql = catalog_columns_sql(catalogs.len());
-        (|| -> Result<Vec<(String, String, String)>, duckdb::Error> {
+    fn catalog_columns(&self, alias: &str) -> Columns {
+        let sql = catalog_columns_sql();
+        (|| -> Result<Columns, duckdb::Error> {
             let mut st = self.ingest.prepare(&sql)?;
-            let rows = st.query_map(duckdb::params_from_iter(catalogs), |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?;
+            let rows = st.query_map([alias], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect()
         })()
         .unwrap_or_default()
@@ -2773,17 +2823,11 @@ impl Workspace {
             let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
             rows.collect::<Result<Vec<_>, _>>().ok()
         };
-        let head = read(&format!(
-            "SELECT DISTINCT {column} FROM (SELECT {column} FROM {from} \
-             WHERE {column} IS NOT NULL LIMIT {NOTE_HEAD_ROWS}) LIMIT {limit}"
-        ))?;
+        let head = read(&distinct_head_sql(&from, &column, limit))?;
         if head.len() >= limit {
             return Some(head);
         }
-        let values = read(&format!(
-            "SELECT DISTINCT {column} FROM {from} WHERE {column} IS NOT NULL \
-             ORDER BY 1 LIMIT {limit}"
-        ))?;
+        let values = read(&distinct_sql(&from, &column, limit))?;
         // Quoted back to the agent in the note, so each is cut: a value can be any length.
         Some(
             values
@@ -3560,6 +3604,7 @@ mod tests {
             AGENT_RELATIONS,
             AGENT_TYPES,
             AGENT_ENUM_COLUMNS,
+            AGENT_COLUMNS,
             ENUM_IN_TABLES,
             ENUM_IN_VIEWS,
             ENUM_IN_INDEXES,
@@ -3575,13 +3620,29 @@ mod tests {
         ]
         .iter()
         .map(|s| s.to_str().unwrap().to_string())
-        .chain([COMMENT_OF, ENGINE_VERSION, ICU_LOADED, NAMEABLE, OWN_TABLES].map(str::to_string))
+        .chain(
+            [
+                COMMENT_OF,
+                ENGINE_VERSION,
+                ICU_LOADED,
+                NAMEABLE,
+                OWN_TABLES,
+                SERIALIZED,
+            ]
+            .map(str::to_string),
+        )
         .collect();
         all.push(catalogs_with_functions_sql(list));
         all.extend(listings_sql(list));
         all.push(helpers_held_sql("benchy_1"));
         all.push(rows_sql("benchy_1", "readings"));
-        all.push(catalog_columns_sql(2));
+        all.push(catalog_columns_sql());
+        all.push(distinct_head_sql(
+            "benchy_1.main.\"readings\"",
+            "\"meter\"",
+            32,
+        ));
+        all.push(distinct_sql("benchy_1.main.\"readings\"", "\"meter\"", 32));
         for sql in &all {
             assert_eq!(unqualified(&c, sql), Vec::<String>::new(), "{sql}");
         }
