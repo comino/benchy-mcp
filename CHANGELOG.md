@@ -56,15 +56,19 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   subquery. Helper views and the agent's own tables are listed like loaded ones, a temporary
   table with its own columns rather than those of the agent's table it hides; an alias or a
   CTE named like a table on the bench is not taken for that table, so `SELECT meters.power_kw
-  FROM rooms AS meters` is told the columns of `rooms` alone. The list is held to 1,024 bytes,
+  FROM rooms AS meters` is told the columns of `rooms` alone. What a statement reads is DuckDB's
+  own parse of it (`json_serialize_sql`, which binds nothing), so a qualified `main.meters` is the
+  table whatever CTE is named `meters`, and a CTE inside a subquery hides no table outside it; a
+  statement of more than 8 KiB, or one that is not a SELECT, is told the bench's tables instead,
+  so building a hint takes no meaningful time (a 98 KB one took 17.7 G instructions, now 0.45 G). The list is held to 1,024 bytes,
   `(+N more)` included: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and
   the hint then names `DESCRIBE <table>`. These hints name no tool, so a host whose agent has no
   `describe` is not sent to one; there is no protocol change. The columns come from what the
   attach kept, or the catalog's, which DuckDB keeps with a view when it is made; nothing is
   bound, as a bind evaluates a view's table-function arguments, which can call `nextval` or
-  sleep, and the hint is built after the deadline's watchdog has stopped. A failing query costs
-  what it did on a loaded table, and less where it lists a view but in a batch that has just
-  made one (docs/PERFORMANCE.md).
+  sleep, and the hint is built after the deadline's watchdog has stopped. An unknown column's
+  error costs about 0.25 M instructions more, the parse; an unknown table's what it did, and
+  less where it lists a view but in a batch that has just made one (docs/PERFORMANCE.md).
 - **A host's error replies carry `detail`, facts beside the model's message** (#26). A host
   no longer parses prose: `E_REBUILT` says why the engine went (`reason`: `hard_deadline`,
   `memory_ceiling`, `engine_died` or `pivot_type`) and what went with it (`lost`: `results`,

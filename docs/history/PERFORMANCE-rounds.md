@@ -247,6 +247,27 @@ against the change, three runs each:
 | `SELECT temp FROM mine`, a view of the agent's | 4.40–4.43 M | 4.39–4.43 M |
 | `SELECT temp FROM mine`, a temporary table of the agent's | 3.75–3.79 M | 3.74–3.89 M |
 
+**What a statement reads, from DuckDB's parse.** The tables a statement reads, and what each
+alias stands for, were a scan of its words of benchy's own. It was wrong where DuckDB's scoping
+is not textual, `main.meters` beside a CTE `meters`, a CTE inside a subquery
+(`a_name_is_read_as_the_table_duckdb_binds_it_to`), and quadratic: each name of a table that
+qualified a column was looked for as an alias over every word, after the watchdog had stopped.
+It is now `json_serialize_sql`'s parse, which binds nothing, walked once, and a statement over
+8 KiB is not read and is told the bench (`a_long_statement_gets_its_hint_at_once`). The parse
+costs about 2,200 instructions a byte of SQL, measured on DuckDB 1.5.5 alone (18 KB: 40 M).
+Measured as above, three runs each, the scan against the parse with its statement prepared once:
+
+| Each failing call | Scan of words | DuckDB's parse |
+|---|---|---|
+| `SELECT temp FROM meters` | 3.73–3.77 M | 4.03–4.06 M |
+| `SELECT m.temp FROM meters m` | 3.70–3.72 M | 3.91–4.02 M |
+| `SELECT * FROM sales` (no parse) | 3.75–3.78 M | 3.69–3.78 M |
+| 250 `meters.meter` and a `meters.missing`, 3.6 KB | 43.7 M | 25.3–25.4 M |
+| 7,000 of them, 98 KB, past the bound | 17,744–17,749 M | 442–449 M |
+
+Prepared on each call, the parse cost `SELECT temp FROM meters` 4.29–4.34 M. What is left of
+the 98 KB call is DuckDB's own parse and bind of the statement, and benchy's split of the batch.
+
 ### A query read only as far as it is kept
 
 A query's result was built whole (`duckdb_execute_prepared`) before its first 2,000 rows were

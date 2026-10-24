@@ -634,6 +634,11 @@ error that can have one.
   column's, named like a table is not read where it is given or where it qualifies a column, and
   a CTE's name not outside its own body (nor in it, `RECURSIVE`): `meters.power_kw FROM rooms AS
   meters` is told `rooms` alone.
+- `a_name_is_read_as_the_table_duckdb_binds_it_to` — what a statement reads is DuckDB's parse
+  of it: `main.meters` is the table whatever CTE is named `meters`, and a CTE inside a subquery
+  hides no table outside it.
+- `a_long_statement_gets_its_hint_at_once` — a failing SELECT of 280 KB comes back within its
+  deadline; past 8 KiB a statement is not read for its tables and is told the bench.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.

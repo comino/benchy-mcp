@@ -638,9 +638,11 @@ fn fault(
             };
         }
         let columns = |tables: &[&str]| ws.columns_of(tables);
+        let parse = |statement: &str| ws.parsed(statement);
         let catalogue = crate::hint::Catalogue {
             names: &names,
             columns: Some(&columns),
+            parse: Some(&parse),
         };
         WorkError::Sql {
             index: index as usize + 1,
@@ -864,6 +866,12 @@ const AGENT_COLUMNS: &CStr = c"SELECT CASE WHEN database_name = 'temp' THEN 0 EL
         table_name, column_name FROM system.main.duckdb_columns() \
       WHERE schema_name = 'main' AND database_name IN ('temp', 'memory') \
       ORDER BY 1, table_name, column_index";
+
+/// DuckDB's parse of one statement, for the hints that list what it reads
+/// (`crate::hint::Reads`). It parses and binds nothing, so it runs none of the agent's code and
+/// reads a statement that failed to bind; on the host-facing connection, which sees the agent's
+/// macros, through `system.main` as every call of benchy's is.
+const SERIALIZED: &str = "SELECT system.main.json_serialize_sql(?::VARCHAR)";
 
 /// Which of the catalogs `list` (benchy's own `benchy_<n>`, quoted) hold a function.
 fn catalogs_with_functions_sql(list: &str) -> String {
@@ -1685,6 +1693,17 @@ impl Workspace {
             out.push((name, mine.map(|r| r.2.clone()).collect()));
         }
         out
+    }
+
+    /// `json_serialize_sql` of `statement` ([`SERIALIZED`]), or `None` where it could not be
+    /// asked. Prepared once for the engine's life: prepared each time, it cost each failing call
+    /// about 0.3 M more (4.3 M against 4.0 M, `SELECT temp FROM meters` through MCP).
+    fn parsed(&self, statement: &str) -> Option<String> {
+        self.ingest
+            .prepare_cached(SERIALIZED)
+            .ok()?
+            .query_row([statement], |r| r.get(0))
+            .ok()
     }
 
     /// `(table, column)` of every table and view in schema `main` of the helpers' catalog
@@ -3583,7 +3602,17 @@ mod tests {
         ]
         .iter()
         .map(|s| s.to_str().unwrap().to_string())
-        .chain([COMMENT_OF, ENGINE_VERSION, ICU_LOADED, NAMEABLE, OWN_TABLES].map(str::to_string))
+        .chain(
+            [
+                COMMENT_OF,
+                ENGINE_VERSION,
+                ICU_LOADED,
+                NAMEABLE,
+                OWN_TABLES,
+                SERIALIZED,
+            ]
+            .map(str::to_string),
+        )
         .collect();
         all.push(catalogs_with_functions_sql(list));
         all.extend(listings_sql(list));

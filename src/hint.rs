@@ -20,7 +20,14 @@ pub struct Catalogue<'a> {
     pub names: &'a [String],
     /// Asked only by a hint that lists columns (#27). `None`, and a hint names tables alone.
     pub columns: Option<&'a Columns<'a>>,
+    /// DuckDB's parse of a statement, `json_serialize_sql`'s, asked only by a hint that lists
+    /// the tables a statement reads ([`Reads`]). `None`, or `None` given, and the hint lists the
+    /// bench instead.
+    pub parse: Option<&'a Parse<'a>>,
 }
+
+/// `json_serialize_sql` of a statement, or `None` where it could not be asked.
+pub type Parse<'a> = dyn Fn(&str) -> Option<String> + 'a;
 
 /// The columns of those of the tables asked for that the catalog has, by table, each table's in
 /// its own order.
@@ -52,6 +59,7 @@ impl<'a> Catalogue<'a> {
         Catalogue {
             names,
             columns: None,
+            parse: None,
         }
     }
 
@@ -373,16 +381,24 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
     // column named "temp"`; and qualified by a view, a CTE or a subquery, `Binder Error: Values
     // list "c" does not have a column named "temp"`. Only the first had a hint, of the tables'
     // names, and it sent the agent to `describe` for their columns.
+    //
+    // What the statement reads is DuckDB's parse of it ([`Reads`]). One it cannot read, too long
+    // or not a SELECT, is told the bench, as a statement that reads no table is.
+    let on_the_bench = || {
+        let all: Vec<&str> = catalogue.names.iter().map(String::as_str).collect();
+        let (here, rest) = catalogue.shapes(&all);
+        Some(format!(
+            "That column is not in what the statement reads. On the bench: {here}.{rest}"
+        ))
+    };
     if message.contains("Binder Error") && message.contains("not found in FROM clause") {
-        let read = tables_read(cx.statement.unwrap_or(""), catalogue.names);
-        if read.is_empty() {
-            let all: Vec<&str> = catalogue.names.iter().map(String::as_str).collect();
-            let (here, rest) = catalogue.shapes(&all);
-            return Some(format!(
-                "That column is not in what the statement reads. On the bench: {here}.{rest}"
-            ));
+        let Some(reads) = Reads::of(cx.statement.unwrap_or(""), catalogue) else {
+            return on_the_bench();
+        };
+        if reads.tables.is_empty() {
+            return on_the_bench();
         }
-        let (read, rest) = catalogue.shapes(&read);
+        let (read, rest) = catalogue.shapes(&reads.tables);
         return Some(format!(
             "That column is not in the tables the statement reads: {read}.{rest}"
         ));
@@ -400,12 +416,15 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
         (None, Some(q)) => (q, true),
         (None, None) => return None,
     };
-    let statement = cx.statement.unwrap_or("");
-    let mut read = tables_read(statement, catalogue.names);
-    // The alias first: `FROM meters m JOIN rooms meters` qualifies `rooms`'s columns `meters.`.
-    let table = aliased(statement, q, &read)
-        .and_then(|t| read.iter().position(|r| *r == t))
-        .or_else(|| read.iter().position(|t| t.eq_ignore_ascii_case(q)));
+    let Some(reads) = Reads::of(cx.statement.unwrap_or(""), catalogue) else {
+        return on_the_bench();
+    };
+    // What the name stands for, not the table of that name: `FROM meters m JOIN rooms meters`
+    // qualifies `rooms`'s columns `meters.`.
+    let mut read = reads.tables.clone();
+    let table = reads
+        .table_of(q)
+        .and_then(|t| read.iter().position(|r| *r == t));
     let said = match table {
         Some(i) => {
             // what the agent qualified the column with first: it is what it was looking at
@@ -429,142 +448,158 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
     ))
 }
 
-/// The words of `statement` as DuckDB 1.5.5's lexer reads it (`crate::guard::lex`): a name,
-/// quoted or not, as the name, and any other mark as itself, so that two names either side of a
-/// `,` are not read as a table and its alias. A literal is a word of its own, `'`, which no name
-/// is; comments are left out.
-fn words(statement: &str) -> Vec<String> {
-    use crate::guard::Part;
-    let mut out = Vec::new();
-    // A scan that stops (`guard::Stuck`) reads no word, and the hint names no table.
-    for (part, r) in crate::guard::lex(statement).unwrap_or_default() {
-        let text = &statement[r];
-        match part {
-            Part::Code => {
-                let mut word = String::new();
-                for c in text.chars() {
-                    // What continues a word in DuckDB's lexer.
-                    if c.is_alphanumeric() || c == '_' || c == '$' || !c.is_ascii() {
-                        word.push(c);
-                        continue;
-                    }
-                    if !word.is_empty() {
-                        out.push(std::mem::take(&mut word));
-                    }
-                    if !c.is_whitespace() {
-                        out.push(c.to_string());
-                    }
-                }
-                if !word.is_empty() {
-                    out.push(word);
-                }
-            }
-            Part::Name => out.push(
-                text.strip_prefix('"')
-                    .and_then(|t| t.strip_suffix('"'))
-                    .unwrap_or(text)
-                    .replace("\"\"", "\""),
-            ),
-            Part::Literal => out.push("'".into()),
-            Part::Comment => {}
-        }
-    }
-    out
-}
+/// The most of a statement a hint reads for its tables, in bytes. DuckDB 1.5.5's
+/// `json_serialize_sql` costs about 2,200 instructions a byte of SQL and writes about twelve
+/// bytes of JSON for each, so a statement of 8 KiB is read in about 18 M, a few milliseconds, and
+/// one of 100 KB would take 220 M before its JSON was read; a longer one is told the bench
+/// instead. The hint is built after the batch's watchdog has stopped, so nothing else bounds it
+/// (`a_long_statement_gets_its_hint_at_once`). Through MCP a failing call of 98 KB, 7,000
+/// `meters.meter` and a `meters.missing`, cost 17.7 G instructions with the scan of words this
+/// replaced, and 0.45 G now, DuckDB's own parse and bind of it most of that.
+const PARSED: usize = 8 * 1024;
 
-/// The tables of `names` that `statement` names, in the order it first names them, as `names`
-/// spells them. A name is matched as DuckDB matches one, ASCII case folded. A column of the same
-/// name as a table counts too: the hint then lists a table more, which costs bytes and misleads
-/// no one.
+/// What a statement reads, as DuckDB's parser reads it: the tables of the catalogue it names,
+/// and what each name it binds a FROM item to stands for.
 ///
-/// A name the statement gives is not the table of that name. An alias, `rooms AS meters` or
-/// `rooms meters`, a subquery's or a column's, is not read where it is given, nor where it
-/// qualifies a column, `meters.power_kw`: that is `rooms`'s, and listing `meters` first, as the
-/// table qualified, sent the agent to a table the statement does not read. A CTE's name is not
-/// read anywhere but in its own body, where DuckDB 1.5.5 binds it to the table, unless the CTE
-/// is `RECURSIVE` (`a_name_the_statement_gives_hides_the_table_of_that_name`).
-fn tables_read<'n>(statement: &str, names: &'n [String]) -> Vec<&'n str> {
-    let w = words(statement);
-    let is = |i: usize, s: &str| w.get(i).is_some_and(|x| x.eq_ignore_ascii_case(s));
-    let table = |x: &str| names.iter().find(|n| n.eq_ignore_ascii_case(x));
-    let given =
-        |i: usize| i > 0 && (is(i - 1, "as") || w[i - 1] == ")" || table(&w[i - 1]).is_some());
-    let ctes: Vec<(&str, std::ops::Range<usize>)> = (0..w.len())
-        .filter_map(|i| Some((w[i].as_str(), cte(&w, i)?)))
-        .collect();
-    let recursive = w.iter().any(|x| x.eq_ignore_ascii_case("recursive"));
-    let mut read: Vec<&str> = Vec::new();
-    for (i, x) in w.iter().enumerate() {
-        let Some(n) = table(x) else {
-            continue;
+/// Read from `json_serialize_sql`, which parses and binds nothing, so a statement that failed to
+/// bind is read all the same. Before, this was a scan of the statement's words of benchy's own,
+/// and it was wrong where DuckDB's scoping is not textual: `main.meters` is the table whatever CTE
+/// is named `meters`, and a CTE inside a subquery hides no table outside it
+/// (`a_name_is_read_as_the_table_duckdb_binds_it_to`); and it looked for each qualified name's
+/// alias over every word, about 1.6 G comparisons for a SELECT of 20,000 `t.x`. The parse is
+/// read once, in time linear in its size. It costs a failing call of the bundled bench about
+/// 0.25 M more, `SELECT temp FROM meters` 3.75 M → 4.0 M, with its statement prepared once.
+pub(crate) struct Reads<'n> {
+    /// The tables of the catalogue the statement reads, in the order it names them, as the
+    /// catalogue spells them.
+    pub tables: Vec<&'n str>,
+    /// Each name a FROM item is bound to, its alias or a table's own name, and the table it is,
+    /// or `None` for a CTE, a subquery, a table function or a table of no catalogue name.
+    bound: Vec<(String, Option<&'n str>)>,
+}
+
+impl<'n> Reads<'n> {
+    /// `None` where the statement cannot be read: longer than [`PARSED`], not one SELECT
+    /// (`json_serialize_sql` serializes SELECT alone), nested past what `serde_json` reads (128
+    /// levels), or no parse to ask for.
+    pub(crate) fn of(statement: &str, catalogue: &Catalogue<'n>) -> Option<Self> {
+        if statement.len() > PARSED {
+            return None;
+        }
+        let json = (catalogue.parse?)(statement)?;
+        let v: serde_json::Value = serde_json::from_str(&json).ok()?;
+        if v["error"] != serde_json::Value::Bool(false) {
+            return None;
+        }
+        let [statement] = v["statements"].as_array()?.as_slice() else {
+            return None;
         };
-        let a_cte = ctes
-            .iter()
-            .any(|(c, body)| c.eq_ignore_ascii_case(x) && (recursive || !body.contains(&i)));
-        let an_alias = is(i + 1, ".")
-            && (0..w.len()).any(|j| j != i && given(j) && w[j].eq_ignore_ascii_case(x));
-        if given(i) || a_cte || an_alias {
-            continue;
-        }
-        if !read.contains(&n.as_str()) {
-            read.push(n);
-        }
-    }
-    read
-}
-
-/// The words of the body of the CTE that `w[i]` names, `name AS [NOT] [MATERIALIZED] (…)` or
-/// `name(a, b) AS (…)`, from its `(` to its `)`.
-fn cte(w: &[String], i: usize) -> Option<std::ops::Range<usize>> {
-    let mut j = i + 1;
-    if w.get(j)? == "(" {
-        j = closing(w, j)? + 1;
-    }
-    if !w.get(j)?.eq_ignore_ascii_case("as") {
-        return None;
-    }
-    j += 1;
-    for word in ["not", "materialized"] {
-        if w.get(j)?.eq_ignore_ascii_case(word) {
-            j += 1;
-        }
-    }
-    (w.get(j)? == "(").then_some(())?;
-    Some(j..closing(w, j)?)
-}
-
-/// Where the `(` at `w[open]` is closed.
-fn closing(w: &[String], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (k, x) in w.iter().enumerate().skip(open) {
-        match x.as_str() {
-            "(" => depth += 1,
-            ")" => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(k);
-                }
+        let mut items = Vec::new();
+        walk(statement, &mut Vec::new(), catalogue.names, &mut items);
+        // In the order the statement names them: the walk's order is the JSON's, which is not
+        // the text's.
+        items.sort_by_key(|(at, _, _)| *at);
+        let mut tables: Vec<&str> = Vec::new();
+        for t in items.iter().filter_map(|(_, _, t)| *t) {
+            if !tables.contains(&t) {
+                tables.push(t);
             }
-            _ => {}
         }
+        let bound = items.into_iter().map(|(_, n, t)| (n, t)).collect();
+        Some(Reads { tables, bound })
     }
-    None
+
+    /// The table that `name`, as it qualifies a column, stands for: of the FROM items bound to
+    /// that name, the first that is a table. `None` where none is, as of a CTE or a subquery.
+    pub(crate) fn table_of(&self, name: &str) -> Option<&'n str> {
+        self.bound
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case(name))
+            .find_map(|(_, t)| *t)
+    }
 }
 
-/// The table of `read` that `alias` stands for in `statement`: `readings r` or `readings AS r`,
-/// in a FROM or a JOIN.
-fn aliased<'n>(statement: &str, alias: &str, read: &[&'n str]) -> Option<&'n str> {
-    let w = words(statement);
-    (0..w.len()).find_map(|i| {
-        let table = read.iter().find(|t| t.eq_ignore_ascii_case(&w[i]))?;
-        let next = w.get(i + 1)?;
-        let named = if next.eq_ignore_ascii_case("as") {
-            w.get(i + 2)?
-        } else {
-            next
-        };
-        named.eq_ignore_ascii_case(alias).then_some(*table)
-    })
+/// A FROM item: where the statement names it, the name it is bound to, and the table it reads.
+type Item<'n> = (u64, String, Option<&'n str>);
+
+/// Every FROM item under `v`, with where the statement names it, the name it is bound to, and
+/// the table of `names` it reads, if it reads one. `ctes` are the names of the CTEs in scope.
+///
+/// A FROM item is found by its shape, as `crate::helpers` finds one in a macro's body: every
+/// table reference DuckDB 1.5.5 serializes has a `type` and a `sample`, and neither an expression
+/// (a `class`) nor a query node (`modifiers`) is one. A `BASE_TABLE` named by its name alone is
+/// a CTE where one of that name is in scope. A query node's CTEs are in scope in the node, and
+/// each in the bodies of the CTEs after it, not its own, unless it is recursive: DuckDB 1.5.5
+/// binds `meters` in `WITH meters AS (SELECT meter FROM meters)` to the table, and in a
+/// `RECURSIVE_CTE_NODE`'s body to the CTE (`a_name_the_statement_gives_hides_the_table_of_that_name`).
+/// A name qualified by `main`, `memory` or `temp` is a table, whatever CTE has its name, and
+/// one qualified otherwise is none of the catalogue's.
+fn walk<'n>(
+    v: &serde_json::Value,
+    ctes: &mut Vec<String>,
+    names: &'n [String],
+    items: &mut Vec<Item<'n>>,
+) {
+    let o = match v {
+        serde_json::Value::Array(a) => {
+            return a.iter().for_each(|x| walk(x, ctes, names, items));
+        }
+        serde_json::Value::Object(o) => o,
+        _ => return,
+    };
+    let depth = ctes.len();
+    if let Some(map) = o.get("cte_map").and_then(|m| m["map"].as_array()) {
+        for cte in map {
+            let name = cte["key"].as_str().unwrap_or_default().to_string();
+            let query = &cte["value"]["query"];
+            let recursive = query["node"]["type"] == "RECURSIVE_CTE_NODE";
+            if recursive {
+                ctes.push(name);
+                walk(query, ctes, names, items);
+            } else {
+                walk(query, ctes, names, items);
+                ctes.push(name);
+            }
+        }
+    }
+    let text = |k: &str| o.get(k).and_then(|x| x.as_str()).unwrap_or_default();
+    if o.contains_key("sample") && !o.contains_key("class") && !o.contains_key("modifiers") {
+        let at = o
+            .get("query_location")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(u64::MAX);
+        let alias = text("alias");
+        if text("type") == "BASE_TABLE" {
+            let (catalog, schema, table) = (
+                text("catalog_name"),
+                text("schema_name"),
+                text("table_name"),
+            );
+            let is = |x: &str, of: &[&str]| of.iter().any(|o| x.eq_ignore_ascii_case(o));
+            // `memory.t` is parsed as schema `memory`, and `memory.main.t` as its catalog.
+            let plain = match (catalog, schema) {
+                ("", s) => s.is_empty() || is(s, &["main", "memory", "temp"]),
+                (c, s) => is(c, &["memory", "temp"]) && is(s, &["main"]),
+            };
+            let cte = catalog.is_empty()
+                && schema.is_empty()
+                && ctes.iter().any(|c| c.eq_ignore_ascii_case(table));
+            let read = (plain && !cte)
+                .then(|| names.iter().find(|n| n.eq_ignore_ascii_case(table)))
+                .flatten()
+                .map(String::as_str);
+            let name = if alias.is_empty() { table } else { alias };
+            items.push((at, name.to_string(), read));
+        } else if !alias.is_empty() {
+            items.push((at, alias.to_string(), None));
+        }
+    }
+    for (k, x) in o {
+        if k != "cte_map" {
+            walk(x, ctes, names, items);
+        }
+    }
+    ctes.truncate(depth);
 }
 
 /// REQ-15: an error says nothing of how the bench is built. DuckDB names the catalog a loaded
