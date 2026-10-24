@@ -460,9 +460,10 @@ kill. So is one loader's: each is read the same way while it loads, with the con
 - `a_load_that_keeps_failing_is_not_retried_forever` — it fails once, after `--load-timeout`,
   and the server exits.
 - `a_job_the_loader_does_not_read_is_held_to_the_load_timeout` — the load timeout covers handing
-  the loader its job too: a 300 KiB job, more than the loader's stdin pipe holds, to a loader
-  that never reads it fails `E_DEADLINE` at the timeout, attaches nothing, and the session serves
-  on.
+  the loader its job too: a job four times what a pipe holds here (`F_GETPIPE_SZ`, 16 pages by
+  default; at least twice where a 1 MiB request cannot carry four), to a loader that never reads
+  it, fails `E_DEADLINE` at the timeout, attaches nothing, and the session serves on (Linux
+  only).
 - `an_engine_that_dies_at_every_attach_is_not_rebuilt_forever` — a rebuild that loses its engine
   counts as failed, and a lost engine is noticed when it goes.
 - `result_ids_never_outlive_their_workspace` — after a rebuild, ids from the lost workspace stop

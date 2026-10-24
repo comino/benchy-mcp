@@ -1363,10 +1363,26 @@ fn a_request_the_engine_does_not_read_is_held_to_the_hard_deadline() {
 #[cfg(target_os = "linux")]
 fn a_job_the_loader_does_not_read_is_held_to_the_load_timeout() {
     // REQ-8: the load timeout covers handing the loader its job, not only waiting for its
-    // answer. A job larger than the loader's stdin pipe holds (64 KiB on Linux) blocks its
-    // writer until the loader reads it; a loader that never does — wedged before it reads, in
-    // the field — must still fail at the load timeout and be killed. With the job written before
-    // the timeout started, the attach below had no reply after 30 s past a 2 s load timeout.
+    // answer. A job larger than the loader's stdin pipe holds blocks its writer until the loader
+    // reads it; a loader that never does — wedged before it reads, in the field — must still
+    // fail at the load timeout and be killed. With the job written before the timeout started,
+    // the attach below had no reply after 30 s past a 2 s load timeout.
+    //
+    // What a pipe holds is 16 pages by default: 64 KiB with 4 KiB pages, 1 MiB with 64 KiB
+    // pages. A job that fits is written without blocking, the reply's timeout still fails the
+    // attach `E_DEADLINE`, and this test would pass with the write left outside the timeout. So
+    // the job is sized from what a fresh pipe of this user's holds (`F_GETPIPE_SZ`), which is
+    // what the loader's pipe is given: four times that, or at least twice where a request
+    // cannot carry four (a request is at most 1 MiB). Where it cannot carry twice, the test says
+    // so and shows nothing.
+    let capacity = pipe_capacity();
+    // `"series-000000",` is 16 bytes of the job, and of the request; 4 KiB for the rest of it.
+    let most = (1 << 20) - 4096;
+    let job = (4 * capacity).min(most);
+    if job < 2 * capacity {
+        eprintln!("a pipe holds {capacity} bytes, more than half of what a request may carry");
+        return;
+    }
     //
     // The session runs a copy of the binary, and a loader is that binary started again: once
     // the engine is up, a script that sleeps without reading its stdin takes the copy's place,
@@ -1403,9 +1419,11 @@ fn a_job_the_loader_does_not_read_is_held_to_the_load_timeout() {
     assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
     std::fs::rename(&wedged, &bin).unwrap();
 
-    // Some 300 KiB of series names, which the job carries to the loader: it is the loader that
-    // checks them against the stream.
-    let series: Vec<String> = (0..20_000).map(|i| format!("series-{i:06}")).collect();
+    // Series names, which the job carries to the loader: it is the loader that checks them
+    // against the stream.
+    let series: Vec<String> = (0..job / 16 + 1)
+        .map(|i| format!("series-{i:06}"))
+        .collect();
     let asked = Instant::now();
     h.send(&json!({"id": 1, "call": "attach", "name": "load", "path": file, "series": series}));
     let mut stdout = std::mem::replace(&mut h.stdout, spare_stdout());
@@ -1432,6 +1450,24 @@ fn a_job_the_loader_does_not_read_is_held_to_the_load_timeout() {
     assert_ne!(r["ok"], true, "{r}");
     let r = h.call("query", json!({"sql": "SELECT 40 + 2 AS answer"}));
     assert!(r["text"].as_str().unwrap_or("").contains("42"), "{r}");
+}
+
+/// What a new pipe holds, in bytes: what the kernel gives this user's pipes now.
+#[cfg(target_os = "linux")]
+fn pipe_capacity() -> usize {
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let held = unsafe { libc::fcntl(fds[0], libc::F_GETPIPE_SZ) };
+    unsafe {
+        libc::close(fds[0]);
+        libc::close(fds[1]);
+    }
+    assert!(
+        held > 0,
+        "F_GETPIPE_SZ: {}",
+        std::io::Error::last_os_error()
+    );
+    held as usize
 }
 
 /// Stand-ins for a Host's pipes, so the real ones can be closed while the Host lives on.

@@ -1955,11 +1955,11 @@ fn run_loader(
     let mut stdin = child.stdin.take().expect("piped");
     let stdout = child.stdout.take().expect("piped");
     // Written and read on the worker thread, so the load timeout and the memory watch cover
-    // both. A job larger than the pipe holds (64 KiB on Linux) to a loader that does not read
-    // it, wedged before it does, left an attach without a reply for as long as the loader stayed
-    // so: over 30 s past a 2 s load timeout. The kill below ends the write with EPIPE, or the
-    // read with EOF, so the thread ends with the loader. One thread does both, as one did the
-    // read before: the loader reads its whole job before it answers.
+    // both. A job larger than the pipe holds (16 pages on Linux, 64 KiB with 4 KiB pages) to a
+    // loader that does not read it, wedged before it does, left an attach without a reply for as
+    // long as the loader stayed so: over 30 s past a 2 s load timeout. The kill below ends the
+    // write with EPIPE, or the read with EOF, so the thread ends with the loader. One thread does
+    // both, as one did the read before: the loader reads its whole job before it answers.
     // REQ-8 `a_job_the_loader_does_not_read_is_held_to_the_load_timeout`.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
