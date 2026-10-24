@@ -196,6 +196,7 @@ impl Wrap {
             index: at as usize + 1,
             kind: "TRANSACTION",
             allowed: ALLOWED,
+            whole: false,
         }
     }
 }
@@ -394,6 +395,10 @@ pub enum WorkError {
         index: usize,
         kind: &'static str,
         allowed: &'static str,
+        /// Refused with the whole batch, before any of it ran, as the classifier refuses a
+        /// statement it can bind; otherwise where it stands, once the statements before it ran
+        /// (`a_batch_refused_whole_says_no_statement_in_its_detail`).
+        whole: bool,
     },
     /// The batch did not parse.
     Parse(String, Option<String>),
@@ -436,7 +441,8 @@ impl WorkError {
     /// The statement the batch stopped at, counted from 1, where that is known: the one a
     /// refusal or DuckDB named, or, past the deadline, the one after those that ran, since every
     /// statement of the agent's that runs gives one result. A batch that did not parse, or a
-    /// refusal of the whole batch, stopped at none.
+    /// refusal of the whole batch, stopped at none: a host reads a statement as the one after
+    /// those that ran, and none did, though the refusal names the statement it refused.
     pub fn statement(&self) -> Option<usize> {
         self.statement_after(0)
     }
@@ -444,6 +450,7 @@ impl WorkError {
     fn statement_after(&self, ran: usize) -> Option<usize> {
         match self {
             WorkError::Partial { ran, error } => error.statement_after(ran.len()),
+            WorkError::Denied { whole: true, .. } => None,
             WorkError::Sql { index, .. } | WorkError::Denied { index, .. } => Some(*index),
             WorkError::Deadline { .. } => Some(ran + 1),
             _ => None,
@@ -454,20 +461,27 @@ impl WorkError {
 impl std::fmt::Display for WorkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WorkError::Denied { index, kind, .. } if *kind == TIME_ZONE => write!(
+            WorkError::Denied {
+                index, kind, whole, ..
+            } if *kind == TIME_ZONE => write!(
                 f,
-                "statement {index} sets TimeZone, which is fixed; nothing after it ran. {}",
+                "statement {index} sets TimeZone, which is fixed; {}. {}",
+                ran(*whole),
                 crate::hint::UTC
             ),
             WorkError::Denied {
                 index,
                 kind,
                 allowed,
+                whole,
             } => {
                 write!(
-                f, "statement {index} is {kind}, which is not allowed here; nothing after it ran. \
+                    f,
+                    "statement {index} is {kind}, which is not allowed here; {}. \
                     Allowed: {allowed}. The data is already loaded as tables — file and network \
-                    functions are unavailable.")?;
+                    functions are unavailable.",
+                    ran(*whole)
+                )?;
                 // DuckDB's own transaction around a PIVOT into a table, over a table the same
                 // batch makes, is refused up front (`crate::guard`, `a_pivot_into_a_table_runs`).
                 if *kind == "TRANSACTION" {
@@ -624,13 +638,25 @@ const ALLOWED: &str = "SELECT, CREATE, INSERT, UPDATE, DELETE, MERGE, DROP, ALTE
 /// Statement `index` (from 1) of the batch `sql`, a `kind` the agent may not run. A `SET` of
 /// `TimeZone` is told the session is UTC and how to reach local periods, not the statements
 /// allowed: the zone is the one setting an agent has a reason of its own to want (#52).
-fn denied(index: usize, kind: &'static str, sql: &str) -> WorkError {
+fn denied(index: usize, kind: &'static str, sql: &str, whole: bool) -> WorkError {
     let zone = kind == "SET"
         && crate::hint::statement(sql, index - 1).is_some_and(|s| crate::hint::sets_time_zone(&s));
     WorkError::Denied {
         index,
         kind: if zone { TIME_ZONE } else { kind },
         allowed: ALLOWED,
+        whole,
+    }
+}
+
+/// What a refusal says ran of its batch: none of it, when the batch was refused whole, though
+/// the statements before the refused one were well formed; told only "nothing after it", an
+/// agent took them to have run.
+fn ran(whole: bool) -> &'static str {
+    if whole {
+        "nothing in the batch ran"
+    } else {
+        "nothing after it ran"
     }
 }
 
@@ -1697,7 +1723,7 @@ impl Workspace {
                 let hint = crate::hint::for_parse_error(&m, sql);
                 return Err(WorkError::Parse(m, hint));
             }
-            Verdict::Refuse { index, kind } => return Err(denied(index, kind, sql)),
+            Verdict::Refuse { index, kind } => return Err(denied(index, kind, sql, true)),
             Verdict::Allow(_) => {}
         }
         // REQ-7: one watchdog for the whole batch. Proven in probe 2 — an execution-phase
@@ -1851,6 +1877,7 @@ impl Workspace {
                         mine as usize + 1,
                         crate::guard::type_name(kind),
                         sql,
+                        false,
                     ));
                     break;
                 }

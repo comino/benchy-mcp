@@ -768,6 +768,9 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
 - `a_failed_batch_says_what_ran_in_its_detail` — a batch that fails gives the statement it
   stopped at, and the earlier results' `result_ids` and `results` in a query reply's shape, in
   `detail`, and still in the message; past the deadline, `reason` and an empty `lost` too.
+- `a_batch_refused_whole_says_no_statement_in_its_detail` — a batch refused before any of it
+  ran has no `detail`, its message says nothing in it ran, and its earlier `CREATE` made nothing;
+  a statement refused once the ones before it ran gives `statement` and their results.
 - `a_rebuild_says_in_its_detail_why_and_what_was_lost` — `E_REBUILT`'s `detail.reason`
   (`hard_deadline`, `engine_died`, `memory_ceiling` with `held` and `ceiling`) and `lost`
   (`results`, `agent_tables`); the message tells the model the results went, and past the

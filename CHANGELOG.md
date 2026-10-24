@@ -54,6 +54,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   reads, and `results_omitted` counts those before them: they had an entry for every result
   whatever `max_bytes` was, and 2,000 `SELECT 1`s at 512 bytes replied with 216 KB, most of it
   ids `page` no longer knew. `max_bytes` bounds the text; the lists are bounded by that count.
+  A batch refused whole before any of it ran, `CREATE TABLE kept …; EXPLAIN …`, has no
+  `detail`: it gave `statement` 2, which says statement 1 ran, and its message said "nothing
+  after it ran"; it now says nothing in the batch ran.
 - **A helper comment `describe` cuts is told to the operator** (#60). `describe` cuts a helper's
   comment at 200 bytes and its whole line (signature, kind and comment) at 320, and marked the cut
   only for the agent, which never sees what was cut. Startup now says on stderr, beside
