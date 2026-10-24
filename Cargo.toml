@@ -33,7 +33,7 @@ arrow = { version = "58.4", default-features = false, features = ["ipc"] }
 arrow-ipc = { version = "58.4", default-features = false, features = ["lz4"] }
 # What arrow-ipc decodes LZ4 with, used directly to check a buffer's stated size before arrow
 # allocates it (src/ipc.rs). The same crate and version arrow-ipc resolves.
-lz4_flex = { version = "0.13", default-features = false, features = ["std", "frame"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["std", "frame"] }
 libc = "0.2"
 rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"] }
 serde = { version = "1", features = ["derive"] }
