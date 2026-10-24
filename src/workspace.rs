@@ -873,6 +873,25 @@ const AGENT_COLUMNS: &CStr = c"SELECT CASE WHEN database_name = 'temp' THEN 0 EL
 /// macros, through `system.main` as every call of benchy's is.
 const SERIALIZED: &str = "SELECT system.main.json_serialize_sql(?::VARCHAR)";
 
+/// At most `limit` distinct values of `column` among the first [`NOTE_HEAD_ROWS`] of `from`, both
+/// quoted already (`Workspace::distinct`): a function of its own so that REQ-9
+/// `benchys_internal_sql_names_every_function_by_its_catalog` reads it too.
+fn distinct_head_sql(from: &str, column: &str, limit: usize) -> String {
+    format!(
+        "SELECT DISTINCT {column} FROM (SELECT {column} FROM {from} \
+         WHERE {column} IS NOT NULL LIMIT {NOTE_HEAD_ROWS}) LIMIT {limit}"
+    )
+}
+
+/// The first `limit` distinct values of `column` in all of `from`, in order
+/// (`Workspace::distinct`).
+fn distinct_sql(from: &str, column: &str, limit: usize) -> String {
+    format!(
+        "SELECT DISTINCT {column} FROM {from} WHERE {column} IS NOT NULL \
+         ORDER BY 1 LIMIT {limit}"
+    )
+}
+
 /// Which of the catalogs `list` (benchy's own `benchy_<n>`, quoted) hold a function.
 fn catalogs_with_functions_sql(list: &str) -> String {
     format!(
@@ -2804,17 +2823,11 @@ impl Workspace {
             let rows = st.query_map([], |r| r.get::<_, String>(0)).ok()?;
             rows.collect::<Result<Vec<_>, _>>().ok()
         };
-        let head = read(&format!(
-            "SELECT DISTINCT {column} FROM (SELECT {column} FROM {from} \
-             WHERE {column} IS NOT NULL LIMIT {NOTE_HEAD_ROWS}) LIMIT {limit}"
-        ))?;
+        let head = read(&distinct_head_sql(&from, &column, limit))?;
         if head.len() >= limit {
             return Some(head);
         }
-        let values = read(&format!(
-            "SELECT DISTINCT {column} FROM {from} WHERE {column} IS NOT NULL \
-             ORDER BY 1 LIMIT {limit}"
-        ))?;
+        let values = read(&distinct_sql(&from, &column, limit))?;
         // Quoted back to the agent in the note, so each is cut: a value can be any length.
         Some(
             values
@@ -3624,6 +3637,12 @@ mod tests {
         all.push(helpers_held_sql("benchy_1"));
         all.push(rows_sql("benchy_1", "readings"));
         all.push(catalog_columns_sql());
+        all.push(distinct_head_sql(
+            "benchy_1.main.\"readings\"",
+            "\"meter\"",
+            32,
+        ));
+        all.push(distinct_sql("benchy_1.main.\"readings\"", "\"meter\"", 32));
         for sql in &all {
             assert_eq!(unqualified(&c, sql), Vec::<String>::new(), "{sql}");
         }
