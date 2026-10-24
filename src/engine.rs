@@ -241,9 +241,11 @@ pub fn run() -> ! {
                     let reply = match ws.work(&sql, &caps) {
                         Ok(results) => {
                             let (text, shown) = crate::result::render_batch_shown(&results, &caps);
+                            let (results, omitted) = crate::result::pageable(results);
                             Reply {
                                 result_ids: results.iter().map(|r| r.result_id.clone()).collect(),
-                                results: shown,
+                                results: crate::result::pageable(shown).0,
+                                omitted,
                                 ..Reply::ok(text)
                             }
                         }
@@ -270,9 +272,12 @@ pub fn run() -> ! {
                             );
                             // What each result's part of the text shows, as a query reply says
                             // it, so a host reads the results without the text (#26).
+                            let ids = ran.iter().map(|r| r.result_id.clone()).collect();
+                            let (result_ids, omitted) = crate::result::pageable(ids);
                             Reply {
-                                result_ids: ran.iter().map(|r| r.result_id.clone()).collect(),
-                                results: shown,
+                                result_ids,
+                                results: crate::result::pageable(shown).0,
+                                omitted,
                                 statement: e.statement(),
                                 ..Reply::fail(code, format!("{head}\n\n{rest}"))
                             }

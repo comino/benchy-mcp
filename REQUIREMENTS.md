@@ -759,6 +759,10 @@ descriptor a request carries; requests are strict, and a refusal changes nothing
   them, in protocol 3's `hello`.
 - `a_query_reply_counts_the_rows_of_each_result` — `results` gives each result's rows held,
   whether complete, rows shown and whether the text was cut.
+- `a_reply_lists_only_the_results_that_can_be_paged` — `result_ids` and `results`, of a reply
+  and of a failure's `detail`, list at most the last 32 results of a batch, the ones `page`
+  reads, and `results_omitted` counts those before them: a reply of 2,000 results at
+  `max_bytes` 512 stays under 5.3 KB.
 - `a_version_refusal_lists_the_versions_in_its_detail` — `E_VERSION`'s `detail.protocols` is
   every version benchy speaks.
 - `a_failed_batch_says_what_ran_in_its_detail` — a batch that fails gives the statement it
