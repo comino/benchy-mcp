@@ -209,6 +209,26 @@ into it; and `pragma_table_info` on that connection cannot bind a helper view, w
 named unqualified. The wide table's 85 M is DuckDB's binder before and after; the hint's 2,000
 names, cut to 39, are the 3.6 M more.
 
+**Not bound, after all.** Preparing a view binds it, and DuckDB 1.5.5 evaluates a table
+function's arguments when it binds: an agent's view over `range(f())`, with `f` then made to
+call `nextval`, moved the agent's sequence each time a missing table's hint listed it, and one
+whose argument slept 3 s brought a missing table's error back after 3 s against a 1 s deadline,
+since the hint is built after the batch's watchdog has stopped
+(`a_hint_runs_nothing_of_the_views_it_lists`, `a_hint_takes_nothing_past_the_deadline`). The
+columns of every view and of the agent's tables are now `duckdb_columns()`'s, which DuckDB keeps
+with a view when it is made, and that listing's 7 M is paid once: a helper's are kept while its
+catalog is attached, the agent's until a statement that is not a SELECT is prepared
+(`a_hint_lists_the_agents_objects_as_they_are_now`). Measured as above, on another machine,
+`3c4b70f` against the change, medians of three:
+
+| Each failing call | Prepared `SELECT *` | The catalog's, kept |
+|---|---|---|
+| `SELECT temp FROM meters` | 4.23 M | 4.22 M |
+| `SELECT temp FROM hourly`, a helper view | 6.53 M | 5.29 M |
+| `SELECT * FROM sales`, with the helpers: two views listed | 6.48 M | 4.18–4.48 M |
+| `SELECT temp FROM mine`, a view of the agent's | 4.82 M | 4.31 M |
+| `CREATE OR REPLACE VIEW mine …; SELECT temp FROM mine`, read anew each call | 21.4 M | 28.1 M |
+
 In bytes, the bundled bench: `SELECT temp FROM meters`'s hint 114 → 91 (only the table it reads,
 and no pointer to `describe`, which was 1,143 bytes more to call), `SELECT * FROM sales`'s 96 →
 121, and `SELECT m.temp FROM meters m`'s 0 → 86. The wide table's is 1,094 bytes, its list held to

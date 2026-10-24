@@ -33,8 +33,11 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   held to 1,024 bytes: a table cut short ends `… [+N columns])`, past 12 tables `(+N more)`, and
   the hint then names `DESCRIBE <table>`. These hints name no tool, so a host whose agent has no
   `describe` is not sent to one; there is no protocol change. The columns come from what the
-  attach kept, or a `SELECT *` prepared and not run, and a failing query costs what it did on a
-  loaded table (docs/PERFORMANCE.md).
+  attach kept, or the catalog's, which DuckDB keeps with a view when it is made; nothing is
+  bound, as a bind evaluates a view's table-function arguments, which can call `nextval` or
+  sleep, and the hint is built after the deadline's watchdog has stopped. A failing query costs
+  what it did on a loaded table, and less where it lists a view but in a batch that has just
+  made one (docs/PERFORMANCE.md).
 - **A host's error replies carry `detail`, facts beside the model's message** (#26). A host
   no longer parses prose: `E_REBUILT` says why the engine went (`reason`: `hard_deadline`,
   `memory_ceiling`, `engine_died` or `pivot_type`) and what went with it (`lost`: `results`,

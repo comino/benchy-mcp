@@ -613,6 +613,12 @@ error that can have one.
 - `a_qualified_unknown_column_resolves_its_alias` — `r.temp`, `t.temp` and a CTE's `c.temp`
   are told too, the alias said as its table, that table first.
 - `an_unknown_column_of_a_helper_view_lists_its_columns` — a helper view is listed like a table.
+- `a_hint_runs_nothing_of_the_views_it_lists` — the columns are the catalog's: a view whose
+  table-function argument calls `nextval` is listed with its columns, and the sequence stays.
+- `a_hint_takes_nothing_past_the_deadline` — a missing table's error comes back within the
+  deadline with a view whose bind would sleep past it in the catalogue.
+- `a_hint_lists_the_agents_objects_as_they_are_now` — the columns kept are of the agent's
+  objects as they are after a view is replaced, a table made, dropped or altered.
 - `the_columns_a_hint_lists_are_bounded` — at most 1,024 bytes of tables and columns: a cut
   table ends `… [+N columns])`, past 12 tables `(+N more)`, and the hint says the SQL that shows
   the rest.

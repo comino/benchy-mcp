@@ -599,3 +599,97 @@ fn an_unknown_column_of_a_helper_view_lists_its_columns() {
     }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_hint_runs_nothing_of_the_views_it_lists() {
+    // #27's columns came from preparing `SELECT *` of each view listed, and DuckDB 1.5.5
+    // evaluates a table function's arguments when it binds: a view over `range(f())`, where the
+    // agent then made `f` call `nextval`, moved the agent's sequence each time a missing table's
+    // hint listed the view (from 1 to 2, measured). The columns are now the catalog's, kept with
+    // the view when it was made, so the view is still listed with them.
+    let mut ws = bench_with_tables();
+    for sql in [
+        "CREATE SEQUENCE hint_seq",
+        "CREATE MACRO f() AS 1",
+        "CREATE VIEW a_hint AS SELECT * FROM range(f()) t(x), (SELECT 1 AS y)",
+        "CREATE OR REPLACE MACRO f() AS nextval('hint_seq')",
+        "SELECT nextval('hint_seq')",
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+    }
+    let currval = |ws: &mut Workspace| {
+        let out = ws
+            .work("SELECT currval('hint_seq')", &Caps::default())
+            .expect("currval");
+        let text = benchy_mcp::result::render_batch(&out, &Caps::default());
+        text.lines().nth(1).unwrap_or_default().to_string()
+    };
+    let before = currval(&mut ws);
+    assert_eq!(before, "1");
+    let e = err_for(&mut ws, "SELECT * FROM definitely_missing");
+    assert_eq!(currval(&mut ws), before, "the hint moved the sequence: {e}");
+    assert!(hint_of(&e).contains("a_hint(x, y)"), "{e}");
+}
+
+#[test]
+fn a_hint_lists_the_agents_objects_as_they_are_now() {
+    // The catalog's columns of the agent's objects are read once and kept until a statement
+    // that could change them: a view replaced, a table made or dropped is listed as it is now.
+    let mut ws = bench_with_tables();
+    let hint = |ws: &mut Workspace| hint_of(&err_for(ws, "SELECT * FROM missing")).to_string();
+    ws.work("CREATE VIEW mine AS SELECT 1 AS a", &Caps::default())
+        .unwrap();
+    assert!(hint(&mut ws).contains("mine(a)"));
+    for (sql, want, gone) in [
+        (
+            "CREATE OR REPLACE VIEW mine AS SELECT 1 AS b",
+            "mine(b)",
+            "mine(a)",
+        ),
+        ("CREATE TABLE kept (c INTEGER)", "kept(c)", "mine(a)"),
+        ("DROP VIEW mine", "kept(c)", "mine"),
+        (
+            "ALTER TABLE kept ADD COLUMN d INTEGER",
+            "kept(c, d)",
+            "mine",
+        ),
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+        let h = hint(&mut ws);
+        assert!(h.contains(want) && !h.contains(gone), "{sql}: {h}");
+    }
+}
+
+#[test]
+fn a_hint_takes_nothing_past_the_deadline() {
+    // The hint is built after the batch's watchdog has stopped, so what it does is not held to
+    // the deadline. Preparing a view whose `range` argument sleeps brought a missing table's
+    // error, cheap in itself, back after 3 s against a 1 s deadline (measured, DuckDB 1.5.5);
+    // a longer sleep would have passed the hard deadline and cost the agent its tables. The
+    // catalog's columns bind nothing. The allowance is
+    // `the_empty_result_note_stays_inside_the_deadline`'s.
+    let mut ws = bench_with_tables();
+    for sql in [
+        "CREATE MACRO slow() AS 1",
+        "CREATE VIEW a_slow AS SELECT * FROM range(slow())",
+        "CREATE OR REPLACE MACRO slow() AS CASE WHEN sleep_ms(3000) IS NULL THEN 1 ELSE 2 END",
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+    }
+    let deadline = std::time::Duration::from_secs(1);
+    let caps = Caps {
+        deadline,
+        ..Caps::default()
+    };
+    let t = std::time::Instant::now();
+    let e = ws
+        .work("SELECT * FROM definitely_missing", &caps)
+        .expect_err("no such table")
+        .to_string();
+    let took = t.elapsed();
+    assert!(
+        took < deadline + std::time::Duration::from_millis(250),
+        "a missing table's error took {took:?} against a deadline of {deadline:?}: {e}"
+    );
+    assert!(hint_of(&e).contains("a_slow(range)"), "{e}");
+}
