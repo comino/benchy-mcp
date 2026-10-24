@@ -66,7 +66,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
   `describe` is not sent to one; there is no protocol change. The columns come from what the
   attach kept, or the catalog's, which DuckDB keeps with a view when it is made; nothing is
   bound, as a bind evaluates a view's table-function arguments, which can call `nextval` or
-  sleep, and the hint is built after the deadline's watchdog has stopped. An unknown column's
+  sleep, and the hint is built after the deadline's watchdog has stopped. So a view is listed
+  with the columns it was made with even after a table it reads is dropped, which only a bind
+  would tell. An unknown column's
   error costs about 0.25 M instructions more, the parse; an unknown table's what it did, and
   less where it lists a view but in a batch that has just made one (docs/PERFORMANCE.md).
 - **A host's error replies carry `detail`, facts beside the model's message** (#26). A host

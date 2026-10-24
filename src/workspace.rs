@@ -1615,14 +1615,19 @@ impl Workspace {
         }
     }
 
-    /// The columns of each of `tables` the agent can name — loaded, its own, a helper view —
-    /// in their order, for REQ-11's hints (#27). Asked only by the hints that list columns, and
-    /// no table is scanned. A loaded table's are the ones kept from its attach.
+    /// The columns of each of `tables` — loaded, the agent's own, a helper view — in their
+    /// order, for REQ-11's hints (#27). Asked only by the hints that list columns, and no table
+    /// is scanned. A loaded table's are the ones kept from its attach.
     ///
     /// The rest are the catalog's, which DuckDB keeps with a view when it is made, and nothing
-    /// is bound: the hint is built after the batch's watchdog has stopped, and binding a view
-    /// evaluates its table functions' arguments, so a prepared `SELECT *` of one moved the
-    /// agent's sequence (`a_hint_runs_nothing_of_the_views_it_lists`) and slept past the deadline
+    /// is bound. So a view is listed with the columns it was made with, even once a table it
+    /// reads is gone and it can no longer be read: DuckDB 1.5.5 keeps them, and
+    /// `duckdb_dependencies()` lists nothing of the agent's to tell (measured: empty for a view
+    /// of `memory.main`), so only a bind could
+    /// (`a_view_is_listed_with_the_columns_it_was_made_with`). Not bound, because the hint is
+    /// built after the batch's watchdog has stopped, and binding a view evaluates its table
+    /// functions' arguments, so a prepared `SELECT *` of one moved the agent's sequence
+    /// (`a_hint_runs_nothing_of_the_views_it_lists`) and slept past the deadline
     /// (`a_hint_takes_nothing_past_the_deadline`). In the order the agent's search path finds a
     /// name: its temporary objects, its own, the helpers'. The agent's are read on its own
     /// connection, the only one that sees its temporary catalog ([`AGENT_COLUMNS`]); the helpers'

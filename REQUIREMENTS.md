@@ -624,6 +624,9 @@ error that can have one.
 - `an_unknown_column_of_a_helper_view_lists_its_columns` — a helper view is listed like a table.
 - `a_hint_runs_nothing_of_the_views_it_lists` — the columns are the catalog's: a view whose
   table-function argument calls `nextval` is listed with its columns, and the sequence stays.
+- `a_view_is_listed_with_the_columns_it_was_made_with` — a view is listed with the columns
+  the catalog keeps for it, also once a table it reads is dropped and reading it fails; nothing
+  short of a bind would tell.
 - `a_hint_takes_nothing_past_the_deadline` — a missing table's error comes back within the
   deadline with a view whose bind would sleep past it in the catalogue.
 - `a_hint_lists_the_agents_objects_as_they_are_now` — the columns kept are of the agent's

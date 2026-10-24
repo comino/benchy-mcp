@@ -943,3 +943,24 @@ fn a_name_is_read_as_the_table_duckdb_binds_it_to() {
         assert!(h.contains(want), "{sql}\n  wanted {want:?} in: {e}");
     }
 }
+
+#[test]
+fn a_view_is_listed_with_the_columns_it_was_made_with() {
+    // The columns are the catalog's, kept with a view when it is made, and DuckDB 1.5.5 keeps
+    // them when a table the view reads is dropped: `duckdb_dependencies()` lists nothing of the
+    // agent's, so that the view can no longer be read could be learned only by binding it, which
+    // runs its code (`a_hint_runs_nothing_of_the_views_it_lists`). The view is listed as it was
+    // made, and reading it says what is gone.
+    let mut ws = bench_with_tables();
+    for sql in [
+        "CREATE TABLE base(a INTEGER)",
+        "CREATE VIEW v AS SELECT * FROM base",
+        "DROP TABLE base",
+    ] {
+        ws.work(sql, &Caps::default()).expect(sql);
+    }
+    let e = err_for(&mut ws, "SELECT * FROM missing");
+    assert!(hint_of(&e).contains("v(a)"), "{e}");
+    let e = err_for(&mut ws, "SELECT * FROM v");
+    assert!(e.contains("base"), "{e}");
+}
