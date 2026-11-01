@@ -2385,28 +2385,28 @@ fn a_personal_group_may_write_the_connector() {
 #[test]
 #[cfg(target_os = "linux")]
 fn the_personal_group_is_recognised() {
-    // The lookup, checked against `id` and `getent` rather than against itself.
+    // The lookup, checked against `id` and `getent` rather than against itself. A lookup that
+    // fails (a uid with no passwd entry, as in a container) is None: that counts as shared.
     let out = |cmd: &str, args: &[&str]| {
-        String::from_utf8(
-            std::process::Command::new(cmd)
-                .args(args)
-                .output()
-                .unwrap()
-                .stdout,
-        )
-        .unwrap()
-        .trim()
-        .to_string()
+        let o = std::process::Command::new(cmd).args(args).output().unwrap();
+        o.status
+            .success()
+            .then(|| String::from_utf8(o.stdout).unwrap().trim().to_string())
     };
     let (user, group) = (out("id", &["-un"]), out("id", &["-gn"]));
-    let entry = out("getent", &["group", &group]);
-    let members = entry.rsplit(':').next().unwrap_or("");
-    let expected = user == group && members.split(',').all(|m| m.is_empty() || m == user);
+    let entry = group.as_ref().and_then(|g| out("getent", &["group", g]));
+    let expected = match (&user, &group, &entry) {
+        (Some(u), Some(g), Some(e)) => {
+            let members = e.rsplit(':').next().unwrap_or("");
+            u == g && members.split(',').all(|m| m.is_empty() || m == u)
+        }
+        _ => false,
+    };
     let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
     assert_eq!(
         exec::is_personal_group(uid, gid),
         expected,
-        "user {user}, group {group}, entry {entry}"
+        "user {user:?}, group {group:?}, entry {entry:?}"
     );
 }
 
