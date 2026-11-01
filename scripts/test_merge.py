@@ -23,9 +23,10 @@ with open(os.path.join(d, "calls"), "a") as f:
 if sys.argv[0].endswith("bx"):
     sys.exit(int(os.environ["STUB_BX_RC"]))
 if sys.argv[1:3] == ["pr", "view"]:
-    print(json.dumps({{"headRefOid": "{head}"}}))
+    print(json.dumps({{"headRefOid": "{head}", "baseRefName": os.environ["STUB_BASE"]}}))
 elif sys.argv[1] == "api":
     print(open(os.path.join(d, "runs.json")).read())
+    sys.exit(int(os.environ["STUB_API_RC"]))
 elif sys.argv[1:3] == ["pr", "merge"]:
     sys.exit(int(os.environ["STUB_MERGE_RC"]))
 """
@@ -35,7 +36,8 @@ def run(name, event="pull_request", status="completed", conclusion="success"):
     return {"name": name, "event": event, "status": status, "conclusion": conclusion}
 
 
-GREEN_CI = [run("CI"), run("CI", event="push"), run("Release", conclusion="neutral")]
+GREEN_CI = [run("CI"), run("CI", event="push"), run("Release", conclusion="neutral"),
+            run("Docs", conclusion="skipped")]
 
 
 class Merge(unittest.TestCase):
@@ -47,11 +49,12 @@ class Merge(unittest.TestCase):
             p.write_text(STUB.format(python=sys.executable, head=HEAD))
             p.chmod(0o755)
 
-    def merge(self, *pages, bx_rc=0, merge_rc=0, pr="42"):
+    def merge(self, *pages, bx_rc=0, merge_rc=0, api_rc=0, pr="42", base="main"):
         """Run merge.py; each page is the workflow runs of one page of the API's answer."""
         Path(self.dir.name, "runs.json").write_text(json.dumps([{"workflow_runs": r} for r in pages]))
         env = {"PATH": self.dir.name, "STUB_DIR": self.dir.name,
-               "STUB_BX_RC": str(bx_rc), "STUB_MERGE_RC": str(merge_rc)}
+               "STUB_BX_RC": str(bx_rc), "STUB_MERGE_RC": str(merge_rc),
+               "STUB_API_RC": str(api_rc), "STUB_BASE": base}
         p = subprocess.run([sys.executable, "-I", str(MERGE), pr], env=env,
                            capture_output=True, text=True)
         calls = Path(self.dir.name, "calls")
@@ -105,6 +108,18 @@ class Merge(unittest.TestCase):
 
     def test_no_runs_at_all_does_not_merge(self):
         self.refused(self.merge([]), "no pull_request run")
+
+    def test_a_pr_into_another_branch_does_not_merge(self):
+        # bx merge-check proves the head on top of main; a PR into another branch merges another tree.
+        p = self.merge(GREEN_CI, base="release-0.3")
+        self.refused(p, "release-0.3")
+        self.assertNotIn("bx", [c[0] for c in self.calls])
+
+    def test_a_failed_runs_read_does_not_merge_on_what_it_got(self):
+        # gh prints the pages it got before failing on a later one.
+        p = self.merge(GREEN_CI, api_rc=1)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.merged(), [])
 
     def test_a_failed_merge_fails(self):
         self.assertNotEqual(self.merge(GREEN_CI, merge_rc=1).returncode, 0)
