@@ -1,4 +1,4 @@
-"""scripts/merge.py merges only a gated, CI-green head, pinned to that head.
+"""scripts/merge.py merges only a gated head whose CI, the PR's own run included, is green; pinned to it.
 
     python3 -I scripts/test_merge.py
 
@@ -31,8 +31,11 @@ elif sys.argv[1:3] == ["pr", "merge"]:
 """
 
 
-def run(name, status="completed", conclusion="success", app="github-actions"):
-    return {"name": name, "status": status, "conclusion": conclusion, "app": {"slug": app}}
+def run(name, event="pull_request", status="completed", conclusion="success"):
+    return {"name": name, "event": event, "status": status, "conclusion": conclusion}
+
+
+GREEN_CI = [run("CI"), run("CI", event="push"), run("Release", conclusion="neutral")]
 
 
 class Merge(unittest.TestCase):
@@ -44,11 +47,12 @@ class Merge(unittest.TestCase):
             p.write_text(STUB.format(python=sys.executable, head=HEAD))
             p.chmod(0o755)
 
-    def merge(self, runs, bx_rc=0, merge_rc=0):
-        Path(self.dir.name, "runs.json").write_text(json.dumps({"check_runs": runs}))
+    def merge(self, *pages, bx_rc=0, merge_rc=0, pr="42"):
+        """Run merge.py; each page is the workflow runs of one page of the API's answer."""
+        Path(self.dir.name, "runs.json").write_text(json.dumps([{"workflow_runs": r} for r in pages]))
         env = {"PATH": self.dir.name, "STUB_DIR": self.dir.name,
                "STUB_BX_RC": str(bx_rc), "STUB_MERGE_RC": str(merge_rc)}
-        p = subprocess.run([sys.executable, "-I", str(MERGE), "42"], env=env,
+        p = subprocess.run([sys.executable, "-I", str(MERGE), pr], env=env,
                            capture_output=True, text=True)
         calls = Path(self.dir.name, "calls")
         self.calls = [json.loads(l) for l in calls.read_text().splitlines()] if calls.exists() else []
@@ -57,55 +61,59 @@ class Merge(unittest.TestCase):
     def merged(self):
         return [c for c in self.calls if c[:3] == ["gh", "pr", "merge"]]
 
+    def refused(self, p, says):
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(self.merged(), [])
+        self.assertIn(says, p.stderr)
+
     def test_green_head_merges_pinned_to_that_head(self):
-        p = self.merge([run("test"), run("deny"), run("release", conclusion="skipped")])
+        p = self.merge(GREEN_CI)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn(["bx", "merge-check", HEAD], self.calls)
         self.assertEqual(self.merged(), [["gh", "pr", "merge", "42", "--rebase", "--match-head-commit", HEAD]])
 
-    def test_checks_are_read_for_the_head_sha(self):
-        self.merge([run("test")])
+    def test_every_page_of_the_head_shas_runs_is_read(self):
+        self.merge(GREEN_CI)
         api = [c for c in self.calls if c[:2] == ["gh", "api"]]
         self.assertEqual(len(api), 1)
-        self.assertIn(f"/commits/{HEAD}/check-runs", api[0][2])
+        self.assertIn(f"head_sha={HEAD}", api[0][-1])
+        self.assertIn("--paginate", api[0])
+        self.assertIn("--slurp", api[0])
+
+    def test_a_red_run_on_a_later_page_does_not_merge(self):
+        self.refused(self.merge(GREEN_CI, [run("Mutants", event="push", conclusion="failure")]),
+                     "Mutants (push): failure")
 
     def test_refused_gate_does_not_merge(self):
-        p = self.merge([run("test")], bx_rc=1)
-        self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(self.merged(), [])
-        self.assertIn("merge-check", p.stderr)
+        for rc in (1, 2, 64, 75):
+            self.refused(self.merge(GREEN_CI, bx_rc=rc), "merge-check")
 
-    def test_a_failed_check_does_not_merge(self):
-        p = self.merge([run("test"), run("macos", conclusion="failure")])
-        self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(self.merged(), [])
-        self.assertIn("macos: failure", p.stderr)
+    def test_a_failed_run_does_not_merge(self):
+        self.refused(self.merge(GREEN_CI + [run("CI", conclusion="failure")]), "CI (pull_request): failure")
 
-    def test_a_pending_check_does_not_merge(self):
-        p = self.merge([run("test"), run("clickhouse", status="in_progress", conclusion=None)])
-        self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(self.merged(), [])
-        self.assertIn("clickhouse: in_progress", p.stderr)
+    def test_a_queued_or_running_run_does_not_merge(self):
+        for status in ("queued", "in_progress", "waiting", "requested", "pending"):
+            self.refused(self.merge(GREEN_CI + [run("CI", status=status, conclusion=None)]), status)
 
     def test_cancelled_and_timed_out_are_not_green(self):
-        for c in ("cancelled", "timed_out", "action_required", "stale"):
-            p = self.merge([run("test", conclusion=c)])
-            self.assertNotEqual(p.returncode, 0, c)
-            self.assertEqual(self.merged(), [], c)
+        for c in ("cancelled", "timed_out", "action_required", "stale", "startup_failure"):
+            self.refused(self.merge([run("CI"), run("CI", event="push", conclusion=c)]), c)
 
-    def test_no_checks_at_all_does_not_merge(self):
-        p = self.merge([])
-        self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(self.merged(), [])
+    def test_a_green_push_run_alone_does_not_merge(self):
+        # The PR's own run (macos, release dry run) is created seconds after the PR opens.
+        self.refused(self.merge([run("CI", event="push")]), "no pull_request run")
 
-    def test_only_other_apps_checks_count_as_no_ci(self):
-        p = self.merge([run("codecov", app="codecov")])
-        self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(self.merged(), [])
+    def test_no_runs_at_all_does_not_merge(self):
+        self.refused(self.merge([]), "no pull_request run")
 
     def test_a_failed_merge_fails(self):
-        p = self.merge([run("test")], merge_rc=1)
-        self.assertNotEqual(p.returncode, 0)
+        self.assertNotEqual(self.merge(GREEN_CI, merge_rc=1).returncode, 0)
+
+    def test_only_a_pr_number_is_accepted(self):
+        for pr in ("https://github.com/someone/fork/pull/42", "main", "42x", ""):
+            p = self.merge(GREEN_CI, pr=pr)
+            self.assertNotEqual(p.returncode, 0, pr)
+            self.assertEqual(self.calls, [], pr)
 
     def test_no_pr_number_is_a_usage_error(self):
         p = subprocess.run([sys.executable, "-I", str(MERGE)], capture_output=True, text=True,
