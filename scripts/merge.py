@@ -31,7 +31,11 @@ def not_green(runs):
 
 
 def main(pr):
-    head = json.loads(gh("pr", "view", pr, "--json", "headRefOid"))["headRefOid"]
+    view = json.loads(gh("pr", "view", pr, "--json", "headRefOid,baseRefName"))
+    head = view["headRefOid"]
+    # merge-check proves the head on top of main; a PR into another branch would merge another tree.
+    if view["baseRefName"] != "main":
+        sys.exit(f"merge.py: #{pr} goes into {view['baseRefName']}, not main")
     if subprocess.run(["bx", "merge-check", head]).returncode:
         sys.exit(f"merge.py: bx merge-check refused {head}")
     pages = json.loads(gh("api", "--paginate", "--slurp",
