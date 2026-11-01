@@ -48,17 +48,27 @@ def check_score():
 def check_redact():
     import getpass
     import socket
-    # A name of its own, so the check does not lean on the user name happening to be in it.
-    real, socket.gethostname = socket.gethostname, lambda: "meter-lab-7.example.org"
-    host = "meter-lab-7"
+    # Names of its own, so the check leans neither on the machine's names nor on it having a user.
+    real = socket.gethostname, getpass.getuser
+    socket.gethostname, getpass.getuser = lambda: "meter-lab-7.example.org", lambda: "mlops"
+    text = "Linux meter-lab-7 6.8.0 aarch64\n/srv/data/readings.csv mlops"
     try:
-        said = run.redact(f"Linux {host} 6.8.0 aarch64\n/srv/data/readings.csv {getpass.getuser()}",
-                          [("/srv/data", "<data>")])
+        said = run.redact(text, [("/srv/data", "<data>")])
+
+        # A uid without a passwd entry, as in a container: OSError from Python 3.13, KeyError before.
+        unnamed = []
+        for error in (OSError("No username set in the environment"), KeyError("uid not found")):
+            def no_user(error=error):
+                raise error
+            getpass.getuser = no_user
+            unnamed.append(run.redact(text, []))
     finally:
-        socket.gethostname = real
-    assert host not in said, "the host name reaches a committed transcript"
-    assert "/srv/data" not in said and getpass.getuser() not in said, said
+        socket.gethostname, getpass.getuser = real
+    assert "meter-lab-7" not in said, "the host name reaches a committed transcript"
+    assert "/srv/data" not in said and "mlops" not in said, said
     assert "6.8.0 aarch64" in said and "readings.csv" in said, "redaction ate the content"
+    for u in unnamed:
+        assert "meter-lab-7" not in u and "readings.csv mlops" in u, u
     print("redact: ok")
 
 

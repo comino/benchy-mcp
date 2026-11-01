@@ -230,7 +230,11 @@ def redact(text, private):
     host = socket.gethostname().split(".")[0]
     if host:
         text = re.sub(rf"\b{re.escape(host)}\b", "<host>", text)
-    return re.sub(rf"\b{re.escape(getpass.getuser())}\b", "<user>", text)
+    try:
+        user = getpass.getuser()
+    except (OSError, KeyError, ImportError):  # no passwd entry and no USER (KeyError before 3.13)
+        return text
+    return re.sub(rf"\b{re.escape(user)}\b", "<user>", text)
 
 
 def run_task(arm, task, model, key, max_steps):
@@ -360,7 +364,7 @@ def version_of(argv):
     try:
         out = subprocess.run(argv, capture_output=True, text=True, timeout=30).stdout.strip()
         return out.splitlines()[0] if out else "unknown"
-    except OSError:
+    except (OSError, KeyError, ImportError):
         return "unknown"
 
 
@@ -374,7 +378,7 @@ def source_commit():
         dirty = subprocess.run(["git", "-C", ROOT, "status", "--porcelain", "--", "src",
                                 "Cargo.toml", "Cargo.lock", "build.rs"],
                                capture_output=True, text=True, timeout=30).stdout.strip()
-    except OSError:
+    except (OSError, KeyError, ImportError):
         return "unknown"
     return (head + (" with uncommitted changes to the server" if dirty else "")) or "unknown"
 
