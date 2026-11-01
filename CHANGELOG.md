@@ -6,6 +6,10 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **zstd 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2), for RUSTSEC-2026-0391, -0398, -0403 and
+  -0410.** `cargo deny check` refused the older versions. The bundled libzstd stays 1.5.7. Both
+  crates are now BSD-3-Clause (zstd was MIT, zstd-sys MIT or Apache-2.0), as the bundles'
+  third-party licences now say.
 - **Security: every HTTP redirect destination is checked, and credentials stay masked.**
   Destination validation previously stopped after the first allowed cross-origin hop, and
   lowercase percent escapes could keep a secret in a redirected query parameter. HTTP and

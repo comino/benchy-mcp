@@ -50,8 +50,9 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 # aarch64 Neoverse-N1), libzstd took 1.64 G instructions and 0.29 s of CPU to ruzstd's 5.99 G and
 # 0.75 s (spike/decompress). The cost: a cold build about 75 s longer at 2 jobs, peaking at 241 MB.
 # No default features: no legacy formats, no dictionary builder. Cargo.lock holds zstd-sys at
-# 2.0.16, a release with a year of use behind it.
-zstd = { version = "0.13.3", default-features = false }
+# 2.1.2: the advisories RUSTSEC-2026-0391, -0398, -0403 and -0410 name zstd 0.14.3, zstd-safe
+# 8.2.0 and zstd-sys 2.1.2 as their fixed versions.
+zstd = { version = "0.14.3", default-features = false }
 # The HTTP source (src/sources/http/). JSON pages are decoded by arrow-json, the same version the
 # rest of arrow resolves: a page's rows decode straight into a list of structs whose child is the
 # batch, in half serde_json's instructions (docs/HTTP-SOURCE.md).
