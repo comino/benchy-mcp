@@ -4,7 +4,7 @@ Rust MCP server: loads time-series data into a sealed DuckDB workspace for an ag
 
 ## Release path
 - No test or staging environment. Done = merged to `main` with CI green and proven on bx (below).
-- Branch → `bx test` green → PR → CI green → merge. CI runs test, clickhouse and deny on every push; macos on PRs and `main`; a release dry run on PRs that touch dependencies or packaging.
+- Branch → gate (below) green → PR → CI green → merge only with `scripts/merge.py <pr>`, never `gh pr merge`: it checks both on the head sha (the bx profile is "CI green required"). CI runs test, clickhouse and deny on every push; macos on PRs and `main`; a release dry run on PRs that touch dependencies or packaging.
 - **A `v<version>` tag is a public release** (`.github/workflows/release.yml`: GitHub release bundles, `ghcr.io/comino/benchy-mcp` images, `latest` moves). It is Sven's alone; never push a `v*` tag. Version and CHANGELOG procedure: `CONTRIBUTING.md` § Releasing.
 - DuckDB bumps have their own procedure (`CONTRIBUTING.md` § Building).
 
@@ -12,7 +12,7 @@ Rust MCP server: loads time-series data into a sealed DuckDB workspace for an ag
 The newest GitHub release (`gh release list -L 1`) and the `latest` image tag on ghcr.io. `benchy-mcp --version` reports `Cargo.toml`'s version. `main` may carry unreleased changes (CHANGELOG § Unreleased).
 
 ## Required gates
-- `bx test` (profile `benchy-mcp`): `scripts/ci.sh` with the ClickHouse tests and `cargo deny`; the expected count is the last green `bx record gate`.
+- `bx --record gate test` (profile `benchy-mcp`), from a clean commit: `scripts/ci.sh` with the ClickHouse tests and `cargo deny`; the expected count is the last green `bx record gate`.
 - macOS is tested only by CI (bx runs Linux): a change to the sandbox or the build needs the macos job green.
 - `scripts/ci.sh` stops at its first failure: a red step hides every later one, so fix and re-run.
 - bx runs the job as uid 1000 with no passwd entry and no `USER` (homelab, 2026-11-01): tests must not assume a named user (PRJ-26, PRJ-30).

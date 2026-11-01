@@ -47,6 +47,8 @@ jobs:
       - run: python3 -I packaging/test_duckdb_lib.py
       # The release's SBOM and compat.json, as release.yml writes them, against stand-ins.
       - run: python3 -I packaging/test_release_files.py
+      # The merge script merges only a gated, CI-green head, against stubbed gh and bx.
+      - run: python3 -I scripts/test_merge.py
       # No DUCKDB_LIB_DIR: this builds what a stranger's `cargo build` builds, through the same
       # libduckdb-sys path, with the release file already in place and checked.
       - run: cargo clippy --all-targets -- -D warnings
