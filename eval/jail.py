@@ -43,18 +43,28 @@ def die(msg):
     sys.exit(126)
 
 
-def threads_of(pid):
+def threads_now():
+    """This uid's threads as the kernel counts them for RLIMIT_NPROC: on the whole machine, which
+    /proc in a container does not show. A fork passes only while the count stays within the soft
+    limit, so the lowest soft limit a fork passes is the count plus one."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    lo, hi = 1, (1 << 22) if hard == resource.RLIM_INFINITY else hard
     try:
-        return len(os.listdir(f"/proc/{pid}/task"))
-    except OSError:
-        return 0
-
-
-def owned_by_me(pid):
-    try:
-        return os.stat(f"/proc/{pid}").st_uid == os.getuid()
-    except OSError:
-        return False
+        while lo < hi:
+            mid = (lo + hi) // 2
+            resource.setrlimit(resource.RLIMIT_NPROC, (mid, hard))
+            try:
+                pid = os.fork()
+            except BlockingIOError:
+                lo = mid + 1
+                continue
+            if pid == 0:
+                os._exit(0)
+            os.waitpid(pid, 0)
+            hi = mid
+    finally:
+        resource.setrlimit(resource.RLIMIT_NPROC, (soft, hard))
+    return lo
 
 
 def main(argv):
@@ -96,9 +106,13 @@ def main(argv):
         os.close(p)
     # Bounds on what one command can do to the machine besides its time: no fork bomb — the
     # kernel counts every thread this user runs, so the bound starts from what already runs, with
-    # room for DuckDB's own threads — and no file that fills the disk.
-    mine = sum(threads_of(e) for e in os.listdir("/proc") if e.isdigit() and owned_by_me(e))
-    resource.setrlimit(resource.RLIMIT_NPROC, (mine + 256, mine + 256))
+    # room for DuckDB's own threads and for what the user's other work (other containers on a CI
+    # host) starts meanwhile — and no file that fills the disk.
+    nproc = threads_now() + 4096
+    hard = resource.getrlimit(resource.RLIMIT_NPROC)[1]
+    if hard != resource.RLIM_INFINITY:
+        nproc = min(nproc, hard)
+    resource.setrlimit(resource.RLIMIT_NPROC, (nproc, nproc))
     resource.setrlimit(resource.RLIMIT_FSIZE, (256 << 20, 256 << 20))
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         die("could not set no_new_privs")

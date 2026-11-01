@@ -116,7 +116,31 @@ def check_jail():
     print("jail: ok")
 
 
+def check_thread_count():
+    # The jail's process bound starts from this uid's threads as the kernel counts them, which
+    # covers every container the uid runs in, not only what this /proc shows (PRJ-33).
+    import threading
+    import jail
+    if sys.platform != "linux" or os.geteuid() == 0:
+        print("thread count: skipped, not Linux or root (root has no process bound)")
+        return
+    before = jail.threads_now()
+    stop = threading.Event()
+    extra = [threading.Thread(target=stop.wait) for _ in range(100)]
+    for t in extra:
+        t.start()
+    try:
+        during = jail.threads_now()
+    finally:
+        stop.set()
+        for t in extra:
+            t.join()
+    assert during - before >= 100, f"{before} threads, then {during} with 100 more"
+    print("thread count: ok")
+
+
 if __name__ == "__main__":
     check_score()
     check_redact()
+    check_thread_count()
     check_jail()
