@@ -126,8 +126,8 @@ fn a_loader_memory_ceiling_is_set_in_one_place_and_must_be_a_size() {
 
 /// A connector that holds `$DIRECT` bytes in itself, then `$SORTED` bytes in a process it
 /// starts, for a few seconds each, before it writes its stream. `sort` holds a line with no
-/// newline whole (200 MB of zeros: 198 MB resident), and `dash` a variable twice over (200 MB:
-/// 392 MB).
+/// newline whole (200 MB of zeros: 198 MB resident), and `dash` a variable at about its size
+/// once built (100 MB: 97 MB resident), twice that only briefly while it builds it (PRJ-36).
 fn holding_connector(dir: &Path) -> std::path::PathBuf {
     let mut data = Vec::new();
     {
@@ -165,7 +165,7 @@ fn holding_connector(dir: &Path) -> std::path::PathBuf {
 }
 
 /// Measured: a connector that held 100 MB itself, and one whose child held 200 MB, each passed a
-/// 150 MB ceiling and was killed with its whole process group.
+/// 120 MB ceiling with its loader and was killed with its whole process group.
 #[test]
 fn a_connectors_memory_counts_against_its_loaders_ceiling() {
     // REQ-8. A connector is a process of the loader's, and is not confined: a connector that
@@ -198,8 +198,12 @@ fn a_connectors_memory_counts_against_its_loaders_ceiling() {
         &[
             "--config",
             cfg.to_str().unwrap(),
+            // Below what `itself` holds the whole time it runs, the loader (about 40 MB) and its
+            // connector (about 97 MB) together, above what either holds once the string is built:
+            // a ceiling of 150 MB was passed only by the shell's peak while it builds the string,
+            // which a 50 ms read missed about one load in five (PRJ-36).
             "--loader-memory-ceiling",
-            "150MB",
+            "120MB",
         ],
         &[],
         std::fs::File::create(&log).unwrap(),
