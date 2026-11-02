@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Fetch DuckDB's release library checked against its pin, before cargo links it.
 
-libduckdb-sys's build script downloads `libduckdb-<platform>.zip` with a plain GET and no
-checksum, and a bundle and an image ship what it unpacked. This puts the pinned, checked zip
-where that build script looks first (target/duckdb-download/<triple>/<version>/), so it reuses
-the file instead of downloading, and unpacks the library itself from the checked zip, because the
-build script reuses an unpacked library without looking at the zip at all.
+libduckdb-sys's build script downloads `duckdb-shared-libs-<platform>.tar.gz` with a plain GET and
+no checksum, and a bundle and an image ship what it unpacked. This puts the pinned, checked archive
+where that build script looks first (target/duckdb-download/<triple>/v<version>/), so it reuses
+the file instead of downloading, and unpacks the library itself from the checked archive, because
+the build script reuses an unpacked library without looking at the archive at all.
 
     python3 packaging/duckdb_lib.py fetch [<triple>]     # before `cargo build`; prints the dir
     python3 packaging/duckdb_lib.py check [<triple>]     # after it: what will ship still matches
@@ -21,7 +21,7 @@ import pathlib
 import re
 import subprocess
 import sys
-import zipfile
+import tarfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 PINS = REPO / "packaging" / "duckdb.sha256"
@@ -31,13 +31,12 @@ LICENSE = "https://raw.githubusercontent.com/duckdb/duckdb/v{version}/LICENSE"
 # The archive libduckdb-sys picks for each target, and the library in it. The same table as its
 # build script's LibduckdbArchive::for_target.
 ARCHIVES = {
-    "x86_64-unknown-linux-gnu": ("libduckdb-linux-amd64.zip", "libduckdb.so"),
-    "aarch64-unknown-linux-gnu": ("libduckdb-linux-arm64.zip", "libduckdb.so"),
-    "aarch64-apple-darwin": ("libduckdb-osx-universal.zip", "libduckdb.dylib"),
-    "x86_64-apple-darwin": ("libduckdb-osx-universal.zip", "libduckdb.dylib"),
+    "x86_64-unknown-linux-gnu": ("duckdb-shared-libs-linux-amd64.tar.gz", "libduckdb.so"),
+    "aarch64-unknown-linux-gnu": ("duckdb-shared-libs-linux-arm64.tar.gz", "libduckdb.so"),
+    "aarch64-apple-darwin": ("duckdb-shared-libs-osx-universal.tar.gz", "libduckdb.dylib"),
+    "x86_64-apple-darwin": ("duckdb-shared-libs-osx-universal.tar.gz", "libduckdb.dylib"),
 }
-# Unpacked by name, so an entry's path in the zip never decides where it is written. The 75 MB
-# static library is neither linked nor shipped.
+# Unpacked by name, so an entry's path in the archive never decides where it is written.
 HEADERS = ("duckdb.h", "duckdb_extension.h")
 
 
@@ -47,7 +46,7 @@ class Refused(Exception):
 
 def version_from_lock(lock):
     """DuckDB's version from libduckdb-sys's: 1.MMmmpp.x is DuckDB MM.mm.pp, as its build script
-    decodes it (1.10505.0 is DuckDB 1.5.5)."""
+    decodes it (1.10505.0 is DuckDB 1.5.5, 1.20000.1 is DuckDB 2.0.0)."""
     m = re.search(r'name = "libduckdb-sys"\nversion = "1\.(\d+)\.\d+"', lock)
     if not m:
         raise Refused("Cargo.lock has no libduckdb-sys 1.x")
@@ -90,7 +89,23 @@ def curl(url, dest):
 
 
 def cache_dir(target_dir, triple, version):
-    return pathlib.Path(target_dir) / "duckdb-download" / triple / version
+    # libduckdb-sys 2 names it after its pinned release label, `v<version>`.
+    return pathlib.Path(target_dir) / "duckdb-download" / triple / f"v{version}"
+
+
+def unpack(archive, names):
+    """Each named member's bytes, refused unless it is a regular file: a tar entry can be a link."""
+    with tarfile.open(archive) as t:
+        out = {}
+        for name in names:
+            try:
+                member = t.getmember(name)
+            except KeyError:
+                raise Refused(f"{archive.name} has no {name}") from None
+            if not member.isfile():
+                raise Refused(f"{name} in {archive.name} is not a regular file")
+            out[name] = t.extractfile(member).read()
+        return out
 
 
 def members(triple):
@@ -108,44 +123,46 @@ def fetch(triple, version, pins, target_dir, download=curl):
     want = pinned(pins, version, name)
     cache = cache_dir(target_dir, triple, version)
     cache.mkdir(parents=True, exist_ok=True)
-    zip_path = cache / name
-    if zip_path.exists() and sha256(zip_path) != want:
+    path = cache / name
+    if path.exists() and sha256(path) != want:
         # A restored cache, or an unchecked download from before this script: never reused.
-        print(f"duckdb_lib: {zip_path} is not the pinned file; fetching it again", file=sys.stderr)
-        zip_path.unlink()
-    if not zip_path.exists():
+        print(f"duckdb_lib: {path} is not the pinned file; fetching it again", file=sys.stderr)
+        path.unlink()
+    if not path.exists():
         part = cache / (name + ".part")
         download(RELEASE.format(version=version, name=name), part)
         got = sha256(part)
         if got != want:
             part.unlink()
             raise Refused(f"{name} from DuckDB {version} has SHA-256 {got}, pinned {want}")
-        part.rename(zip_path)
-    with zipfile.ZipFile(zip_path) as z:
-        for member in members(triple):
-            (cache / member).write_bytes(z.read(member))
+        part.rename(path)
+    for member, data in unpack(path, members(triple)).items():
+        (cache / member).write_bytes(data)
     return cache
 
 
 def check(triple, version, pins, target_dir):
-    """Refuse unless the zip, what was unpacked from it and cargo's copies of the library are
+    """Refuse unless the archive, what was unpacked from it and cargo's copies of the library are
     exactly the pinned release."""
     name = archive_for(triple)
     want = pinned(pins, version, name)
     cache = cache_dir(target_dir, triple, version)
-    zip_path = cache / name
-    if not zip_path.is_file() or sha256(zip_path) != want:
-        raise Refused(f"{zip_path} is missing or is not the pinned DuckDB {version} {name}")
+    path = cache / name
+    if not path.is_file() or sha256(path) != want:
+        raise Refused(f"{path} is missing or is not the pinned DuckDB {version} {name}")
     lib = ARCHIVES[triple][1]
-    with zipfile.ZipFile(zip_path) as z:
-        for member in members(triple):
-            if (cache / member).read_bytes() != z.read(member):
-                raise Refused(f"{cache / member} is not the one in {name}")
-        released = z.read(lib)
-    # libduckdb-sys copies the library into the profile's deps/, which the tests load it from.
+    released = unpack(path, members(triple))
+    for member, data in released.items():
+        if (cache / member).read_bytes() != data:
+            raise Refused(f"{cache / member} is not the one in {name}")
+    # libduckdb-sys copies the library into its OUT_DIR (1.x: the profile's deps/); cargo puts both
+    # on the test binaries' loader path.
     target_dir = pathlib.Path(target_dir)
-    for copy in sorted(target_dir.glob(f"*/deps/{lib}")) + sorted(target_dir.glob(f"*/*/deps/{lib}")):
-        if copy.read_bytes() != released:
+    copies = [c for pattern in (f"*/deps/{lib}", f"*/*/deps/{lib}",
+                                f"*/build/libduckdb-sys-*/out/{lib}", f"*/*/build/libduckdb-sys-*/out/{lib}")
+              for c in sorted(target_dir.glob(pattern))]
+    for copy in copies:
+        if copy.read_bytes() != released[lib]:
             raise Refused(f"{copy.relative_to(target_dir)} is not the one in {name}")
     return cache
 
