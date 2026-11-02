@@ -26,11 +26,12 @@ if [ "${GITHUB_REF_TYPE:-}" = tag ] && [ "${GITHUB_REF_NAME:-}" != "v$version" ]
 fi
 
 # `packaging/duckdb_lib.py fetch` put DuckDB's release into target/duckdb-download/<triple>/
-# <version>/ before the build, checked against packaging/duckdb.sha256. Check it again, and the
+# v<version>/ before the build, checked against packaging/duckdb.sha256. Check it again, and the
 # copy cargo linked the tests against: the directory is the one for Cargo.lock's DuckDB, never
 # whichever version a listing of the cache happens to return first.
 libdir=$(python3 "$root/packaging/duckdb_lib.py" check "$target")
 duckdb=$(basename "$libdir")
+duckdb=${duckdb#v}  # the directory is libduckdb-sys's release label, v<version>
 case "$target" in
 *-linux-*) lib=libduckdb.so ;;
 *-apple-darwin) lib=libduckdb.dylib ;;
@@ -78,15 +79,15 @@ python3 "$root/packaging/duckdb_lib.py" license "$stage/LICENSE-DuckDB" >/dev/nu
 (cd "$root" && python3 packaging/third_party_licenses.py "$target") >"$stage/THIRD-PARTY-LICENSES.txt"
 # Where the library came from, for whoever has only the bundle: the release file it was taken
 # from and the SHA-256 that file was checked against before the build.
-zip=$(basename "$(ls "$libdir"/libduckdb-*.zip)")
-pin=$(awk -v f="v$duckdb/$zip" '$2 == f {print $1}' "$root/packaging/duckdb.sha256")
-[ -n "$pin" ] || { echo "no pin for $zip in packaging/duckdb.sha256" >&2; exit 1; }
+archive=$(basename "$(ls "$libdir"/duckdb-shared-libs-*.tar.gz)")
+pin=$(awk -v f="v$duckdb/$archive" '$2 == f {print $1}' "$root/packaging/duckdb.sha256")
+[ -n "$pin" ] || { echo "no pin for $archive in packaging/duckdb.sha256" >&2; exit 1; }
 cat >>"$stage/README.md" <<EOF
 
 ## Where DuckDB's library came from
 
 \`$lib\` is from DuckDB $duckdb's release file
-<https://github.com/duckdb/duckdb/releases/download/v$duckdb/$zip>,
+<https://github.com/duckdb/duckdb/releases/download/v$duckdb/$archive>,
 checked before the build against SHA-256
 \`$pin\`.
 
@@ -111,5 +112,5 @@ tar -C "$out" -czf "$out/$asset" "$name"
 # target, and DuckDB's library as shipped (thinned, on macOS) beside the release file it came from.
 python3 "$root/packaging/sbom.py" "$target" "$platform" "$stage" >"$out/benchy-mcp-$platform.cdx.json"
 rm -rf "$stage"
-echo "$out/$asset: benchy-mcp $version, DuckDB $duckdb ($zip, SHA-256 $pin)"
+echo "$out/$asset: benchy-mcp $version, DuckDB $duckdb ($archive, SHA-256 $pin)"
 cat "$out/$asset.sha256"

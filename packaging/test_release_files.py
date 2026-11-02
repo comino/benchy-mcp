@@ -203,13 +203,13 @@ def check_the_sbom_names_duckdbs_library_as_shipped_and_as_released():
     assert lib["hashes"] == [{"alg": "SHA-256",
                               "content": hashlib.sha256(b"the library").hexdigest()}]
     (dist,) = [r for r in lib["externalReferences"] if r["type"] == "distribution"]
-    assert dist["url"].endswith(f"/v{version}/libduckdb-linux-amd64.zip"), dist
-    assert dist["hashes"][0]["content"] == pins[(version, "libduckdb-linux-amd64.zip")]
+    assert dist["url"].endswith(f"/v{version}/duckdb-shared-libs-linux-amd64.tar.gz"), dist
+    assert dist["hashes"][0]["content"] == pins[(version, "duckdb-shared-libs-linux-amd64.tar.gz")]
     # macOS ships one architecture of the universal file: its own hash, the universal file's pin.
     mac = real_sbom("aarch64-apple-darwin")
     (mlib,) = [c for c in mac["components"] if c["name"] == "libduckdb"]
     assert mlib["externalReferences"][0]["hashes"][0]["content"] == \
-        pins[(version, "libduckdb-osx-universal.zip")]
+        pins[(version, "duckdb-shared-libs-osx-universal.tar.gz")]
     # The graph: benchy-mcp on its direct dependencies, libduckdb-sys on the library.
     deps = {d["ref"]: d["dependsOn"] for d in doc["dependencies"]}
     sys_ref = next(c["bom-ref"] for c in doc["components"] if c["name"] == "libduckdb-sys")

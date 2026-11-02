@@ -11,8 +11,8 @@ import io
 import os
 import pathlib
 import sys
+import tarfile
 import tempfile
-import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import duckdb_lib  # noqa: E402
@@ -27,15 +27,23 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def archive(lib=LIB, extra=None):
+def archive(lib=LIB, extra=None, link=None):
+    """A DuckDB 2.0 `duckdb-shared-libs-*.tar.gz`; `link` makes libduckdb.so that kind of link."""
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
+    with tarfile.open(fileobj=buf, mode="w:gz") as t:
+        def add(name, data=b"", kind=tarfile.REGTYPE, target=""):
+            info = tarfile.TarInfo(name)
+            info.type, info.linkname, info.size = kind, target, len(data)
+            t.addfile(info, io.BytesIO(data) if kind == tarfile.REGTYPE else None)
         if extra:
-            z.writestr(extra, b"")
-        z.writestr("libduckdb.so", lib)
-        z.writestr("duckdb.h", HEADER)
-        z.writestr("duckdb_extension.h", HEADER)
-        z.writestr("libduckdb_static.a", b"not shipped, not linked")
+            add(extra)
+        if link:
+            add("libduckdb.so", kind=link, target="/etc/passwd")
+        else:
+            add("libduckdb.so", lib)
+        add("duckdb.h", HEADER)
+        add("duckdb_extension.h", HEADER)
+        add("duckdb_v2.h", HEADER)
     return buf.getvalue()
 
 
@@ -43,9 +51,9 @@ GOOD = archive()
 LICENSE = b"Permission is hereby granted, free of charge"
 
 
-def pins(version="1.5.5", zipped=GOOD):
+def pins(version="2.0.0", packed=GOOD):
     return duckdb_lib.parse_pins(
-        f"# a comment\n{sha(zipped)}  v{version}/libduckdb-linux-amd64.zip\n"
+        f"# a comment\n{sha(packed)}  v{version}/duckdb-shared-libs-linux-amd64.tar.gz\n"
         f"{sha(LICENSE)}  v{version}/LICENSE\n"
     )
 
@@ -71,15 +79,16 @@ def refused(f, *args, **kw):
 
 
 def check_version_comes_from_the_lock():
-    lock = '[[package]]\nname = "libduckdb-sys"\nversion = "1.10505.0"\n'
-    assert duckdb_lib.version_from_lock(lock) == "1.5.5"
-    assert duckdb_lib.version_from_lock(lock.replace("10505", "11203")) == "1.12.3"
+    lock = '[[package]]\nname = "libduckdb-sys"\nversion = "1.20000.1"\n'
+    assert duckdb_lib.version_from_lock(lock) == "2.0.0"
+    assert duckdb_lib.version_from_lock(lock.replace("20000", "10505")) == "1.5.5"
+    assert duckdb_lib.version_from_lock(lock.replace("20000", "11203")) == "1.12.3"
     # The real lock's DuckDB has a pin for every archive a release builds, and for its licence:
     # bumping the duckdb crate without pinning the new release fails here first.
     real = duckdb_lib.version_from_lock((REPO / "Cargo.lock").read_text())
     pinned = duckdb_lib.parse_pins((REPO / "packaging/duckdb.sha256").read_text())
-    for name in ("libduckdb-linux-amd64.zip", "libduckdb-linux-arm64.zip",
-                 "libduckdb-osx-universal.zip", "LICENSE"):
+    for name in ("duckdb-shared-libs-linux-amd64.tar.gz", "duckdb-shared-libs-linux-arm64.tar.gz",
+                 "duckdb-shared-libs-osx-universal.tar.gz", "LICENSE"):
         assert (real, name) in pinned, f"no pin for DuckDB {real}'s {name}"
         assert len(pinned[(real, name)]) == 64
     for triple in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
@@ -90,11 +99,11 @@ def check_version_comes_from_the_lock():
 def check_a_tampered_download_is_refused_and_nothing_extracted():
     with tempfile.TemporaryDirectory() as t:
         target = pathlib.Path(t)
-        download = serving({"libduckdb-linux-amd64.zip": archive(b"\x7fELF something else")})
-        msg = refused(duckdb_lib.fetch, TRIPLE, "1.5.5", pins(), target, download)
-        assert "libduckdb-linux-amd64.zip" in msg and sha(GOOD) in msg, msg
+        download = serving({"duckdb-shared-libs-linux-amd64.tar.gz": archive(b"\x7fELF something else")})
+        msg = refused(duckdb_lib.fetch, TRIPLE, "2.0.0", pins(), target, download)
+        assert "duckdb-shared-libs-linux-amd64.tar.gz" in msg and sha(GOOD) in msg, msg
         assert download.asked == [
-            "https://github.com/duckdb/duckdb/releases/download/v1.5.5/libduckdb-linux-amd64.zip"
+            "https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-shared-libs-linux-amd64.tar.gz"
         ]
         # Not left where libduckdb-sys would reuse it, and nothing for it to link.
         assert not [f for f in target.rglob("*") if f.is_file()]
@@ -103,30 +112,28 @@ def check_a_tampered_download_is_refused_and_nothing_extracted():
 def check_a_good_download_lands_where_libduckdb_sys_reuses_it():
     with tempfile.TemporaryDirectory() as t:
         target = pathlib.Path(t)
-        got = duckdb_lib.fetch(TRIPLE, "1.5.5", pins(), target, serving({"libduckdb-linux-amd64.zip": GOOD}))
-        assert got == target / "duckdb-download" / TRIPLE / "1.5.5"
-        assert (got / "libduckdb-linux-amd64.zip").read_bytes() == GOOD
+        got = duckdb_lib.fetch(TRIPLE, "2.0.0", pins(), target, serving({"duckdb-shared-libs-linux-amd64.tar.gz": GOOD}))
+        assert got == target / "duckdb-download" / TRIPLE / "v2.0.0"
+        assert (got / "duckdb-shared-libs-linux-amd64.tar.gz").read_bytes() == GOOD
         assert (got / "libduckdb.so").read_bytes() == LIB
         assert (got / "duckdb.h").read_bytes() == HEADER
-        # Neither linked nor shipped, and 75 MB.
-        assert not (got / "libduckdb_static.a").exists()
         # A second run downloads nothing.
         again = serving({})
-        assert duckdb_lib.fetch(TRIPLE, "1.5.5", pins(), target, again) == got and not again.asked
+        assert duckdb_lib.fetch(TRIPLE, "2.0.0", pins(), target, again) == got and not again.asked
 
 
 def check_a_tampered_cache_is_dropped_or_put_right():
     with tempfile.TemporaryDirectory() as t:
         target = pathlib.Path(t)
-        cache = target / "duckdb-download" / TRIPLE / "1.5.5"
+        cache = target / "duckdb-download" / TRIPLE / "v2.0.0"
         cache.mkdir(parents=True)
-        # A restored build cache holds a zip that is not DuckDB's: it is removed, not reused,
+        # A restored build cache holds an archive that is not DuckDB's: it is removed, not reused,
         # and the pinned one fetched in its place.
-        (cache / "libduckdb-linux-amd64.zip").write_bytes(archive(b"planted"))
-        # libduckdb-sys reuses an extracted library without looking at the zip at all.
+        (cache / "duckdb-shared-libs-linux-amd64.tar.gz").write_bytes(archive(b"planted"))
+        # libduckdb-sys reuses an extracted library without looking at the archive at all.
         (cache / "libduckdb.so").write_bytes(b"planted")
-        download = serving({"libduckdb-linux-amd64.zip": GOOD})
-        duckdb_lib.fetch(TRIPLE, "1.5.5", pins(), target, download)
+        download = serving({"duckdb-shared-libs-linux-amd64.tar.gz": GOOD})
+        duckdb_lib.fetch(TRIPLE, "2.0.0", pins(), target, download)
         assert len(download.asked) == 1
         assert (cache / "libduckdb.so").read_bytes() == LIB
 
@@ -134,39 +141,62 @@ def check_a_tampered_cache_is_dropped_or_put_right():
 def check_what_is_shipped_is_checked_again():
     with tempfile.TemporaryDirectory() as t:
         target = pathlib.Path(t)
-        got = duckdb_lib.fetch(TRIPLE, "1.5.5", pins(), target, serving({"libduckdb-linux-amd64.zip": GOOD}))
-        # The cargo build copies the library next to the test binaries; that copy is checked too.
+        got = duckdb_lib.fetch(TRIPLE, "2.0.0", pins(), target, serving({"duckdb-shared-libs-linux-amd64.tar.gz": GOOD}))
+        # libduckdb-sys copies the library into its OUT_DIR, which cargo puts on the loader path
+        # of the test binaries; that copy is checked too.
+        out = target / TRIPLE / "release" / "build" / "libduckdb-sys-0123456789abcdef" / "out"
+        out.mkdir(parents=True)
+        (out / "libduckdb.so").write_bytes(LIB)
+        assert duckdb_lib.check(TRIPLE, "2.0.0", pins(), target) == got
+        (out / "libduckdb.so").write_bytes(b"replaced after the build")
+        assert "out/libduckdb.so" in refused(duckdb_lib.check, TRIPLE, "2.0.0", pins(), target)
+        (out / "libduckdb.so").write_bytes(LIB)
+        # DuckDB 1.x's libduckdb-sys copied it into deps/, also on the loader path: a stale copy
+        # left there by an older build is refused, not loaded by the tests instead.
         deps = target / TRIPLE / "release" / "deps"
         deps.mkdir(parents=True)
         (deps / "libduckdb.so").write_bytes(LIB)
-        assert duckdb_lib.check(TRIPLE, "1.5.5", pins(), target) == got
+        assert duckdb_lib.check(TRIPLE, "2.0.0", pins(), target) == got
         # A second DuckDB version in the cache is not picked by accident.
-        other = target / "duckdb-download" / TRIPLE / "1.0.0"
+        other = target / "duckdb-download" / TRIPLE / "v1.5.5"
         other.mkdir()
         (other / "libduckdb.so").write_bytes(b"old")
-        assert duckdb_lib.check(TRIPLE, "1.5.5", pins(), target) == got
+        assert duckdb_lib.check(TRIPLE, "2.0.0", pins(), target) == got
         (deps / "libduckdb.so").write_bytes(b"replaced after the build")
-        assert "deps/libduckdb.so" in refused(duckdb_lib.check, TRIPLE, "1.5.5", pins(), target)
+        assert "deps/libduckdb.so" in refused(duckdb_lib.check, TRIPLE, "2.0.0", pins(), target)
         (deps / "libduckdb.so").write_bytes(LIB)
         (got / "libduckdb.so").write_bytes(b"replaced after the fetch")
-        refused(duckdb_lib.check, TRIPLE, "1.5.5", pins(), target)
+        refused(duckdb_lib.check, TRIPLE, "2.0.0", pins(), target)
         (got / "libduckdb.so").write_bytes(LIB)
-        # Another zip holding the very same files is still not the release that was pinned.
-        (got / "libduckdb-linux-amd64.zip").write_bytes(archive(extra="and one more"))
-        refused(duckdb_lib.check, TRIPLE, "1.5.5", pins(), target)
+        # Another archive holding the very same files is still not the release that was pinned.
+        (got / "duckdb-shared-libs-linux-amd64.tar.gz").write_bytes(archive(extra="and one more"))
+        refused(duckdb_lib.check, TRIPLE, "2.0.0", pins(), target)
         # A version with no pin is refused, never fetched unchecked.
-        assert "1.6.0" in refused(duckdb_lib.fetch, TRIPLE, "1.6.0", pins(), target, serving({}))
+        assert "2.1.0" in refused(duckdb_lib.fetch, TRIPLE, "2.1.0", pins(), target, serving({}))
+
+
+def check_a_link_in_the_archive_is_refused():
+    # A tar entry can be a symlink or a hard link, which a zip could not: never followed, and
+    # nothing extracted for libduckdb-sys to link.
+    for kind in (tarfile.SYMTYPE, tarfile.LNKTYPE):
+        linked = archive(link=kind)
+        with tempfile.TemporaryDirectory() as t:
+            target = pathlib.Path(t)
+            download = serving({"duckdb-shared-libs-linux-amd64.tar.gz": linked})
+            msg = refused(duckdb_lib.fetch, TRIPLE, "2.0.0", pins(packed=linked), target, download)
+            assert "libduckdb.so" in msg, msg
+            assert not (target / "duckdb-download" / TRIPLE / "v2.0.0" / "libduckdb.so").exists()
 
 
 def check_the_licence_is_pinned_too():
     with tempfile.TemporaryDirectory() as t:
         dest = pathlib.Path(t) / "LICENSE-DuckDB"
-        refused(duckdb_lib.license, "1.5.5", pins(), dest, serving({"LICENSE": LICENSE + b" or not"}))
+        refused(duckdb_lib.license, "2.0.0", pins(), dest, serving({"LICENSE": LICENSE + b" or not"}))
         assert os.listdir(t) == []
         download = serving({"LICENSE": LICENSE})
-        duckdb_lib.license("1.5.5", pins(), dest, download)
+        duckdb_lib.license("2.0.0", pins(), dest, download)
         assert dest.read_bytes() == LICENSE
-        assert download.asked == ["https://raw.githubusercontent.com/duckdb/duckdb/v1.5.5/LICENSE"]
+        assert download.asked == ["https://raw.githubusercontent.com/duckdb/duckdb/v2.0.0/LICENSE"]
 
 
 if __name__ == "__main__":
