@@ -37,10 +37,10 @@ jobs:
           # DuckDB's own library asks for 2.25.
           - { platform: linux-x86_64, runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
           - { platform: linux-aarch64, runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
-          - { platform: macos-arm64, runner: macos-14, target: aarch64-apple-darwin }
+          - { platform: macos-arm64, runner: macos-15, target: aarch64-apple-darwin }
           # Cross-built on Apple silicon: DuckDB's macOS library is universal, and an Intel
           # runner costs more and builds slower. It is run on Intel in the smoke test.
-          - { platform: macos-x86_64, runner: macos-14, target: x86_64-apple-darwin }
+          - { platform: macos-x86_64, runner: macos-15, target: x86_64-apple-darwin }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
@@ -94,7 +94,7 @@ jobs:
           if-no-files-found: error
 
   # Each bundle on a runner that never built anything: no target/, no Rust, no DuckDB elsewhere.
-  # Linux on the oldest and the newest Ubuntu; macOS on a newer release than it was built on.
+  # Linux on the oldest and the newest Ubuntu; macOS on macos-15, the oldest runner left.
   # Each also checks its binary against compat.json, which only one platform's binary wrote.
   smoke:
     needs: [build, compat]
