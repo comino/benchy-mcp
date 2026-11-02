@@ -6,6 +6,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **The macOS bundles are built on macOS 15 and declare macOS 11.0 as their minimum.** GitHub
+  retired the macOS 14 runners. The x86_64 binary declared 10.12 before, but its DuckDB library
+  already needed 11.0; the C code inside both binaries now targets 11.0 too, not the build SDK.
 - **zstd 0.14.3 (zstd-safe 8.2.0, zstd-sys 2.1.2), for RUSTSEC-2026-0391, -0398, -0403 and
   -0410.** `cargo deny check` refused the older versions. The bundled libzstd stays 1.5.7. Both
   crates are now BSD-3-Clause (zstd was MIT, zstd-sys MIT or Apache-2.0), as the bundles'

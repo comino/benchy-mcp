@@ -46,6 +46,9 @@ jobs:
     env:
       # Only $ORIGIN / @executable_path in the rpath: the library ships beside the binary.
       BENCHY_BUNDLE: "1"
+      # The oldest macOS the bundle runs on, DuckDB's own floor. Unset, cc builds the C code
+      # (ring, zstd) for the runner's SDK instead.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable branch, 2026-09-12
