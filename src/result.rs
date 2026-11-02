@@ -700,6 +700,24 @@ mod tests {
     }
 
     #[test]
+    fn a_column_name_of_exactly_the_cell_cap_is_not_reported_cut() {
+        // `cut` keeps a name of `max_cell` bytes whole, so the page must not say values were
+        // cut; one byte more is cut, and says so (PRJ-18: the `>` that decides it survived `>=`).
+        let named = |n| QueryResult {
+            columns: vec!["c".repeat(n)],
+            ..result(vec!["1"], None)
+        };
+        let p = render_page(&named(8), 0, 10, 8, 1024);
+        assert!(p.text.ends_with("\n1 row(s), result_id r1"), "{}", p.text);
+        let p = render_page(&named(9), 0, 10, 8, 1024);
+        assert!(
+            p.text.contains("TRUNCATED: some values were cut"),
+            "{}",
+            p.text
+        );
+    }
+
+    #[test]
     fn a_page_with_the_least_room_is_still_shown() {
         // 64 bytes for the rows, at a budget of 324, is the least a page is shown with.
         let p = page(vec!["1"], 0, 10, 324);
@@ -897,5 +915,19 @@ mod tests {
         assert_eq!(timestamp_utc(1_500_000), "1970-01-01 00:00:01.5+00");
         assert_eq!(timestamp_utc(1_000_001), "1970-01-01 00:00:01.000001+00");
         assert_eq!(timestamp_utc(1_000_000), "1970-01-01 00:00:01+00");
+    }
+
+    #[test]
+    fn years_before_1_ad_count_back_from_1_bc() {
+        // Proleptic Gregorian, as DuckDB writes it: astronomical year 0 is 1 BC and year -1 is
+        // 2 BC (PRJ-18: `1 - y` survived as `1 + y`, which year 0 alone cannot tell apart).
+        assert_eq!(
+            timestamp_utc(-62_167_219_200_000_000),
+            "0001-01-01 (BC) 00:00:00+00"
+        );
+        assert_eq!(
+            timestamp_utc(-62_198_755_200_000_000),
+            "0002-01-01 (BC) 00:00:00+00"
+        );
     }
 }
