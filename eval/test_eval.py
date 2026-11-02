@@ -4,6 +4,7 @@
 The scorer passes the right answer and only it, and the shell arm's jail holds against what a
 model with a shell could try. Linux 6.7 or later, like the shell arm itself.
 """
+import glob
 import os
 import shutil
 import sys
@@ -116,26 +117,42 @@ def check_jail():
     print("jail: ok")
 
 
+def uid_threads_visible():
+    """This uid's threads in this container's /proc: a floor for what the kernel counts."""
+    n = 0
+    for path in glob.glob("/proc/[0-9]*/status"):
+        try:
+            f = dict(l.split(":", 1) for l in open(path).read().splitlines() if ":" in l)
+        except OSError:
+            continue  # exited while read
+        if int(f["Uid"].split()[0]) == os.getuid():
+            n += int(f["Threads"])
+    return n
+
+
 def check_thread_count():
     # The jail's process bound starts from this uid's threads as the kernel counts them, which
-    # covers every container the uid runs in, not only what this /proc shows (PRJ-33).
+    # covers every container the uid runs in, not only what this /proc shows (PRJ-33). Other bx
+    # jobs of the uid start and end threads meanwhile, so only a floor holds: what /proc shows
+    # here, 100 extra threads included (PRJ-83).
     import threading
     import jail
     if sys.platform != "linux" or os.geteuid() == 0:
         print("thread count: skipped, not Linux or root (root has no process bound)")
         return
-    before = jail.threads_now()
     stop = threading.Event()
     extra = [threading.Thread(target=stop.wait) for _ in range(100)]
     for t in extra:
         t.start()
     try:
-        during = jail.threads_now()
+        visible = uid_threads_visible()
+        counted = jail.threads_now()
     finally:
         stop.set()
         for t in extra:
             t.join()
-    assert during - before >= 100, f"{before} threads, then {during} with 100 more"
+    assert visible > 100, f"{visible} threads in /proc, with 100 extra running"
+    assert counted >= visible, f"kernel count {counted}, but /proc shows {visible}"
     print("thread count: ok")
 
 
