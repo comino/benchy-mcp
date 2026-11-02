@@ -114,21 +114,23 @@ pub fn io_fault(e: std::io::Error) -> Fault {
     }
 }
 
-/// A schema message as arrow's schema. arrow's conversion panics on a type it cannot build — an
-/// integer 7 bits wide, say — rather than returning an error, and a panic took `exec-test` down
-/// with it; in a loader it would have been a crash where a refusal is due. So a panic here is
-/// the stream's fault, and refused as one (`a_hostile_schema_is_refused_not_a_panic`). The
+/// A schema message as arrow's schema. Up to arrow 58 the conversion panicked on a type it cannot
+/// build — an integer 7 bits wide, say — and a panic took `exec-test` down with it; in a loader it
+/// would have been a crash where a refusal is due. arrow 60 returns an error for most of them; a
+/// panic is still caught, as the stream's fault (`a_hostile_schema_is_refused_not_a_panic`). The
 /// conversion only reads the message, so nothing is left half-changed by the unwind.
 fn schema_of(fb: arrow::ipc::Schema) -> Result<arrow::datatypes::Schema, Fault> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        arrow::ipc::convert::fb_to_schema(fb)
-    }))
-    .map_err(|_| {
+    let refused = || {
         Fault::host(
             "E_HOST_PROTOCOL",
             "bad Arrow stream: its schema names a type that cannot be built",
         )
-    })
+    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        arrow::ipc::convert::try_fb_to_schema(fb)
+    }))
+    .map_err(|_| refused())?
+    .map_err(|_| refused())
 }
 
 /// Read exactly `buf.len()` bytes, or `Ok(false)` at a clean end before the first one.
