@@ -869,7 +869,14 @@ impl PageDecoder {
             .iter()
             .enumerate()
             .map(|(i, d)| {
-                let t = crate::exec::arrow_type(&d.ty).expect("from the vocabulary");
+                let t = match crate::exec::arrow_type(&d.ty).expect("from the vocabulary") {
+                    // arrow-json 60 parses a zone by name only with chrono-tz, which is not
+                    // built: UTC as the offset it is, the same instant (PRJ-19).
+                    DataType::Timestamp(unit, Some(_)) => {
+                        DataType::Timestamp(unit, Some("+00:00".into()))
+                    }
+                    t => t,
+                };
                 if t.is_integer() {
                     ints.push((i, t));
                     Field::new(&d.name, DataType::Utf8, true)
@@ -965,10 +972,20 @@ impl PageDecoder {
         }
         let batch = if rows.len() == 0 {
             None
-        } else if self.ints.is_empty() {
-            Some(RecordBatch::from(rows.clone()))
         } else {
             let mut cols = rows.columns().to_vec();
+            // Decoded at the offset `+00:00` (`PageDecoder::new`): labelled UTC again, as the
+            // schema says, which changes no value.
+            for c in cols.iter_mut() {
+                if let Some(ts) = c
+                    .as_any()
+                    .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                {
+                    if ts.timezone().is_some() {
+                        *c = Arc::new(ts.clone().with_timezone("UTC"));
+                    }
+                }
+            }
             let strict = arrow::compute::CastOptions {
                 safe: false,
                 ..Default::default()
