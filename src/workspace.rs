@@ -947,12 +947,52 @@ fn zone_held(zone: Option<&str>, icu_loaded: impl FnOnce() -> i64) -> Result<(),
     }
 }
 
-/// An in-memory database with its two connections: the agent's, raw, and the host's.
+/// A DuckDB open configuration that starts no thread besides the caller's, plus `extra`. A process
+/// that confines itself must be alone when it does (`sandbox::alone`), and DuckDB 2.0 starts its
+/// pool for asynchronous I/O, `async_threads`, one per core, as the database opens; the workers
+/// agent SQL runs on start later, after the confinement (`lockdown::lock`).
+struct Config(ffi::duckdb_config);
+
+impl Drop for Config {
+    fn drop(&mut self) {
+        unsafe { ffi::duckdb_destroy_config(&mut self.0) }
+    }
+}
+
+fn alone_config(extra: &[(&std::ffi::CStr, &std::ffi::CStr)]) -> Result<Config, WorkError> {
+    let mut config = Config(ptr::null_mut());
+    unsafe {
+        if ffi::duckdb_create_config(&mut config.0) != ffi::duckdb_state_DuckDBSuccess {
+            return Err(WorkError::Open("duckdb_create_config failed".into()));
+        }
+        for (name, value) in [(c"threads", c"1"), (c"async_threads", c"0")]
+            .iter()
+            .chain(extra)
+        {
+            if ffi::duckdb_set_config(config.0, name.as_ptr(), value.as_ptr())
+                != ffi::duckdb_state_DuckDBSuccess
+            {
+                return Err(WorkError::Open(format!(
+                    "could not set {} at the open",
+                    name.to_string_lossy()
+                )));
+            }
+        }
+    }
+    Ok(config)
+}
+
+/// An in-memory database with its two connections: the agent's, raw, and the host's, opened alone
+/// (`alone_config`).
 fn fresh_engine() -> Result<(ffi::duckdb_database, ffi::duckdb_connection, Connection), WorkError> {
     unsafe {
         let (mut db, mut agent) = (ptr::null_mut(), ptr::null_mut());
         let mem = CString::new(":memory:").unwrap();
-        if ffi::duckdb_open(mem.as_ptr(), &mut db) != ffi::duckdb_state_DuckDBSuccess {
+        let config = alone_config(&[])?;
+        let opened = ffi::duckdb_open_ext(mem.as_ptr(), &mut db, config.0, ptr::null_mut())
+            == ffi::duckdb_state_DuckDBSuccess;
+        drop(config);
+        if !opened {
             return Err(WorkError::Open("duckdb_open failed".into()));
         }
         if ffi::duckdb_connect(db, &mut agent) != ffi::duckdb_state_DuckDBSuccess {
@@ -1005,23 +1045,15 @@ impl Bench {
                 .map_err(|_| WorkError::Open("workspace path contains a NUL".into()))?;
             // The file is written in storage version STORAGE_VERSION, which must be set as it is
             // created: a `SET` after the open applies only to databases attached later.
-            let mut config = ptr::null_mut();
-            if ffi::duckdb_create_config(&mut config) != ffi::duckdb_state_DuckDBSuccess {
-                return Err(WorkError::Open("duckdb_create_config failed".into()));
-            }
-            let set = ffi::duckdb_set_config(
-                config,
-                c"storage_compatibility_version".as_ptr(),
-                STORAGE_VERSION.as_ptr(),
-            );
+            // And alone (`alone_config`): the loader confines itself after the open.
+            let config = alone_config(&[(c"storage_compatibility_version", STORAGE_VERSION)])?;
             let mut error = ptr::null_mut();
-            let opened = set == ffi::duckdb_state_DuckDBSuccess
-                && ffi::duckdb_open_ext(path.as_ptr(), &mut db, config, &mut error)
-                    == ffi::duckdb_state_DuckDBSuccess;
-            ffi::duckdb_destroy_config(&mut config);
+            let opened = ffi::duckdb_open_ext(path.as_ptr(), &mut db, config.0, &mut error)
+                == ffi::duckdb_state_DuckDBSuccess;
+            drop(config);
             if !opened {
                 let why = if error.is_null() {
-                    "could not set its storage version".to_string()
+                    "DuckDB gave no reason".to_string()
                 } else {
                     let why = std::ffi::CStr::from_ptr(error)
                         .to_string_lossy()
@@ -1795,6 +1827,9 @@ impl Workspace {
             format!("SET threads = {}", threads + 1),
             format!("SET GLOBAL threads = {}", threads + 1),
             "RESET threads".to_string(),
+            "SET async_threads = 1".to_string(),
+            "SET GLOBAL async_threads = 1".to_string(),
+            "RESET async_threads".to_string(),
         ] {
             if self.raw_exec_unchecked(&undo).is_ok() {
                 return Err(WorkError::Open(format!(
