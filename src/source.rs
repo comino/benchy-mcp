@@ -319,7 +319,7 @@ fn write_stamps_as_text(
     let sniffed = || {
         stage_and_write(conn, name, reader, zone, hold, head).and_then(|w| {
             crate::trace::span("file.infinity", || {
-                no_infinity_read_as_1900(conn, name, reader, zone, w)
+                no_infinity_read_as_1900(conn, name, reader, w)
             })
         })
     };
@@ -341,14 +341,15 @@ fn write_stamps_as_text(
 }
 
 /// REQ-15 `an_ndjson_infinity_is_refused`: `written`, unless the JSON file `reader` read the
-/// sniffed way held `infinity`, `-infinity` or `epoch` in a column it typed as a timestamp or a
-/// date, which then is dropped and refused, naming the column.
+/// sniffed way held `infinity`, `-infinity` or `epoch` in a column it typed as a date, which then
+/// is dropped and refused, naming the column.
 ///
-/// DuckDB 1.5.5's JSON reader parses such a column with the `strptime` format its sniffer chose,
-/// which takes `infinity` and `-infinity` — any case, padded, escaped — and `epoch` as special
-/// values, and the reader turns each into 1900-01-01 00:00:00, a time that is in no row: a CSV
-/// keeps an infinity, as does a JSON column read with its type named (`columns`, a declared
-/// source). A JSON file whose column holds 1900-01-01 is rare, so the check is in two steps:
+/// DuckDB's JSON reader parses such a column with the `strptime` format its sniffer chose, which
+/// takes `infinity` and `-infinity` — any case, padded, escaped — and `epoch` as special values,
+/// and turns each into 1900-01-01, a date that is in no row: a CSV keeps an infinity, as does a
+/// JSON column read with its type named (`columns`, a declared source). DuckDB 1.5.5 did the same
+/// to a timestamp; 2.0 reads a timestamp's as a CSV does, an infinity as itself and `epoch` as
+/// 1970, so a timestamp is kept (Sven, 2026-11-03, PRJ-19) and only a date is checked. A JSON file whose column holds 1900-01-01 is rare, so the check is in two steps:
 /// whether the table holds that time, which row groups' statistics answer without reading a
 /// timestamp of another century; and, only where it does, whether the file's text says
 /// `infinity` there, in a second read of the file, so a genuine 1900-01-01 loads.
@@ -363,7 +364,6 @@ fn no_infinity_read_as_1900(
     conn: &duckdb::Connection,
     name: &str,
     reader: &str,
-    zone: &str,
     written: Written,
 ) -> Result<Written, Staged> {
     // A declared read names its `columns`, and keeps an infinity.
@@ -384,26 +384,13 @@ fn no_infinity_read_as_1900(
     let table = quote(name);
     let ask = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, bool>(0));
     for (column, ty) in &written.1 {
-        if !ty.contains("TIMESTAMP") && !ty.contains("DATE") {
+        if !ty.contains("DATE") {
             continue;
         }
         let c = quote(column);
         // The time, as the table holds it: a zone-less timestamp is converted on the write.
         let at_1900 = match ty.as_str() {
             "DATE" => format!("{c} = DATE '1900-01-01'"),
-            // A constant, folded before the filter reaches the scan, which then skips every row
-            // group whose statistics leave 1900 out.
-            "TIMESTAMP" => {
-                let instant = crate::canonical::convert(
-                    "TIMESTAMP '1900-01-01'",
-                    column,
-                    "TIMESTAMP",
-                    &crate::canonical::held("TIMESTAMP"),
-                    zone,
-                )
-                .expect("a zone-less timestamp is converted");
-                format!("{c} = {instant}")
-            }
             _ => format!("contains(CAST({c} AS VARCHAR), '1900-01-01')"),
         };
         if !ask(&format!(
@@ -468,10 +455,10 @@ fn no_infinity_read_as_1900(
             "E_SCHEMA",
             format!(
                 "column `{column}` holds `infinity`, `-infinity` or `epoch`, which DuckDB's JSON \
-                 reader reads as 1900-01-01 00:00:00, not as itself (`epoch` is \
-                 1970-01-01 00:00:00); refused rather than loaded as that time. Write it as null \
-                 or as a real timestamp, declare the column's type in `[[source.schema]]`, which \
-                 reads it as itself, or use CSV or Parquet"
+                 reader reads as the date 1900-01-01, not as itself (`epoch` is 1970-01-01); \
+                 refused rather than loaded as that date. Write it as null or as a real date, \
+                 declare the column's type in `[[source.schema]]`, which reads it as itself, or \
+                 use CSV or Parquet"
             ),
         )));
     }
@@ -4269,19 +4256,20 @@ mod tests {
         };
         let ts = |i: usize| format!("{{\"i\":{i},\"ts\":{},\"note\":\"n\"}}", iso(i));
         let past_sample = 25_000;
-        // (what, file, body, the column refused, or `None` where it loads)
+        // (what, file, body, the column refused, or `None` where it loads: a timestamp's infinity as
+        // itself on DuckDB 2.0, a genuine 1900-01-01 as that)
         let cases: Vec<(&str, &str, String, Option<&str>)> = vec![
             (
                 "infinity",
                 "t.ndjson",
                 ndjson(10, &ts, "{\"i\":-1,\"ts\":\"infinity\",\"note\":\"n\"}"),
-                Some("ts"),
+                None,
             ),
             (
                 "-infinity",
                 "t.ndjson",
                 ndjson(10, &ts, "{\"i\":-1,\"ts\":\"-infinity\",\"note\":\"n\"}"),
-                Some("ts"),
+                None,
             ),
             (
                 "Infinity past the sample",
@@ -4291,7 +4279,7 @@ mod tests {
                     &ts,
                     "{\"i\":-1,\"ts\":\"Infinity\",\"note\":\"n\"}",
                 ),
-                Some("ts"),
+                None,
             ),
             (
                 "escaped past the sample",
@@ -4301,7 +4289,7 @@ mod tests {
                     &ts,
                     "{\"i\":-1,\"ts\":\"\\u0069nfinity\",\"note\":\"n\"}",
                 ),
-                Some("ts"),
+                None,
             ),
             (
                 "a date",
@@ -4321,7 +4309,7 @@ mod tests {
                     &|i| format!("{{\"i\":{i},\"l\":[{}]}}", iso(i)),
                     "{\"i\":-1,\"l\":[\"2026-01-01T00:00:00Z\",\"infinity\"]}",
                 ),
-                Some("l"),
+                None,
             ),
             (
                 "a .json file",
@@ -4334,7 +4322,7 @@ mod tests {
                         .collect::<Vec<_>>()
                         .join(",")
                 ),
-                Some("ts"),
+                None,
             ),
             (
                 "a genuine 1900-01-01",
@@ -4379,6 +4367,10 @@ mod tests {
                 let conn = bench.connection();
                 let at = if what.ends_with("date") {
                     "d = DATE '1900-01-01'"
+                } else if !what.starts_with("a genuine") && what.contains("list") {
+                    "list_bool_or(list_transform(l, lambda x: isinf(x)))"
+                } else if !what.starts_with("a genuine") {
+                    "isinf(ts)"
                 } else {
                     "ts = timezone('Europe/Copenhagen', TIMESTAMP '1900-01-01')"
                 };
