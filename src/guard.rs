@@ -537,7 +537,7 @@ impl Calls {
 pub(crate) enum Part {
     /// Anything else: keywords, names, numbers, operators, white space, a `;`.
     Code,
-    /// A quoted name, `"…"`, its quotes with it.
+    /// A quoted name, `"…"` or `` `…` ``, its quotes with it.
     Name,
     /// A string literal, its quotes and any `E` prefix or dollar tags with it.
     Literal,
@@ -615,9 +615,11 @@ pub(crate) fn lex(sql: &str) -> Result<Vec<(Part, std::ops::Range<usize>)>, Stuc
             }
             // To the next `"`: a `""` inside closes one quoted name and opens the next, which
             // reads the same as one name holding a quote.
-            b'"' => b[i + 1..]
+            // DuckDB 2.0's tokenizer quotes a name with backticks too, a doubled one inside it
+            // read, as `""` is, as two names side by side.
+            q @ (b'"' | b'`') => b[i + 1..]
                 .iter()
-                .position(|c| *c == b'"')
+                .position(|c| *c == q)
                 .map(|n| (Part::Name, i + n + 2)),
             b'\'' => quoted(b, i + 1, false)?.map(|e| (Part::Literal, e + 1)),
             b'e' | b'E' if b.get(i + 1) == Some(&b'\'') => {
@@ -710,7 +712,10 @@ fn forward(was: usize, now: usize) -> Result<(), Stuck> {
 /// DuckDB may read as white space and this does not, or any other byte this does not know
 /// counts as a call; so does a `(`.
 fn calls(rest: &[u8]) -> bool {
-    let rest = rest.strip_prefix(b"\"").unwrap_or(rest);
+    let rest = rest
+        .strip_prefix(b"\"")
+        .or_else(|| rest.strip_prefix(b"`"))
+        .unwrap_or(rest);
     match rest
         .iter()
         .find(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
@@ -823,6 +828,28 @@ pub(crate) fn kind_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backticked_name_is_a_name_as_duckdb_2_tokenizes_it() {
+        // DuckDB 2.0 quotes a name with backticks; read as code, a `'` in one opened a literal
+        // DuckDB never saw, hiding the statements after it (PRJ-19, Codex's lead).
+        let sql = "SELECT 1 AS `x'`; COPY (PIVOT m ON k USING sum(v)) TO 'f'; SELECT 'y'";
+        assert!(lex(sql)
+            .unwrap()
+            .iter()
+            .any(|(p, r)| *p == Part::Name && &sql[r.clone()] == "`x'`"));
+        let multi = ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MULTI;
+        assert_eq!(
+            type_name(kind_of(multi, sql, 1, 3)),
+            "MULTI",
+            "the COPY stays refused"
+        );
+        assert_eq!(statement_heads(sql).unwrap(), ["select", "copy", "select"]);
+        // `a;b` in backticks is one name, not a statement's end.
+        assert_eq!(statement_heads("SELECT 1 AS `a;b`").unwrap(), ["select"]);
+        // A function named in backticks is still called.
+        assert!(calls(b"`('SELECT 1')"));
+    }
 
     #[test]
     fn a_multi_statement_is_named_by_its_first_word_or_refused() {
