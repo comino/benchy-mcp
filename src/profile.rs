@@ -875,7 +875,8 @@ fn profile(
     if let (Some(t), Some(us)) = (&time, &t_us) {
         sel.push(format!("count({})::BIGINT", quote(t)));
         sel.push(if series_stated {
-            "NULL".to_string()
+            // Typed: DuckDB 2.0 gives a bare NULL the NULL type, which duckdb-rs cannot read.
+            "NULL::BIGINT".to_string()
         } else {
             format!("approx_count_distinct({})::BIGINT", quote(t))
         });
@@ -3532,7 +3533,7 @@ impl Watch {
             // never go back says one series at once. The tally not kept is the pass the profile
             // reads from the table, should the rest of the stream say otherwise.
             self.chosen = true;
-            // Counted exactly, once: 64 registers are too few to tell one batch's times apart.
+            // Counted exactly, once: a sketch is too coarse to tell one batch's times apart.
             let mut first: Vec<i64> = (0..n).filter_map(time).collect();
             first.sort_unstable();
             first.dedup();
@@ -3929,24 +3930,25 @@ impl Watch {
     }
 }
 
-/// DuckDB's `approx_count_distinct` (1.5.5, `HyperLogLog`): 64 registers, each the most trailing
-/// zeros, plus one, of the hashes it was given past their low 6 bits, and Ertl's estimator
+/// DuckDB's `approx_count_distinct` (2.0, `HyperLogLogP<10>`; 1.5.5 had 64 registers): 1024
+/// registers, each the most trailing zeros, plus one, of the hashes it was given past their low
+/// 10 bits, and Ertl's estimator
 /// ("New cardinality estimation algorithms for HyperLogLog sketches", arXiv:1702.01284) over
 /// them. Ported so a count kept as rows arrive is the count DuckDB would give
 /// (`a_kept_distinct_count_is_duckdbs`).
 #[derive(Clone, Copy)]
-struct Hll([u8; 64]);
+struct Hll([u8; 1 << Hll::P]);
 
 impl Default for Hll {
     fn default() -> Self {
-        Hll([0; 64])
+        Hll([0; 1 << Hll::P])
     }
 }
 
 impl Hll {
-    const P: u32 = 6;
-    const Q: usize = 64 - Self::P as usize;
-    const M: f64 = 64.0;
+    const P: usize = 10;
+    const Q: usize = 64 - Self::P;
+    const M: f64 = (1 << Self::P) as f64;
 
     fn insert(&mut self, h: u64) {
         let i = (h & ((1 << Self::P) - 1)) as usize;
