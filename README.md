@@ -354,7 +354,7 @@ The JSON has these keys, and a release may add more, never rename or drop these:
 | Key | |
 |---|---|
 | `benchy` | benchy's version |
-| `engine` | `"DuckDB v1.5.5"`, the library loaded |
+| `engine` | `"DuckDB v2.0.0"`, the library loaded |
 | `library` | the file it was loaded from, or `null` |
 | `landlock_abi` | the kernel's Landlock ABI, 0 where it has none |
 | `verdict` | `"enforced"`, `"partial"` (files confined, TCP not: below Landlock ABI 4) or `"not_enforced"`; the exit status is 0 for the first two and 1 for the last |
@@ -400,7 +400,7 @@ pin bump changes: the benchy and DuckDB versions, the host protocol versions it 
 platforms, the oldest glibc its Linux bundles need, and the Landlock ABI the full sandbox needs:
 
 ```json
-{"benchy": "0.3.1", "duckdb": "1.5.5", "host_protocols": [1, 2, 3, 4, 5, 6, 7],
+{"benchy": "0.3.1", "duckdb": "2.0.0", "host_protocols": [1, 2, 3, 4, 5, 6, 7],
  "platforms": ["linux-x86_64", "linux-aarch64", "macos-arm64", "macos-x86_64"],
  "full_sandbox_min_landlock_abi": 4, "min_glibc": "2.35"}
 ```

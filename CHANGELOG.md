@@ -6,6 +6,13 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 
 ## Unreleased
 
+- **DuckDB 2.0.0** (was 1.5.5), with arrow 60. What changes for an agent: a lambda is written
+  `lambda x: x + 1` (DuckDB 2.0 refuses the arrow form, and the error now says so); backticked
+  identifiers work; a PIVOT into a table over one made earlier in the same call runs; a JSON
+  timestamp's `infinity` loads as itself and its `epoch` as 1970, as from a CSV (a date's is still
+  refused: DuckDB reads it as 1900-01-01); `CREATE TRIGGER`, new in DuckDB 2.0, is refused.
+  DuckDB's release files are now `duckdb-shared-libs-<platform>.tar.gz`, pinned in
+  `packaging/duckdb.sha256`.
 - **The macOS bundles are built on macOS 15 and declare macOS 11.0 as their minimum.** GitHub
   retired the macOS 14 runners. The x86_64 binary declared 10.12 before, but its DuckDB library
   already needed 11.0; the C code inside both binaries now targets 11.0 too, not the build SDK.
