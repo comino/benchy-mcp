@@ -285,7 +285,7 @@ engine = "error"
 [[case]]
 sql = "BEGIN TRANSACTION; CREATE TEMP TYPE \"__pivot_enum_z\" AS ENUM ('a'); SET enable_external_access = true; COMMIT"
 category = "transaction"
-kind = "SET"
+kind = "TRANSACTION"
 allowlist = "refuse"
 engine = "error"
 
@@ -455,41 +455,41 @@ allowlist = "pass"
 engine = "error"
 
 # Table functions that change the engine (`a_table_function_that_changes_the_engine_is_refused`).
-# Each is a SELECT the locked engine runs, and none reaches outside, so neither the statement
-# allowlist nor the lock stops it. Measured on DuckDB 1.5.5 through `query`: file logging left
-# every later statement failing with "Permission Error: Cannot access directory", and profiling
-# wrote every later plan tree to the operator's log. The table-function allowlist refuses each by
-# name, before anything in the batch is prepared.
+# Each is a SELECT that changes the engine, and none reaches outside. Measured on DuckDB 1.5.5
+# through `query`: file logging left every later statement failing with "Permission Error: Cannot
+# access directory", and profiling wrote every later plan tree to the operator's log. On DuckDB
+# 2.0 the locked engine cannot bind the logging and profiling ones (UNBOUND, refused); 1.5.5 ran
+# them. The table-function allowlist refuses each by name, before anything in the batch is prepared.
 [[case]]
 sql = "SELECT * FROM enable_logging(storage='file', storage_path='{canary}')"
 category = "engine state"
-kind = "SELECT"
+kind = "UNBOUND"
 allowlist = "pass"
-engine = "ok"
+engine = "error"
 functions = "refuse"
 
 [[case]]
 sql = "SELECT * FROM enable_logging()"
 category = "engine state"
-kind = "SELECT"
+kind = "UNBOUND"
 allowlist = "pass"
-engine = "ok"
+engine = "error"
 functions = "refuse"
 
 [[case]]
 sql = "SELECT * FROM disable_logging()"
 category = "engine state"
-kind = "SELECT"
+kind = "UNBOUND"
 allowlist = "pass"
-engine = "ok"
+engine = "error"
 functions = "refuse"
 
 [[case]]
 sql = "SELECT * FROM enable_profiling()"
 category = "engine state"
-kind = "SELECT"
+kind = "UNBOUND"
 allowlist = "pass"
-engine = "ok"
+engine = "error"
 functions = "refuse"
 
 [[case]]
@@ -521,9 +521,9 @@ functions = "refuse"
 [[case]]
 sql = "CREATE TABLE w AS SELECT * FROM enable_profiling()"
 category = "engine state"
-kind = "CREATE"
+kind = "UNBOUND"
 allowlist = "pass"
-engine = "ok"
+engine = "error"
 functions = "refuse"
 
 [[case]]

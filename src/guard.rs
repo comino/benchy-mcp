@@ -195,9 +195,9 @@ const UNREAD_VIEW: &str = "is a view whose SQL benchy could not read through";
 
 /// The DuckDB [`TABLE_FUNCTIONS`] was measured on. On any other, what is refused is read from
 /// that engine's own catalog instead ([`Calls::for_version`]).
-pub const MEASURED_ON: &str = "v1.5.5";
+pub const MEASURED_ON: &str = "v2.0.0";
 
-/// Every table function and table macro in DuckDB 1.5.5's `system` catalog, 89 and 4, and what
+/// Every table function and table macro in DuckDB 2.0.0's `system` catalog, 105 and 4, and what
 /// each is to the agent. `every_table_function_duckdb_has_is_classified` holds this to the
 /// shipped engine's `duckdb_functions()`, so a DuckDB that brings a new one fails a test until it
 /// is classified here, and one that runs elsewhere refuses it ([`Calls::for_version`]).
@@ -219,19 +219,28 @@ pub const TABLE_FUNCTIONS: &[(&str, Use)] = &[
     ("arrow_scan_dumb", Use::Refused(INTERNAL)),
     ("check_peg_parser", Use::Refused(INTERNAL)),
     ("checkpoint", Use::Refused(STATE)),
+    ("create_external_resource", Use::Refused(STATE)),
+    ("deregister_external_resource", Use::Refused(STATE)),
+    ("destroy_external_resource", Use::Refused(STATE)),
     ("disable_logging", Use::Refused(STATE)),
-    ("disable_peg_parser", Use::Refused(STATE)),
     ("disable_profiling", Use::Refused(STATE)),
     ("duckdb_approx_database_count", Use::Refused(INSIDE)),
+    ("duckdb_available_metrics", Use::Refused(INSIDE)),
     ("duckdb_columns", Use::Agent),
     ("duckdb_connection_count", Use::Refused(INSIDE)),
     ("duckdb_constraints", Use::Agent),
     ("duckdb_coordinate_systems", Use::Agent),
     ("duckdb_databases", Use::Agent),
     ("duckdb_dependencies", Use::Agent),
+    ("duckdb_dialects", Use::Refused(INSIDE)),
+    ("duckdb_eviction_queues", Use::Refused(INSIDE)),
+    ("duckdb_extension_repositories", Use::Refused(INSIDE)),
     ("duckdb_extensions", Use::Refused(INSIDE)),
     ("duckdb_external_file_cache", Use::Refused(INSIDE)),
+    ("duckdb_external_resource_types", Use::Refused(INSIDE)),
+    ("duckdb_external_resources", Use::Refused(INSIDE)),
     ("duckdb_functions", Use::Agent),
+    ("duckdb_grammar_extensions", Use::Refused(INSIDE)),
     ("duckdb_indexes", Use::Agent),
     ("duckdb_keywords", Use::Agent),
     ("duckdb_log_contexts", Use::Refused(INSIDE)),
@@ -242,6 +251,7 @@ pub const TABLE_FUNCTIONS: &[(&str, Use)] = &[
     ("duckdb_prepared_statements", Use::Agent),
     ("duckdb_profiling_settings", Use::Agent),
     ("duckdb_schemas", Use::Agent),
+    ("duckdb_secret_type_parameters", Use::Refused(SECRETS)),
     ("duckdb_secret_types", Use::Refused(SECRETS)),
     ("duckdb_secrets", Use::Refused(SECRETS)),
     ("duckdb_sequences", Use::Agent),
@@ -249,11 +259,11 @@ pub const TABLE_FUNCTIONS: &[(&str, Use)] = &[
     ("duckdb_table_sample", Use::Refused(INSIDE)),
     ("duckdb_tables", Use::Agent),
     ("duckdb_temporary_files", Use::Refused(INSIDE)),
+    ("duckdb_triggers", Use::Agent),
     ("duckdb_types", Use::Agent),
     ("duckdb_variables", Use::Agent),
     ("duckdb_views", Use::Agent),
     ("enable_logging", Use::Refused(STATE)),
-    ("enable_peg_parser", Use::Refused(STATE)),
     ("enable_profiling", Use::Refused(STATE)),
     ("force_checkpoint", Use::Refused(STATE)),
     ("generate_series", Use::Agent),
@@ -303,12 +313,18 @@ pub const TABLE_FUNCTIONS: &[(&str, Use)] = &[
     ("read_ndjson_auto", Use::Lock),
     ("read_ndjson_objects", Use::Lock),
     ("read_parquet", Use::Lock),
+    ("read_single_csv_file", Use::Lock),
+    ("read_single_json_file", Use::Lock),
+    ("read_single_parquet_file", Use::Lock),
     ("read_text", Use::Lock),
+    ("register_external_resource", Use::Refused(STATE)),
+    ("register_external_resource_type", Use::Refused(STATE)),
     ("repeat", Use::Agent),
     ("repeat_row", Use::Agent),
     ("seq_scan", Use::Refused(INTERNAL)),
     ("sniff_csv", Use::Lock),
     ("sql_auto_complete", Use::Refused(INTERNAL)),
+    ("sql_tokenize", Use::Agent),
     ("summary", Use::Agent),
     ("test_all_types", Use::Refused(INTERNAL)),
     ("test_vector_types", Use::Refused(INTERNAL)),
