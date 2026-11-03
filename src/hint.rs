@@ -347,14 +347,6 @@ pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Opti
     }
 
     if let Some(name) = between(message, "Scalar Function with name ", " does not exist") {
-        // A backticked identifier reaches the binder as a function named "`__postfix".
-        if name.starts_with('`') {
-            return Some(
-                "DuckDB quotes identifiers with double quotes, not backticks: write \
-                 \"my column\" rather than `my column`. Single quotes are for string literals."
-                    .into(),
-            );
-        }
         let lower = name.to_ascii_lowercase();
         if let Some((_, fix)) = DIALECT.iter().find(|(k, _)| *k == lower) {
             return Some(format!("DuckDB spells that {fix}."));
@@ -551,8 +543,11 @@ fn walk<'n>(
     if let Some(map) = o.get("cte_map").and_then(|m| m["map"].as_array()) {
         for cte in map {
             let name = cte["key"].as_str().unwrap_or_default().to_string();
-            let query = &cte["value"]["query"];
-            let recursive = query["node"]["type"] == "RECURSIVE_CTE_NODE";
+            // DuckDB 2.0 holds a CTE's query as `query_node`, 1.5.5 as `query`.
+            let value = &cte["value"];
+            let query = value.get("query_node").unwrap_or(&value["query"]);
+            let node = query.get("node").unwrap_or(query);
+            let recursive = node["type"] == "RECURSIVE_CTE_NODE";
             if recursive {
                 ctes.push(name);
                 walk(query, ctes, names, items);
@@ -743,7 +738,20 @@ pub fn statements(sql: &str) -> Vec<String> {
 /// A fix for a batch that never parsed. Takes the SQL because a parser error names a position,
 /// not a construct: `syntax error at or near "5"` is only recognisable as `TOP 5` if you look.
 pub fn for_parse_error(message: &str, sql: &str) -> Option<String> {
-    if message.contains("locking clause is not supported") {
+    // DuckDB 2.0 does not parse a locking clause at all: `syntax error at or near "FOR"`.
+    let locks = || {
+        let sql = sql.to_ascii_lowercase();
+        message.contains("syntax error at or near \"FOR\"")
+            && [
+                " for update",
+                " for share",
+                " for no key update",
+                " for key share",
+            ]
+            .iter()
+            .any(|l| sql.contains(l))
+    };
+    if message.contains("locking clause is not supported") || locks() {
         return Some(
             "There is nothing to lock on the bench — the workspace is yours alone and nobody \
              else can write to it. Drop the FOR UPDATE."
