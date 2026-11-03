@@ -900,6 +900,9 @@ const BY_NAME: &[&str] = &[
     "pragma_show",
 ];
 
+/// What [`named_tables`] calls a table function whose plan does not name it.
+const UNNAMED: &str = "an unnamed table function";
+
 /// Why helper `name`, which calls `function`, is refused.
 fn by_name(name: &str, function: &str) -> String {
     format!(
@@ -913,9 +916,11 @@ fn by_name(name: &str, function: &str) -> String {
 /// carry one). A name that is no table on the bench is dropped by the caller. Sets `unread` when
 /// DuckDB answered with an error instead.
 ///
-/// Returns the first [`BY_NAME`] function it calls, if any: a `LOGICAL_GET` of the plan. In a
-/// view's plan `query_table` and `query` are already bound to the scans they make, measured on
-/// 1.5.5, so a view's tables are found through them and only the others are left to refuse.
+/// Returns the first [`BY_NAME`] function it calls, if any: a `LOGICAL_GET` of the plan, named by
+/// the last part of its `qname` (DuckDB 2.0; 1.5.5 had `name`). A `LOGICAL_GET` with neither is
+/// returned as unnamed, and refused: benchy cannot tell what it reads. In a view's plan
+/// `query_table` and `query` are already bound to the scans they make, measured on 1.5.5 and 2.0,
+/// so a view's tables are found through them and only the others are left to refuse.
 fn named_tables(json: &str, out: &mut HashSet<String>, unread: &mut bool) -> Option<String> {
     fn walk(v: &serde_json::Value, out: &mut HashSet<String>, by: &mut Option<String>) {
         match v {
@@ -925,12 +930,13 @@ fn named_tables(json: &str, out: &mut HashSet<String>, unread: &mut bool) -> Opt
                         out.insert(t.to_ascii_lowercase());
                     }
                 }
-                let called = match o.get("type").and_then(|t| t.as_str()) {
-                    Some("LOGICAL_GET") => o["name"].as_str(),
-                    _ => None,
-                };
-                if let Some(f) = called.map(str::to_ascii_lowercase) {
-                    if by.is_none() && BY_NAME.contains(&f.as_str()) {
+                if o.get("type").and_then(|t| t.as_str()) == Some("LOGICAL_GET") {
+                    let qname = o
+                        .get("qname")
+                        .and_then(|q| q["path"].as_array()?.last()?.as_str());
+                    let called = o.get("name").and_then(|n| n.as_str()).or(qname);
+                    let f = called.map_or_else(|| UNNAMED.to_string(), str::to_ascii_lowercase);
+                    if by.is_none() && (f == UNNAMED || BY_NAME.contains(&f.as_str())) {
                         *by = Some(f);
                     }
                 }
@@ -1300,6 +1306,33 @@ pub fn render(shown: &[Shown], room: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plans_table_function_is_named_by_its_qname_and_an_unnamed_one_is_refused() {
+        // DuckDB 2.0 names a LOGICAL_GET by `qname`'s last part (1.5.5: `name`); one with neither
+        // used to panic the server, and must not pass as reading nothing (PRJ-19).
+        let get = |extra: &str| {
+            format!(r#"{{"error":false,"plans":[{{"type":"LOGICAL_GET"{extra},"children":[]}}]}}"#)
+        };
+        let (mut out, mut unread) = (HashSet::new(), false);
+        let q = get(r#","qname":{"path":["system","main","pragma_table_info"]}"#);
+        assert_eq!(
+            named_tables(&q, &mut out, &mut unread).as_deref(),
+            Some("pragma_table_info")
+        );
+        let old = get(r#","name":"query_table""#);
+        assert_eq!(
+            named_tables(&old, &mut out, &mut unread).as_deref(),
+            Some("query_table")
+        );
+        assert_eq!(
+            named_tables(&get(""), &mut out, &mut unread).as_deref(),
+            Some(UNNAMED)
+        );
+        let range = get(r#","qname":{"path":["system","main","range"]}"#);
+        assert_eq!(named_tables(&range, &mut out, &mut unread), None);
+        assert!(!unread);
+    }
 
     #[test]
     fn helper_sql_splits_where_duckdb_would() {
