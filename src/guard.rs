@@ -132,17 +132,6 @@ impl Classifier {
                 return Verdict::Unparseable(msg.lines().next().unwrap_or("").to_string());
             }
             let mut kinds = Vec::with_capacity(n as usize);
-            // DuckDB 1.5.5 runs a statement that keeps a dynamic PIVOT, `CREATE TABLE … AS PIVOT`
-            // or an INSERT, UPDATE, DELETE or MERGE that reads one, as a transaction of its own:
-            // a TRANSACTION, the pivot's CREATE TYPE, the statement, a TRANSACTION. So a
-            // TRANSACTION before a CREATE passes here, as does the next one; the run holds them
-            // to that shape, and runs neither (`Workspace::work`, `a_pivot_into_a_table_runs`).
-            // Those and the CREATE after the first are not the agent's, so a refusal does not
-            // count them; a second pivot's CREATE TYPE is not told apart here, only when the
-            // batch runs.
-            let mut opening: Option<usize> = None;
-            let mut open: Option<usize> = None;
-            let mut added = 0usize;
             for i in 0..n {
                 let mut prep: ffi::duckdb_prepared_statement = ptr::null_mut();
                 let ok = ffi::duckdb_prepare_extracted_statement(self.con, ex, i, &mut prep)
@@ -150,64 +139,28 @@ impl Classifier {
                 // A statement that will not bind yet is not refused here: it may depend on an
                 // object an earlier statement in the batch creates. It is classified again when
                 // it is prepared to run, where that object exists.
-                let t = if ok {
-                    Some(ffi::duckdb_prepared_statement_type(prep))
-                } else {
-                    None
-                };
-                if let Some(at) = opening.take() {
-                    // Not one that does not bind yet: `COPY FROM DATABASE` is a TRANSACTION and
-                    // two statements that do not bind under the lock, as a pivot's CREATE TYPE
-                    // over a table made earlier in the batch would be.
-                    if t != Some(ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE) {
-                        ffi::duckdb_destroy_prepare(&mut prep);
-                        ffi::duckdb_destroy_extracted(&mut ex);
-                        return Verdict::Refuse {
-                            index: at + 1,
-                            kind: "TRANSACTION",
-                        };
-                    }
-                    open = Some(at);
-                    added += 1;
-                }
-                let transaction =
-                    t == Some(ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_TRANSACTION);
-                let verdict = if transaction && open.take().is_some() {
-                    added += 1;
-                    Ok("TRANSACTION")
-                } else if transaction {
-                    opening = Some(i as usize - added);
-                    added += 1;
-                    Ok("TRANSACTION")
-                } else if let Some(t) = t {
-                    if is_allowed(t) {
-                        Ok(type_name(t))
-                    } else {
-                        Err(type_name(t))
-                    }
-                } else {
-                    Ok("UNBOUND")
-                };
+                let t = ok.then(|| {
+                    kind_of(
+                        ffi::duckdb_prepared_statement_type(prep),
+                        sql,
+                        i as usize,
+                        n as usize,
+                    )
+                });
                 ffi::duckdb_destroy_prepare(&mut prep);
-                match verdict {
-                    Ok(k) => kinds.push(k),
-                    Err(k) => {
+                match t {
+                    Some(t) if !is_allowed(t) => {
                         ffi::duckdb_destroy_extracted(&mut ex);
                         return Verdict::Refuse {
-                            index: i as usize - added + 1,
-                            kind: k,
+                            index: i as usize + 1,
+                            kind: type_name(t),
                         };
                     }
+                    Some(t) => kinds.push(type_name(t)),
+                    None => kinds.push("UNBOUND"),
                 }
             }
             ffi::duckdb_destroy_extracted(&mut ex);
-            // A TRANSACTION that ends the batch, or one the batch never closes, wraps nothing.
-            if let Some(at) = opening.or(open) {
-                return Verdict::Refuse {
-                    index: at + 1,
-                    kind: "TRANSACTION",
-                };
-            }
             Verdict::Allow(kinds)
         }
     }
@@ -780,9 +733,109 @@ unsafe fn pairs(con: ffi::duckdb_connection, sql: &CStr) -> Result<Vec<(String, 
     Ok(rows)
 }
 
+/// The first word of each of `sql`'s statements, folded, as DuckDB splits them: at each `;` in
+/// code ([`lex`]), a statement that holds only white space and comments left out, and `(`s
+/// before the word skipped. Empty for a statement that starts with a quoted name or a literal.
+fn statement_heads(sql: &str) -> Option<Vec<String>> {
+    let mut heads = Vec::new();
+    let mut head: Option<String> = None;
+    for (part, r) in lex(sql).ok()? {
+        let text = &sql[r];
+        match part {
+            Part::Comment => {}
+            Part::Name | Part::Literal => {
+                head.get_or_insert_with(String::new);
+            }
+            Part::Code => {
+                for piece in text.split_inclusive(';') {
+                    let (body, ends) = match piece.strip_suffix(';') {
+                        Some(b) => (b, true),
+                        None => (piece, false),
+                    };
+                    let body = body.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+                    if head.is_none() && !body.trim().is_empty() {
+                        let w: String = body
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect();
+                        head = Some(w.to_ascii_lowercase());
+                    }
+                    if ends {
+                        heads.extend(head.take());
+                    }
+                }
+            }
+        }
+    }
+    heads.extend(head);
+    Some(heads)
+}
+
+/// The kind of statement `index` of `sql`, `kind` as DuckDB typed it, except a `MULTI`: DuckDB 2.0
+/// runs a statement holding a dynamic PIVOT as one statement of that type, whatever the
+/// statement, and the C API says no more (`a_dynamic_pivot_still_runs`). It is named by its first
+/// word, the one statement kinds that can hold a PIVOT and are allowed; anything else stays
+/// `MULTI`, refused (`COPY (PIVOT …) TO …`), as is a batch whose statements are not the ones
+/// DuckDB found (`count`).
+pub(crate) fn kind_of(
+    kind: ffi::duckdb_statement_type,
+    sql: &str,
+    index: usize,
+    count: usize,
+) -> ffi::duckdb_statement_type {
+    if kind != ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MULTI {
+        return kind;
+    }
+    let heads = statement_heads(sql).filter(|h| h.len() == count);
+    match heads
+        .as_ref()
+        .and_then(|h| h.get(index))
+        .map(String::as_str)
+    {
+        Some("pivot" | "select" | "with" | "from") => {
+            ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT
+        }
+        Some("create") => ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE,
+        Some("insert") => ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_INSERT,
+        Some("update") => ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_UPDATE,
+        Some("delete") => ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_DELETE,
+        Some("merge") => ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MERGE_INTO,
+        _ => kind,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multi_statement_is_named_by_its_first_word_or_refused() {
+        // DuckDB 2.0 types a statement holding a dynamic PIVOT MULTI (PRJ-19).
+        let multi = ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MULTI;
+        let batch =
+            "-- a note; with a semicolon\nSELECT 1;; /* x; */ (PIVOT m ON k USING sum(v));\n\
+                     CREATE TABLE u AS PIVOT m ON k USING sum(v); COPY (PIVOT m ON k) TO 'f'; \
+                     \"insert\" ; INSERT INTO t PIVOT m ON k";
+        let kinds: Vec<_> = (0..6)
+            .map(|i| type_name(kind_of(multi, batch, i, 6)))
+            .collect();
+        assert_eq!(
+            kinds,
+            ["SELECT", "SELECT", "CREATE", "MULTI", "MULTI", "INSERT"]
+        );
+        assert!(
+            !is_allowed(kind_of(multi, batch, 3, 6)),
+            "COPY (PIVOT …) stays refused"
+        );
+        // Not the statements DuckDB found: refused, never guessed.
+        assert_eq!(type_name(kind_of(multi, batch, 2, 5)), "MULTI");
+        let select = ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT;
+        assert_eq!(
+            kind_of(select, batch, 3, 6),
+            select,
+            "only MULTI is renamed"
+        );
+    }
 
     #[test]
     fn a_refused_function_is_refused_however_it_is_written() {

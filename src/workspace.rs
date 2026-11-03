@@ -177,8 +177,8 @@ impl Builtin {
 }
 
 /// Whether a type of the temporary catalog named `name`, made in the batch `sql`, is a dynamic
-/// PIVOT's. DuckDB 1.5.5 names one `__pivot_enum_` and a random UUID, lower-case, in a CREATE
-/// TYPE it adds to the batch; the C API gives no statement's text or origin, so the name is what
+/// PIVOT's. DuckDB names one `__pivot_enum_` and a random UUID, lower-case (1.5.5 in a CREATE
+/// TYPE it adds to the batch, 2.0 inside the one MULTI statement it runs the pivot as); the C API gives no statement's text or origin, so the name is what
 /// tells. A type the agent makes is named in its SQL, and DuckDB has no other spelling of an
 /// identifier for it to hide behind (`U&"…"` is "NOT IMPLEMENTED"); a pivot's name cannot be in
 /// the SQL, which was written before the UUID was drawn
@@ -205,51 +205,11 @@ fn enum_refused(what: &str) -> String {
     )
 }
 
-/// Where a batch is in the transaction DuckDB 1.5.5 wraps around a statement that keeps a dynamic
-/// PIVOT: a TRANSACTION, the pivot's CREATE TYPE for each pivot, the statement, a TRANSACTION.
-/// Measured, it wraps every statement that is not a SELECT: `CREATE TABLE … AS PIVOT`, and an
-/// INSERT, UPDATE, DELETE or MERGE that reads one. Each holds the agent's statement number the
-/// first TRANSACTION stands at (`a_pivot_into_a_table_runs`).
-///
-/// The C API gives a statement's type and not its text, so a TRANSACTION of DuckDB's is told
-/// from the agent's by what follows it, which the agent cannot forge: a type only a dynamic
-/// PIVOT makes (`pivots_type`), then a statement that is not a SELECT. Neither TRANSACTION runs.
-/// A batch that only looks like one is refused as the agent's TRANSACTION where the shape breaks;
-/// what ran inside it before then was a pivot's CREATE TYPE or an allowed statement, each as it
-/// would run alone, and a CREATE of the agent's own after its TRANSACTION is undone. A
-/// TRANSACTION that ends the batch, or is never closed, is refused up front (`crate::guard`).
-#[derive(Debug, Clone, Copy)]
-enum Wrap {
-    None,
-    /// A TRANSACTION, not run: a CREATE must follow, and make a pivot's type.
-    Opened(u64),
-    /// A pivot's type made; another may follow, then the statement that is not a SELECT.
-    Typed(u64),
-    /// The statement ran; a TRANSACTION must follow, which closes it.
-    Ran(u64),
-}
-
-impl Wrap {
-    /// The agent's own TRANSACTION, at statement `at` counted from 0, refused.
-    fn refused(at: u64) -> WorkError {
-        WorkError::Denied {
-            index: at as usize + 1,
-            kind: "TRANSACTION",
-            allowed: ALLOWED,
-            whole: false,
-        }
-    }
-}
-
 /// What a CREATE or ALTER left in the agent's catalogs (`Workspace::inspect`).
 #[derive(Debug, PartialEq, Eq)]
 enum Made {
     /// The agent's own objects, every name free.
     Own,
-    /// DuckDB's CREATE TYPE for a dynamic PIVOT: a type in the temporary catalog named
-    /// `__pivot_enum_` and a UUID the batch does not hold. A type the agent names so is its own
-    /// (`a_type_the_agent_names_is_never_a_pivots`).
-    PivotType,
     /// An object under a taken name, and why it is taken: undone, and the batch stops.
     Taken(String),
 }
@@ -538,16 +498,8 @@ impl std::fmt::Display for WorkError {
                     functions are unavailable.",
                     ran(*whole)
                 )?;
-                // DuckDB's own transaction around a PIVOT into a table, over a table the same
-                // batch makes, is refused up front (`crate::guard`, `a_pivot_into_a_table_runs`).
                 if *kind == "TRANSACTION" {
-                    write!(
-                        f,
-                        " Transactions are not available. If statement {index} keeps a \
-                        PIVOT (CREATE TABLE … AS PIVOT, or an INSERT, UPDATE, DELETE or MERGE \
-                        that reads one) over a table made earlier in the same call, make that \
-                        table in a call of its own first."
-                    )?;
+                    write!(f, " Transactions are not available.")?;
                 }
                 Ok(())
             }
@@ -1968,14 +1920,8 @@ impl Workspace {
         // statements DuckDB found in the batch: what tells each result's SQL apart.
         let mut answers = Vec::new();
         let extracted: u64;
-        // Statements DuckDB added to the agent's: a dynamic PIVOT's CREATE TYPE. They answer
-        // nothing and do not count when statements are numbered.
-        let mut added = 0u64;
-        // Whether a dynamic PIVOT made a type, which goes when the batch does.
+        // Whether a dynamic PIVOT ran, whose type goes when the batch does.
         let mut pivoted = false;
-        // Where the batch is in a transaction DuckDB wrapped around a statement that keeps a
-        // dynamic PIVOT (`Wrap`), and the agent's statement it wraps.
-        let mut wrap = Wrap::None;
         let mut watchdog = Some(watchdog);
         let mut failure = None;
         unsafe {
@@ -1984,7 +1930,7 @@ impl Workspace {
             let n = ffi::duckdb_extract_statements(self.agent, c.as_ptr(), &mut ex);
             extracted = n as u64;
             for i in 0..n {
-                let mine = i - added;
+                let mine = i;
                 // No statement starts past the deadline, whatever became of the interrupt.
                 if started.elapsed() >= cap.deadline {
                     if let Some(w) = watchdog.take() {
@@ -2011,47 +1957,13 @@ impl Workspace {
                 // REQ-2 `checked_per_statement_before_run`. The up-front pass could not bind a
                 // statement that depends on an earlier one in this batch; now it is bound, so it
                 // can be classified — and a refused kind is refused here, before it executes.
-                let kind = ffi::duckdb_prepared_statement_type(prep);
+                // A dynamic PIVOT's statement is typed MULTI, and named by its first word
+                // (`crate::guard::kind_of`).
+                let typed = ffi::duckdb_prepared_statement_type(prep);
+                pivoted |= typed == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_MULTI;
+                let kind = crate::guard::kind_of(typed, sql, i as usize, n as usize);
                 if kind != ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT {
                     self.agent_columns = Default::default();
-                }
-                // DuckDB's own transaction around a statement that keeps a dynamic PIVOT
-                // (`Wrap`): neither of its TRANSACTIONs runs, and what it wraps runs as every
-                // statement does, each CREATE in a transaction of benchy's. Any other TRANSACTION
-                // is the agent's, and refused where it stands.
-                let transaction =
-                    kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_TRANSACTION;
-                let refused = match wrap {
-                    Wrap::None | Wrap::Ran(_) if transaction => {
-                        wrap = match wrap {
-                            Wrap::None => Wrap::Opened(mine),
-                            _ => Wrap::None,
-                        };
-                        ffi::duckdb_destroy_prepare(&mut prep);
-                        added += 1;
-                        continue;
-                    }
-                    Wrap::Opened(at)
-                        if kind != ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_CREATE =>
-                    {
-                        Some(at)
-                    }
-                    Wrap::Typed(at)
-                        if transaction
-                            || kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT =>
-                    {
-                        Some(at)
-                    }
-                    Wrap::Ran(at) => Some(at),
-                    _ => None,
-                };
-                if let Some(at) = refused {
-                    ffi::duckdb_destroy_prepare(&mut prep);
-                    if let Some(w) = watchdog.take() {
-                        finish(&done, w);
-                    }
-                    failure = Some(Wrap::refused(at));
-                    break;
                 }
                 if !crate::guard::is_allowed(kind) {
                     ffi::duckdb_destroy_prepare(&mut prep);
@@ -2170,38 +2082,15 @@ impl Workspace {
                     // by_its_own_deadline`). The statement itself has finished; what is held up
                     // is benchy's own bounded work, a listing or two. A deadline that passes
                     // meanwhile stops the next statement, before it starts.
-                    let opened = matches!(wrap, Wrap::Opened(_));
                     let made = {
                         let _hold = done.0.lock().unwrap_or_else(|e| e.into_inner());
                         self.inspect(alter, sql).and_then(|made| match made {
                             Made::Taken(why) => Ok(Err(why)),
-                            // Not DuckDB's: undone below.
-                            made if opened && made != Made::PivotType => Ok(Ok(made)),
                             made => self.settle(true).map(|()| Ok(made)),
                         })
                     };
                     match made {
-                        Ok(Ok(made)) => {
-                            if let (Wrap::Opened(at), false) = (wrap, made == Made::PivotType) {
-                                // A TRANSACTION of the agent's own, before a CREATE of its own.
-                                if let Some(w) = watchdog.take() {
-                                    finish(&done, w);
-                                }
-                                let _ = self.settle(false);
-                                failure = Some(Wrap::refused(at));
-                                break;
-                            }
-                            if made == Made::PivotType {
-                                pivoted = true;
-                                if let Wrap::Opened(at) = wrap {
-                                    wrap = Wrap::Typed(at);
-                                }
-                                if result.rows.is_empty() {
-                                    added += 1;
-                                    continue;
-                                }
-                            }
-                        }
+                        Ok(Ok(_)) => {}
                         Ok(Err(why)) => {
                             if let Some(w) = watchdog.take() {
                                 finish(&done, w);
@@ -2221,9 +2110,6 @@ impl Workspace {
                             break;
                         }
                     }
-                }
-                if let Wrap::Typed(at) = wrap {
-                    wrap = Wrap::Ran(at);
                 }
                 self.next_result_id += 1;
                 queries.push(kind == ffi::duckdb_statement_type_DUCKDB_STATEMENT_TYPE_SELECT);
@@ -2263,7 +2149,7 @@ impl Workspace {
         // been found where it differs, but one would otherwise give a result another's SQL.
         if !out.is_empty() {
             let written = crate::hint::statements(sql);
-            if written.len() as u64 + added == extracted {
+            if written.len() as u64 == extracted {
                 for (r, i) in out.iter_mut().zip(&answers) {
                     r.sql = written
                         .get(*i)
@@ -2454,8 +2340,8 @@ impl Workspace {
     /// engine's life and checked from the agent's first CREATE, so any clash is this statement's. An ALTER can rename a table or view and make nothing
     /// else, so only those are listed after one.
     ///
-    /// A dynamic PIVOT runs as a CREATE TYPE of the pivoted values and then the query; the type
-    /// in the temporary catalog is the trace the first leaves (`a_dynamic_pivot_answers_once`).
+    /// A dynamic PIVOT leaves a type in the temporary catalog, DuckDB's own, which goes when the
+    /// batch does (`drop_pivot_types`); any other type a statement made is the agent's.
     ///
     /// And no ENUM is kept (`the_agent_keeps_no_enum`): DuckDB holds an ENUM's values outside
     /// its memory budget, where neither `memory_limit` nor `duckdb_memory()` sees them. An ENUM
@@ -2556,13 +2442,11 @@ impl Workspace {
             return Ok(Made::Own);
         }
         let types = self.agent_rows(AGENT_TYPES)?;
-        let made = types.iter().find(|t| !self.seen.contains(&t.0)).map(|t| {
-            if t.2 == "temp" && pivots_type(&t.1, sql) {
-                Made::PivotType
-            } else {
-                Made::Taken(enum_refused(&format!("the type {}", t.1)))
-            }
-        });
+        // DuckDB's own type for a dynamic PIVOT in a CREATE, dropped after the batch.
+        let made = types
+            .iter()
+            .find(|t| !self.seen.contains(&t.0) && !(t.2 == "temp" && pivots_type(&t.1, sql)))
+            .map(|t| Made::Taken(enum_refused(&format!("the type {}", t.1))));
         self.seen.extend(types.iter().map(|t| t.0));
         if let Some(made) = made {
             return Ok(made);

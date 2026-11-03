@@ -295,7 +295,7 @@ pub fn run() -> ! {
                             )
                         },
                     };
-                    // `a_pivot_type_that_cannot_be_dropped_spoils_the_engine`
+                    // `Workspace::spoiled`
                     Reply {
                         rebuild: ws.spoiled().map(str::to_string),
                         ..reply
