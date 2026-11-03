@@ -703,23 +703,15 @@ fn a_pivot_into_a_table_runs() {
             "{sql}: {out:?}"
         );
     }
-    // Over a table the same call makes, the pivot's CREATE TYPE does not bind before the batch
-    // runs, and DuckDB's transaction cannot be told from `COPY FROM DATABASE`'s, which looks the
-    // same: refused, saying what to do instead, and that works.
-    let e = ws
-        .work(
-            "CREATE TABLE s2 AS SELECT * FROM s; CREATE TABLE u AS PIVOT s2 ON k USING sum(v)",
-            &Caps::default(),
-        )
-        .unwrap_err()
-        .to_string();
-    assert!(
-        e.starts_with("statement 2 is TRANSACTION")
-            && e.contains("make that table in a call of its own first"),
-        "{e}"
+    // Over a table the same call makes: DuckDB 2.0 runs the pivot as one statement, bound when it
+    // runs (1.5.5 split off a CREATE TYPE that could not bind up front, refused as a TRANSACTION).
+    let out = run(
+        &mut ws,
+        "CREATE TABLE s2 AS SELECT * FROM s; CREATE TABLE u AS PIVOT s2 ON k USING sum(v)",
     );
-    run(&mut ws, "CREATE TABLE s2 AS SELECT * FROM s");
-    run(&mut ws, "CREATE TABLE u AS PIVOT s2 ON k USING sum(v)");
+    assert_eq!(out.len(), 2, "{out:?}");
+    let out = run(&mut ws, "SELECT * FROM u");
+    assert!(out[0].columns.contains(&"a".to_string()), "{out:?}");
 
     let out = run(&mut ws, "SELECT j, a, b FROM p ORDER BY j");
     assert_eq!(flatten(&out).trim(), "x 4 y 2", "{out:?}");
@@ -845,7 +837,6 @@ fn each_statement_kind_is_named_as_duckdb_types_it() {
         ("INSTALL json", "LOAD"),
         ("ATTACH ':memory:' AS x", "ATTACH"),
         ("DETACH memory", "DETACH"),
-        ("PRAGMA enable_profiling", "PRAGMA"),
         ("CALL pragma_version()", "CALL"),
         ("BEGIN TRANSACTION", "TRANSACTION"),
         ("EXPLAIN SELECT 1", "EXPLAIN"),
@@ -853,12 +844,15 @@ fn each_statement_kind_is_named_as_duckdb_types_it() {
         ("PREPARE p AS SELECT 1", "PREPARE"),
         ("UPDATE EXTENSIONS", "UPDATE EXTENSIONS"),
         // Typed as something other than their own kind, which leaves the guard's names for
-        // ANALYZE, VARIABLE_SET and COPY_DATABASE unreachable from SQL (the names themselves are
+        // ANALYZE, VARIABLE_SET, COPY_DATABASE and PRAGMA unreachable from SQL (the names themselves are
         // `every_statement_type_has_a_name_of_its_own`'s). Should DuckDB start typing one as its
         // own kind, this is where it shows.
         ("ANALYZE", "VACUUM"),
         ("SET VARIABLE v = 1", "SET"),
-        ("COPY FROM DATABASE memory TO x", "TRANSACTION"),
+        // DuckDB 2.0 types a PRAGMA as SET (1.5.5: PRAGMA).
+        ("PRAGMA enable_profiling", "SET"),
+        // DuckDB 2.0 types it PRAGMA (1.5.5: TRANSACTION).
+        ("COPY FROM DATABASE memory TO x", "PRAGMA"),
     ] {
         assert_eq!(
             ws.classify(sql),
@@ -1039,8 +1033,8 @@ fn every_table_function_duckdb_has_is_classified() {
     );
     assert_eq!(
         has.len(),
-        93,
-        "89 table functions and 4 table macros on 1.5.5"
+        109,
+        "105 table functions and 4 table macros on 2.0.0"
     );
 
     // What the catalog itself gives, as an engine benchy was not measured on reads it, is what
@@ -1113,7 +1107,7 @@ fn the_table_functions_left_to_the_lock_are_refused_by_it() {
             .unwrap_or_default();
         assert!(e.contains("disabled by configuration"), "{sql}: {e:?}");
     }
-    assert_eq!(left, 22, "the file and network readers of 1.5.5");
+    assert_eq!(left, 25, "the file and network readers of 2.0.0");
     let _ = std::fs::remove_file(&canary);
 }
 

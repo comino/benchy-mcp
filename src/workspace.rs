@@ -313,6 +313,9 @@ const PIVOT_TYPES: &CStr = c"SELECT type_oid, type_name, database_name \
       FROM system.main.duckdb_types() \
       WHERE database_name = 'temp' AND NOT internal \
       AND system.main.starts_with(type_name, '__pivot_enum_')";
+/// The agent's triggers, in any catalog of its own (DuckDB 2.0): none is kept (`Workspace::inspect`).
+const AGENT_TRIGGERS: &CStr = c"SELECT trigger_oid, trigger_name, '' \
+      FROM system.main.duckdb_triggers() WHERE database_name IN ('temp', 'memory')";
 /// The agent's functions, in any schema: whether each is where an unqualified name finds it
 /// (`1` in its `main` schema), its name, and whether its body spells an ENUM (`true`,
 /// [`enum_spelled`]). `duckdb_functions()` builds a row for each of DuckDB's built-ins before
@@ -2354,6 +2357,15 @@ impl Workspace {
     /// (`an_object_that_keeps_an_enum_in_its_sql_is_refused`). An ENUM in a query that keeps
     /// nothing is the agent's to use.
     fn inspect(&mut self, alter: bool, sql: &str) -> Result<Made, String> {
+        // DuckDB 2.0's triggers run statements of their own when the agent's run, past every
+        // check benchy makes of the agent's statements: none is kept (PRJ-19).
+        if let Some((_, name, _)) = self.agent_rows(AGENT_TRIGGERS)?.pop() {
+            return Ok(Made::Taken(format!(
+                "triggers are not kept here: `{name}` would run statements of its own whenever \
+                 its table changes, which benchy cannot check the way it checks yours. Nothing \
+                 it did stays. Run the statement it would run yourself instead."
+            )));
+        }
         if let Some((_, what, _)) = self.agent_rows(AGENT_ENUM_COLUMNS)?.pop() {
             return Ok(Made::Taken(enum_refused(&what)));
         }
@@ -3570,6 +3582,7 @@ mod tests {
             ENUM_IN_VIEWS,
             ENUM_IN_INDEXES,
             PIVOT_TYPES,
+            AGENT_TRIGGERS,
             AGENT_FUNCTIONS,
             AGENT_AND_BUILTIN_FUNCTIONS,
             SYSTEM_VIEWS,
@@ -3815,6 +3828,35 @@ mod tests {
         ws.drop_pivot_types();
         let why = ws.spoiled().expect("the engine must go");
         assert!(why.contains(pinned), "{why}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_trigger_is_not_kept() {
+        // DuckDB 2.0's CREATE TRIGGER is a CREATE, which the statement allowlist lets through; its
+        // body would run past benchy's checks on every later INSERT (PRJ-19).
+        let dir = std::env::temp_dir().join(fresh_name("benchy-trigger"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ws = Workspace::open_sealed(&dir, "1GB").unwrap();
+        let caps = crate::result::Caps::default();
+        ws.work(
+            "CREATE TABLE t (i INTEGER); CREATE TABLE log (i INTEGER)",
+            &caps,
+        )
+        .expect("runs");
+        let e = ws
+            .work(
+                "CREATE TRIGGER tr AFTER INSERT ON t FOR EACH STATEMENT INSERT INTO log SELECT 1",
+                &caps,
+            )
+            .expect_err("a trigger is not kept")
+            .to_string();
+        assert!(e.contains("triggers are not kept"), "{e}");
+        ws.work("INSERT INTO t VALUES (1)", &caps).expect("runs");
+        let n = ws
+            .agent_rows(c"SELECT 0, count(*)::VARCHAR, '' FROM log")
+            .unwrap();
+        assert_eq!(n[0].1, "0", "the trigger was undone and never ran");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
