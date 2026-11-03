@@ -3832,6 +3832,41 @@ mod tests {
     }
 
     #[test]
+    fn a_backticked_name_hides_no_statement_from_the_guard() {
+        // DuckDB 2.0 quotes a name with backticks. Read as code, the `'` in one opened a literal
+        // DuckDB never saw: a SET VARIABLE in a PIVOT ran as a SELECT, and query() and
+        // checkpoint() ran past the table-function check (PRJ-19, sibling-door hunt on 0e251b4).
+        let dir = std::env::temp_dir().join(fresh_name("benchy-backtick"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ws = Workspace::open_sealed(&dir, "1GB").unwrap();
+        let caps = crate::result::Caps::default();
+        ws.work(
+            "CREATE TABLE s AS SELECT * FROM (VALUES ('a', 1), ('b', 2)) t(k, v)",
+            &caps,
+        )
+        .expect("runs");
+        for (sql, said) in [
+            (
+                "SELECT 1 AS `x'`; SET VARIABLE v = (SELECT count(*) FROM (PIVOT s ON k USING \
+                 sum(v))); SELECT 2 AS `'`, 3 AS `;SELECT`, 4 AS `;SELECT`",
+                "statement 2 is MULTI",
+            ),
+            (
+                "SELECT 1 AS `x'`; SELECT * FROM query($$SELECT 42 AS n$$); SELECT 1 AS `'`",
+                "`query(…)` is not available",
+            ),
+            (
+                "SELECT 1 AS `x'`; SELECT * FROM checkpoint(); SELECT 1 AS `'`",
+                "`checkpoint(…)` is not available",
+            ),
+        ] {
+            let e = ws.work(sql, &caps).expect_err(sql).to_string();
+            assert!(e.contains(said), "{sql}: {e}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_trigger_is_not_kept() {
         // DuckDB 2.0's CREATE TRIGGER is a CREATE, which the statement allowlist lets through; its
         // body would run past benchy's checks on every later INSERT (PRJ-19).
