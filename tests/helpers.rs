@@ -463,7 +463,7 @@ fn a_helper_macro_that_calls_an_unknown_function_is_refused_at_startup() {
             "SELECT (count(*) * 100)::BIGINT AS a FROM f(2)",
         ),
         (
-            "CREATE MACRO f(n) AS list_transform([n], y -> nosuch(y))[1]",
+            "CREATE MACRO f(n) AS list_transform([n], lambda y: nosuch(y))[1]",
             "SELECT f(1)::BIGINT AS a",
         ),
     ];
@@ -507,7 +507,7 @@ fn a_helper_macro_that_calls_an_unknown_function_is_refused_at_startup() {
         ),
         ("CREATE MACRO f(x) AS x.lower()", "x.lower"),
         (
-            "CREATE MACRO f(x) AS list_transform([x], y -> s.lower(y))[1]",
+            "CREATE MACRO f(x) AS list_transform([x], lambda y: s.lower(y))[1]",
             "s.lower",
         ),
     ] {
@@ -525,7 +525,7 @@ fn a_helper_macro_that_calls_an_unknown_function_is_refused_at_startup() {
     let (mut s, dir) = start(
         "CREATE MACRO kw_to_w(kw) AS kw * 1000;\n\
          CREATE MACRO total_w(n) AS (SELECT sum(kw_to_w(range)) FROM range(n));\n\
-         CREATE MACRO shout(x) AS list_transform([x], y -> system.main.upper(y))[1];\n",
+         CREATE MACRO shout(x) AS list_transform([x], lambda y: system.main.upper(y))[1];\n",
         &[],
     );
     assert!(ok(&mut s, "SELECT total_w(3) || '!' AS w").contains("3000!"));
