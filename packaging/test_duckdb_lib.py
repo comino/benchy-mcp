@@ -175,6 +175,25 @@ def check_what_is_shipped_is_checked_again():
         assert "2.1.0" in refused(duckdb_lib.fetch, TRIPLE, "2.1.0", pins(), target, serving({}))
 
 
+def check_a_stale_copy_in_deps_is_removed_before_the_build():
+    # DuckDB 1.x's libduckdb-sys copied the library into deps/, on the test binaries' loader
+    # path; 2.0 does not, so a cached target keeps the old one. The fetch removes it.
+    with tempfile.TemporaryDirectory() as t:
+        target = pathlib.Path(t)
+        deps = target / TRIPLE / "release" / "deps"
+        deps.mkdir(parents=True)
+        (deps / "libduckdb.so").write_bytes(b"DuckDB 1.5.5's")
+        (deps / "libother.so").write_bytes(b"not DuckDB's")
+        got = duckdb_lib.fetch(TRIPLE, "2.0.0", pins(), target, serving({"duckdb-shared-libs-linux-amd64.tar.gz": GOOD}))
+        assert not (deps / "libduckdb.so").exists()
+        assert (deps / "libother.so").exists()
+        assert duckdb_lib.check(TRIPLE, "2.0.0", pins(), target) == got
+        # The pinned library itself stays where it is.
+        (deps / "libduckdb.so").write_bytes(LIB)
+        duckdb_lib.fetch(TRIPLE, "2.0.0", pins(), target, serving({}))
+        assert (deps / "libduckdb.so").read_bytes() == LIB
+
+
 def check_a_link_in_the_archive_is_refused():
     # A tar entry can be a symlink or a hard link, which a zip could not: never followed, and
     # nothing extracted for libduckdb-sys to link.

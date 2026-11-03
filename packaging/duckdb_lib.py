@@ -136,8 +136,18 @@ def fetch(triple, version, pins, target_dir, download=curl):
             part.unlink()
             raise Refused(f"{name} from DuckDB {version} has SHA-256 {got}, pinned {want}")
         part.rename(path)
-    for member, data in unpack(path, members(triple)).items():
+    unpacked = unpack(path, members(triple))
+    for member, data in unpacked.items():
         (cache / member).write_bytes(data)
+    # DuckDB 1.x's libduckdb-sys copied the library into the profile's deps/, on the test
+    # binaries' loader path; 2.0 copies it into its OUT_DIR. A cached target keeps the old copy
+    # there, which `check` refuses: removed before the build, unless it is this release's.
+    lib = ARCHIVES[triple][1]
+    target_dir = pathlib.Path(target_dir)
+    for pattern in (f"*/deps/{lib}", f"*/*/deps/{lib}"):
+        for stale in target_dir.glob(pattern):
+            if stale.read_bytes() != unpacked[lib]:
+                stale.unlink()
     return cache
 
 
