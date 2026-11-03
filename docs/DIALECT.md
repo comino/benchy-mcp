@@ -9,7 +9,7 @@ The `dialect` tool serves this file with every block like this one left out
 at every step, which is why the guidance lives in the *error* instead. The short version travels
 in the server instructions; this is the long version, fetched only when someone wants it.
 
-Measured against **DuckDB v1.5.5**, the version benchy links. The tool names the running engine's
+Measured against **DuckDB v2.0.0**, the version benchy links. The tool names the running engine's
 version above what it serves, and `version_not_hardcoded` asserts the instructions do too,
 because this drifts between releases.
 
@@ -30,6 +30,7 @@ These are benchy's rules, not DuckDB's, and no amount of dialect knowledge gets 
 | Loaded tables are read-only | DuckDB enforces it: `UPDATE`, `INSERT`, `DELETE`, `ALTER` and `DROP` against them fail. `CREATE TABLE mine AS SELECT * FROM loaded` makes a copy you can change. |
 | No file output | `COPY … TO` and `EXPORT DATABASE` are refused. Results come back through `query`; `get_result` pages a long one. |
 | No ENUM is kept | `CREATE TYPE`, a table or view with an `ENUM` column, nested or not, and a DEFAULT, generated column, CHECK, index, view or macro that casts to an `ENUM`, are refused and undone, `ENUM(` inside a string literal of what is kept included. Use `VARCHAR`. An `ENUM` inside a query that keeps nothing, and `PIVOT`, work as usual. |
+| No triggers | `CREATE TRIGGER` is refused and undone: a trigger runs statements of its own when its table changes, past the checks every statement of yours gets. Run what it would run yourself. |
 | Your own tables are free | `CREATE TABLE`/`VIEW`/`MACRO` land in `memory.main` and persist between calls, until a hard kill takes the engine. A name already taken is refused: for a table or view, a loaded table's, a helper's, a table's a helper reads or a system view's like `sqlite_master`; for a macro, a helper's or a built-in function's like `lower` or `range`. Pick another, such as `my_readings`. A table or view may be named like a function: `CREATE TABLE range …` works, and `FROM range` then reads it. |
 | Helpers are the operator's | Views and macros the operator provides are listed in `describe` under "Helpers". Call them like built-ins. They cannot be dropped, changed or replaced, and their names are taken. A helper view reads its tables whatever CTEs your query has, and a helper macro reads no table, so a CTE of yours changes no helper's answer: filter a helper view with your own SQL. |
 | Results are capped | Default 200 rows / 8 KB. Truncation is always stated. Aggregate rather than paging. |
@@ -41,7 +42,7 @@ Each of these returns `Catalog Error: Scalar Function with name X does not exist
 error names the DuckDB form.
 
 <!-- maintainers -->
-Every row was verified by calling it: the "missing" list is what returned that error on v1.5.5.
+Every row was verified by calling it: the "missing" list is what returned that error on v1.5.5 and again on v2.0.0.
 `src/hint.rs` fires on exactly these, and `tests/hints.rs` keeps the two in step.
 <!-- /maintainers -->
 
@@ -62,13 +63,13 @@ Every row was verified by calling it: the "missing" list is what returned that e
 | `rand()` | `random()` |
 | `timestampdiff(day, a, b)` | `date_diff('day', a, b)` |
 | `SELECT TOP 5 ...` | `SELECT ... LIMIT 5` |
-| `` `backticked` `` | `"double quoted"` — backticks are not identifier quotes |
+| `list_transform(l, x -> x + 1)` | `list_transform(l, lambda x: x + 1)` — the arrow form is not taken |
 | `"a string"` | `'a string'` — double quotes mean an identifier |
 | `... FOR UPDATE` | nothing to lock; the bench is yours alone |
 
 ### These do work
 
-Other engines' spellings that DuckDB has too: `ifnull`, `if`, `coalesce`,
+Other engines' spellings that DuckDB has too: `` `backticked` `` identifiers, `ifnull`, `if`, `coalesce`,
 `try_cast`, `percentile_cont`, `extract`, `INTERVAL`, `ILIKE`, `||`, `LIMIT ... OFFSET`,
 `group_concat`, `string_agg`, `listagg`, `array_agg`, `median`, `datediff`, `date_diff`,
 `datepart`, `date_trunc`, `strftime`, `strptime`, `instr`, `position`, `split_part`,

@@ -1073,13 +1073,14 @@ tried moved blocks between loads, and the one that kept them took 3.9 s where on
 - `a_zone_less_timestamp_is_read_in_its_sources_zone` — the conversion itself, at the SQL.
 - `an_infinite_timestamp_is_kept_from_every_source` — `infinity` and `-infinity` load as
   themselves from every source, unit and zone, never as a null; `describe`'s extents omit them.
-- `an_ndjson_infinity_is_refused` — an infinity in a sniffed JSON timestamp or date column is
-  refused, naming the file, the column and the fixes (null, a declared type, CSV or Parquet); a
-  genuine 1900-01-01 loads.
-- `an_ndjson_infinity_is_refused_in_a_column_renamed_for_case` — the same in a column DuckDB
-  renamed for a key that differs from another only in case.
-- `an_ndjson_epoch_is_refused_where_a_csv_reads_1970` — `epoch` in a sniffed JSON column is
-  refused as an infinity is; in a declared column it reads as 1970, as from a CSV.
+- `an_ndjson_infinity_is_refused` — an infinity in a sniffed JSON timestamp column loads as
+  itself, as from a CSV (DuckDB 2.0 reads it so; Sven, 2026-11-03); in a sniffed date column,
+  which DuckDB still reads as 1900-01-01, it is refused, naming the file, the column and the
+  fixes (null, a declared type, CSV or Parquet); a genuine 1900-01-01 loads.
+- `an_ndjson_infinity_is_refused_in_a_column_renamed_for_case` — the same for a date column
+  DuckDB renamed for a key that differs from another only in case.
+- `an_ndjson_epoch_is_refused_where_a_csv_reads_1970` — `epoch` in a sniffed JSON timestamp
+  column reads as 1970, as from a CSV; in a date column it is refused as an infinity is.
 - `clickhouse_looks_the_same_as_a_file` — ClickHouse's own `ArrowStream` (LZ4, zoned
   `DateTime64`), fetched by `clickhouse local` as a connector, answers as the CSV does; skipped,
   saying so, without `BENCHY_CLICKHOUSE_BIN`.
