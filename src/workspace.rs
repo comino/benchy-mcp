@@ -286,7 +286,8 @@ const AGENT_TYPES: &CStr = c"SELECT type_oid, type_name, database_name \
       WHERE database_name IN ('temp', 'memory') AND NOT internal";
 /// The SQL literal of a pattern that finds an ENUM spelled in the SQL DuckDB keeps of an object,
 /// for `regexp_matches`: an ENUM written out, which DuckDB 1.5.5 keeps as `"ENUM"('a', 'b')`
-/// however it was written (`ENUM('a', 'b')` in a column's type), or a type named as a dynamic
+/// however it was written (`ENUM('a', 'b')` in a column's type) and DuckDB 2.0 keeps in a macro's
+/// body as written, `enum('a', 'b')` too: so in any case, as a word (PRJ-19), or a type named as a dynamic
 /// PIVOT's, which it keeps quoted, `"__pivot_enum_0"`, however it was written: so the name in a
 /// string, `'__pivot_enum_x'`, is not one. A type of any other name is the agent's own, refused where it is made, so a dynamic
 /// PIVOT's is the only type an object of the agent's could name (`Workspace::inspect`). The
@@ -298,7 +299,7 @@ const AGENT_TYPES: &CStr = c"SELECT type_oid, type_name, database_name \
 /// which is what stops a DROP TYPE, and its SQL in `duckdb_tables()` spells all three.
 macro_rules! enum_spelled {
     () => {
-        r#"'ENUM"?\(|"(?i:__pivot_enum_)'"#
+        r#"'\b(?i:ENUM)"?\(|"(?i:__pivot_enum_)'"#
     };
 }
 pub(crate) use enum_spelled;
