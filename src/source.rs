@@ -4189,8 +4189,26 @@ mod tests {
                     let loaded = load_file_in(bench, "t", &path, zone);
                     let used = TEXT_STAMPS.with(|u| u.get());
                     let case = format!("{what}, odd row {at}");
-                    assert_eq!(used.0, 1, "{case}: the timestamps were not read as text");
-                    let reread = matches!(read, Sniffed | Refused);
+                    // DuckDB 2.0 sniffs a time with `Z` or an offset as TIMESTAMPTZ, which the
+                    // text read leaves to the sniffed read (PRJ-19): that one, value for value.
+                    let zoned: bool = bench
+                        .connection()
+                        .query_row(
+                            &format!(
+                                "SELECT column_type LIKE '%WITH TIME ZONE' FROM \
+                                 (DESCRIBE SELECT * FROM {reader}) WHERE column_name = 'ts'"
+                            ),
+                            [],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(false);
+                    if zoned {
+                        assert_eq!(used.0, 0, "{case}: a zoned file read as text");
+                    } else {
+                        assert_eq!(used.0, 1, "{case}: the timestamps were not read as text");
+                    }
+                    let read = if zoned { &Sniffed } else { read };
+                    let reread = matches!(read, Sniffed | Refused) && !zoned;
                     assert_eq!(used.1 == 1, reread, "{case}: {used:?}");
                     let conn = bench.connection();
                     if *read == Refused {
@@ -4372,7 +4390,8 @@ mod tests {
                 } else if !what.starts_with("a genuine") {
                     "isinf(ts)"
                 } else {
-                    "ts = timezone('Europe/Copenhagen', TIMESTAMP '1900-01-01')"
+                    // The text says `Z`, which DuckDB 2.0's sniffer keeps (1.5.5 read it in the zone).
+                    "ts = TIMESTAMPTZ '1900-01-01 00:00:00+00'"
                 };
                 let kept: bool = conn
                     .query_row(&format!("SELECT {at} FROM t WHERE i = -1"), [], |r| {
@@ -4397,10 +4416,11 @@ mod tests {
             assert!(columns_of(conn, "t").unwrap().is_empty(), "{what}: a table");
         }
 
-        // An HTTP body read as its file is: refused the same.
+        // An HTTP body read as its file is: a date's refused the same.
         let tb = TestBench::new("ndjson-infinity-body");
         let path = tb.1.join("http-body.ndjson");
-        let body = ndjson(10, &ts, "{\"i\":-1,\"ts\":\"infinity\",\"note\":\"n\"}");
+        let dated = |i: usize| format!("{{\"i\":{i},\"d\":\"2026-01-01\"}}");
+        let body = ndjson(10, &dated, "{\"i\":-1,\"d\":\"infinity\"}");
         std::fs::write(&path, &body).unwrap();
         let none = crate::exec::Narrowing::default();
         let hold = Hold {
@@ -4413,11 +4433,12 @@ mod tests {
         let f = load_read(tb.bench(), "t", &reader, "UTC", &hold, "test", bytes, None)
             .map(|_| ())
             .expect_err("an HTTP body's infinity");
-        assert!(f.detail.contains("column `ts`"), "{}", f.detail);
+        assert!(f.detail.contains("column `d`"), "{}", f.detail);
 
         // Declared `timestamp`, the column is read as one, and keeps it.
         let mut tb = TestBench::new("ndjson-infinity-declared");
         let path = tb.1.join("t.ndjson");
+        let body = ndjson(10, &ts, "{\"i\":-1,\"ts\":\"infinity\",\"note\":\"n\"}");
         std::fs::write(&path, &body).unwrap();
         let declared = [("i", "int64"), ("ts", "timestamp")].map(|(n, t)| crate::exec::FieldDecl {
             name: n.into(),
@@ -4445,8 +4466,9 @@ mod tests {
         // #38: of two keys that differ only in case, DuckDB 1.5.5's JSON reader renames the
         // later one by a suffix, `Id` beside `id` to `Id_1`, `A_1` beside `A` and `a_1` to
         // `A_1_2`. The check for an infinity read as 1900-01-01 looked for the column's text by
-        // its name in the table, found no key `Id_1`, and let the file load with that time.
-        let iso = |i: usize| format!("\"2026-01-01T00:{:02}:{:02}Z\"", (i / 60) % 60, i % 60);
+        // its name in the table, found no key `Id_1`, and let the file load with that time. On
+        // DuckDB 2.0 a timestamp's infinity reads as itself, so the check is a date's.
+        let iso = |i: usize| format!("\"2026-01-{:02}\"", i + 1);
         let ndjson = |row: &dyn Fn(usize) -> String, last: &str| {
             let mut b: String = (0..10).map(|i| format!("{}\n", row(i))).collect();
             b.push_str(last);
@@ -4481,7 +4503,7 @@ mod tests {
             ),
             (
                 "a genuine 1900-01-01",
-                ndjson(&clash, "{\"id\":99,\"Id\":\"1900-01-01T00:00:00Z\"}"),
+                ndjson(&clash, "{\"id\":99,\"Id\":\"1900-01-01\"}"),
                 None,
             ),
         ];
@@ -4524,34 +4546,34 @@ mod tests {
         };
         let ts = |i: usize| format!("{{\"i\":{i},\"ts\":{}}}", iso(i));
         let date = |i: usize| format!("{{\"i\":{i},\"d\":\"2026-01-01\"}}");
-        // (what, body, the column refused)
-        let cases: Vec<(&str, String, &str)> = vec![
+        // (what, body, the column refused, or `None` where a timestamp reads it as 1970)
+        let cases: Vec<(&str, String, Option<&str>)> = vec![
             (
                 "epoch",
                 ndjson(10, &ts, "{\"i\":-1,\"ts\":\"epoch\"}"),
-                "ts",
+                None,
             ),
             (
                 "EPOCH",
                 ndjson(10, &ts, "{\"i\":-1,\"ts\":\"EPOCH\"}"),
-                "ts",
+                None,
             ),
             (
                 "padded",
                 ndjson(10, &ts, "{\"i\":-1,\"ts\":\"  epoch \"}"),
-                "ts",
+                None,
             ),
             // Past the sample and at 1 MiB or more, where the timestamps are read as text
             // first (R3-1): `epoch` is under 19 bytes, so the file is read the sniffed way.
             (
                 "past the sample",
                 ndjson(30_000, &ts, "{\"i\":-1,\"ts\":\"Epoch\"}"),
-                "ts",
+                None,
             ),
             (
                 "a date",
                 ndjson(10, &date, "{\"i\":-1,\"d\":\"epoch\"}"),
-                "d",
+                Some("d"),
             ),
             (
                 "in a list",
@@ -4560,17 +4582,31 @@ mod tests {
                     &|i| format!("{{\"i\":{i},\"l\":[{}]}}", iso(i)),
                     "{\"i\":-1,\"l\":[\"2026-01-01T00:00:00Z\",\"epoch\"]}",
                 ),
-                "l",
+                None,
             ),
         ];
-        for (what, body, column) in &cases {
+        for (what, body, refused) in &cases {
             let mut tb = TestBench::new("ndjson-epoch");
             let path = tb.1.join("t.ndjson");
             std::fs::write(&path, body).unwrap();
             let bench = tb.0.as_mut().unwrap();
-            let e = load_file_in(bench, "t", &path, "UTC")
-                .expect_err(what)
-                .to_string();
+            let loaded = load_file_in(bench, "t", &path, "UTC");
+            let Some(column) = refused else {
+                loaded.unwrap_or_else(|e| panic!("{what}: {e}"));
+                let at = if what.contains("list") {
+                    "l[2] = TIMESTAMPTZ '1970-01-01 00:00:00+00'"
+                } else {
+                    "ts = TIMESTAMPTZ '1970-01-01 00:00:00+00'"
+                };
+                let sql = format!("SELECT {at} FROM t WHERE i = -1");
+                let kept: bool = bench
+                    .connection()
+                    .query_row(&sql, [], |r| r.get(0))
+                    .unwrap();
+                assert!(kept, "{what}: a timestamp's epoch is 1970, as a CSV's");
+                continue;
+            };
+            let e = loaded.expect_err(what).to_string();
             for said in [
                 &format!("column `{column}`"),
                 "epoch",
@@ -4630,7 +4666,8 @@ mod tests {
                 for i in 0..30_000 {
                     let ts = match odd {
                         Some(o) if i == 29_999 => o.to_string(),
-                        _ => format!("\"2026-01-01T00:{:02}:{:02}Z\"", (i / 60) % 60, i % 60),
+                        // Zone-less: DuckDB 2.0 sniffs a `Z` as TIMESTAMPTZ, read the sniffed way.
+                        _ => format!("\"2026-01-01T00:{:02}:{:02}\"", (i / 60) % 60, i % 60),
                     };
                     body.push_str(&format!("{{\"i\":{i},\"ts\":{ts},\"m\":\"m{}\"}}\n", i % 7));
                 }
