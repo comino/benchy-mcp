@@ -2613,7 +2613,14 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-            TestBench(Some(Bench::open_in(&dir).unwrap()), dir)
+            let bench = Bench::open_in(&dir).unwrap();
+            // As a loader goes on once confined (`loader::open_then`): a bench opens on one thread.
+            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+            bench
+                .connection()
+                .execute_batch(&format!("SET threads = {threads}"))
+                .unwrap();
+            TestBench(Some(bench), dir)
         }
         fn bench(&self) -> &Bench {
             self.0.as_ref().unwrap()
