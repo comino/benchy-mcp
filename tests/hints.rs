@@ -103,6 +103,11 @@ fn dialect_slips_from_other_engines_each_name_their_duckdb_form() {
         ("SELECT getdate()", "now()"),
         ("SELECT TOP 5 * FROM meters", "LIMIT"),
         ("SELECT * FROM meters LIMIT 1 FOR UPDATE", "nothing to lock"),
+        // DuckDB 2.0's lambdas are `lambda x: …`.
+        (
+            "SELECT list_transform([1, 2], x -> x + 1)",
+            "lambda x: x + 1",
+        ),
     ] {
         let e = err_for(&mut ws, sql);
         assert!(e.contains(want), "{sql}\n  wanted {want:?} in: {e}");

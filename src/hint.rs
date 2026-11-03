@@ -283,6 +283,15 @@ fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
 /// `None` is the common case and is correct: an error we cannot improve on should be passed
 /// through unchanged rather than padded.
 pub fn for_sql_error(message: &str, catalogue: &Catalogue, cx: &Context) -> Option<String> {
+    // DuckDB 2.0 deprecates `x -> x + 1`, and its message ends in a setting the agent cannot
+    // change here (Sven, 2026-11-03, PRJ-19: DuckDB's default stays).
+    if message.contains("Deprecated lambda arrow") {
+        return Some(
+            "Write the lambda as `lambda x: x + 1` (two arguments: `lambda x, i: …`); the \
+             arrow form `x -> x + 1` is not taken here."
+                .into(),
+        );
+    }
     // Layer 2 of REQ-2 caught a file read. Say so as a fact about the bench, not as a missing
     // file — the agent's next move should be to use what is already here.
     if message.contains("Permission Error")
