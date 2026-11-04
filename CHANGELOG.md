@@ -9,8 +9,9 @@ frequent breaking changes are expected, with no stable API or backward-compatibi
 - **Security: a confined engine or loader opens only the sockets it needs.** Landlock handles TCP
   alone, so a process it confined could still send UDP anywhere and connect to any Unix socket
   on the host. A seccomp filter now goes on with it: the engine and a file loader open no socket,
-  a network loader only IPv4 and IPv6 (and netlink's route family for its resolver), and none
-  opens an io_uring. Where the kernel has Landlock ABI 6, abstract Unix sockets and signals are
+  a network loader only IPv4 and IPv6 TCP and UDP sockets (and netlink's route family for its
+  resolver; no MPTCP or SCTP, whose ports Landlock does not check), and none opens an io_uring.
+  The engine may no longer signal any process but itself. Where the kernel has Landlock ABI 6, abstract Unix sockets and signals are
   also scoped to the sandbox. New dependency: `seccompiler`.
 - **DuckDB 2.0.0** (was 1.5.5), with arrow 60. What changes for an agent: a lambda is written
   `lambda x: x + 1` (DuckDB 2.0 refuses the arrow form, and the error now says so); backticked
