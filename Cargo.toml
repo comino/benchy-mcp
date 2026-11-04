@@ -63,6 +63,9 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4"
+# The sockets a confined process may open, which Landlock does not handle beyond TCP
+# (src/sandbox.rs `socket_filter`, PRJ-100). rust-vmm's, pure Rust, no libseccomp.
+seccompiler = "0.5"
 
 [profile.release]
 strip = true

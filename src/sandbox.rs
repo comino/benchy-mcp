@@ -28,7 +28,8 @@
 #[cfg(target_os = "linux")]
 use landlock::{
     path_beneath_rules, Access, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort,
-    Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetError, RulesetStatus, ABI,
+    Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetError, RulesetStatus, Scope,
+    ABI,
 };
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -206,23 +207,103 @@ fn grant(abi: ABI, want: BitFlags<AccessFs>) -> BitFlags<AccessFs> {
     want & AccessFs::from_all(abi)
 }
 
+/// The first Landlock ABI that scopes abstract Unix sockets and signals to the domain (Linux 6.12).
+pub const SCOPE_ABI: u32 = 6;
+
 /// An empty ruleset handling ABI `abi`'s filesystem rights and, where the kernel has them, its
-/// TCP rights.
+/// TCP rights, and its scopes: no abstract Unix socket and no signal outside the domain. Scopes
+/// are asked for only where the kernel has them, so that their absence does not turn a `Full`
+/// posture into `Partial`; [`socket_filter`] stops Unix sockets below them.
 #[cfg(target_os = "linux")]
 fn created(abi: ABI) -> Built {
-    Ruleset::default()
+    let r = Ruleset::default()
         .set_compatibility(CompatLevel::BestEffort)
         .handle_access(AccessFs::from_all(abi))
-        .and_then(|r| r.handle_access(AccessNet::from_all(ABI::V4)))
-        .and_then(|r| r.create())
+        .and_then(|r| r.handle_access(AccessNet::from_all(ABI::V4)))?;
+    let r = if landlock_abi() >= SCOPE_ABI {
+        r.scope(Scope::from_all(ABI::V6))?
+    } else {
+        r
+    };
+    r.create()
 }
 
-/// Apply `built` to the calling thread, and say how much of it the kernel enforces.
+/// What a confined process may open a socket for. Landlock handles TCP alone (and, from ABI 6,
+/// abstract Unix sockets): a UDP datagram, and a connection to any pathname Unix socket — a
+/// D-Bus or docker socket, which could start an unconfined process — went anywhere (PRJ-100).
 #[cfg(target_os = "linux")]
-fn seal(built: Built) -> Posture {
-    match built.and_then(|r| r.restrict_self()) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sockets {
+    /// None: the engine and a file loader reach no network and no other process.
+    None,
+    /// IPv4 and IPv6, TCP to the ports Landlock grants and UDP for DNS, and netlink's route
+    /// family, which glibc's resolver reads the interfaces through (`RESOLVER_FILES`): no Unix
+    /// socket and no other family.
+    Network,
+}
+
+/// The seccomp filter for `sockets`: `socket()` refused with EACCES outside what `sockets` allows,
+/// and `io_uring_setup()` refused always, since an io_uring can open a socket without `socket()`.
+/// Everything else is allowed: the filesystem and TCP are Landlock's.
+#[cfg(target_os = "linux")]
+fn socket_filter(sockets: Sockets) -> Result<seccompiler::BpfProgram, String> {
+    use seccompiler::{
+        SeccompAction, SeccompCmpArgLen as Len, SeccompCmpOp as Op, SeccompCondition as Cond,
+        SeccompFilter, SeccompRule,
+    };
+    let cond = |arg: u8, op: Op, v: i32| Cond::new(arg, Len::Dword, op, v as u64);
+    let refused_sockets = match sockets {
+        Sockets::None => Vec::new(),
+        // Refused: a family that is none of the three, or netlink of another protocol.
+        Sockets::Network => vec![
+            SeccompRule::new(vec![
+                cond(0, Op::Ne, libc::AF_INET).map_err(|e| e.to_string())?,
+                cond(0, Op::Ne, libc::AF_INET6).map_err(|e| e.to_string())?,
+                cond(0, Op::Ne, libc::AF_NETLINK).map_err(|e| e.to_string())?,
+            ])
+            .map_err(|e| e.to_string())?,
+            SeccompRule::new(vec![
+                cond(0, Op::Eq, libc::AF_NETLINK).map_err(|e| e.to_string())?,
+                cond(2, Op::Ne, libc::NETLINK_ROUTE).map_err(|e| e.to_string())?,
+            ])
+            .map_err(|e| e.to_string())?,
+        ],
+    };
+    let rules = [
+        (libc::SYS_socket, refused_sockets),
+        (libc::SYS_io_uring_setup, Vec::new()),
+    ]
+    .into_iter()
+    .collect();
+    let arch =
+        seccompiler::TargetArch::try_from(std::env::consts::ARCH).map_err(|e| e.to_string())?;
+    SeccompFilter::new(
+        rules,
+        SeccompAction::Allow,
+        SeccompAction::Errno(libc::EACCES as u32),
+        arch,
+    )
+    .and_then(|f| f.try_into())
+    .map_err(|e| e.to_string())
+}
+
+/// Apply `built` and the socket filter for `sockets` to the calling thread, and say how much of
+/// it the kernel enforces. A filter that cannot be applied leaves the process unconfined as far
+/// as sockets go, so it is `Unavailable`, which a confined process refuses to serve under unless
+/// told otherwise (`admit`).
+#[cfg(target_os = "linux")]
+fn seal(built: Built, sockets: Sockets) -> Posture {
+    let posture = match built.and_then(|r| r.restrict_self()) {
         Ok(r) => classify(r.ruleset),
-        Err(e) => Posture::Unavailable(e.to_string()),
+        Err(e) => return Posture::Unavailable(e.to_string()),
+    };
+    match socket_filter(sockets)
+        .and_then(|f| seccompiler::apply_filter(&f).map_err(|e| e.to_string()))
+    {
+        Ok(()) => posture,
+        Err(e) => Posture::Unavailable(format!(
+            "the socket filter (seccomp) could not be applied: {e}"
+        )),
     }
 }
 
@@ -277,7 +358,7 @@ fn classify(s: RulesetStatus) -> Posture {
 /// get.
 #[cfg(target_os = "linux")]
 pub fn restrict_to(path: &Path, session: &Path) -> Posture {
-    seal(engine_ruleset(fs_abi(), path, session))
+    seal(engine_ruleset(fs_abi(), path, session), Sockets::None)
 }
 
 /// [`restrict_to`]'s ruleset, built for filesystem ABI `abi` and not yet applied.
@@ -300,7 +381,7 @@ fn engine_ruleset(abi: ABI, path: &Path, session: &Path) -> Built {
 /// file it builds, so the staging directory is the smallest thing that can be granted.
 #[cfg(target_os = "linux")]
 pub fn restrict_loader(input: &Path, stage: &Path) -> Posture {
-    seal(loader_ruleset(fs_abi(), input, stage))
+    seal(loader_ruleset(fs_abi(), input, stage), Sockets::None)
 }
 
 /// [`restrict_loader`]'s ruleset, built for filesystem ABI `abi` and not yet applied.
@@ -346,7 +427,7 @@ pub const RESOLVER_FILES: [&str; 5] = [
 /// handle; a reply too large for UDP would be retried over TCP to port 53, which is refused.
 #[cfg(target_os = "linux")]
 pub fn restrict_network_loader(stage: &Path, ports: &[u16]) -> Posture {
-    seal(network_ruleset(fs_abi(), stage, ports))
+    seal(network_ruleset(fs_abi(), stage, ports), Sockets::Network)
 }
 
 /// [`restrict_network_loader`]'s ruleset, built for filesystem ABI `abi` and not yet applied.
