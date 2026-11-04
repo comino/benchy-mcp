@@ -242,39 +242,101 @@ enum Sockets {
     Network,
 }
 
-/// The seccomp filter for `sockets`: `socket()` refused with EACCES outside what `sockets` allows,
-/// and `io_uring_setup()` refused always, since an io_uring can open a socket without `socket()`.
-/// Everything else is allowed: the filesystem and TCP are Landlock's.
+/// Who a confined process may signal. Landlock scopes signals to its domain only from ABI 6
+/// ([`SCOPE_ABI`]); below it the engine could SIGKILL the server (PRJ-100).
 #[cfg(target_os = "linux")]
-fn socket_filter(sockets: Sockets) -> Result<seccompiler::BpfProgram, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signals {
+    /// Itself alone: the engine starts no process.
+    Own,
+    /// Any process, as Landlock allows: a loader stops the connector it started.
+    Any,
+}
+
+/// The seccomp filter for `sockets` and `signals`, each refused call answered EACCES:
+/// - `socket()` outside what `sockets` allows. For [`Sockets::Network`], IPv4 and IPv6 only as a
+///   stream or a datagram, of protocol 0, TCP or UDP: Linux 6.8's Landlock checks ports on TCP
+///   sockets alone, and an MPTCP one (protocol 262) connected to a port never granted, while an
+///   SCTP one (`SOCK_SEQPACKET`, or its protocol) has no rule at all;
+/// - `io_uring_setup()` always, since an io_uring can open a socket without `socket()`;
+/// - for [`Signals::Own`], a signal sent to any process but this one, and `pidfd_open`.
+///
+/// Everything else is allowed: the filesystem and TCP ports are Landlock's. A syscall of another
+/// architecture (`int 0x80`) kills the process (seccompiler's architecture check).
+#[cfg(target_os = "linux")]
+fn socket_filter(sockets: Sockets, signals: Signals) -> Result<seccompiler::BpfProgram, String> {
     use seccompiler::{
-        SeccompAction, SeccompCmpArgLen as Len, SeccompCmpOp as Op, SeccompCondition as Cond,
-        SeccompFilter, SeccompRule,
+        BackendError, SeccompAction, SeccompCmpArgLen as Len, SeccompCmpOp as Op,
+        SeccompCondition as Cond, SeccompFilter, SeccompRule,
     };
-    let cond = |arg: u8, op: Op, v: i32| Cond::new(arg, Len::Dword, op, v as u64);
-    let refused_sockets = match sockets {
-        Sockets::None => Vec::new(),
-        // Refused: a family that is none of the three, or netlink of another protocol.
-        Sockets::Network => vec![
-            SeccompRule::new(vec![
-                cond(0, Op::Ne, libc::AF_INET).map_err(|e| e.to_string())?,
-                cond(0, Op::Ne, libc::AF_INET6).map_err(|e| e.to_string())?,
-                cond(0, Op::Ne, libc::AF_NETLINK).map_err(|e| e.to_string())?,
-            ])
-            .map_err(|e| e.to_string())?,
-            SeccompRule::new(vec![
-                cond(0, Op::Eq, libc::AF_NETLINK).map_err(|e| e.to_string())?,
-                cond(2, Op::Ne, libc::NETLINK_ROUTE).map_err(|e| e.to_string())?,
-            ])
-            .map_err(|e| e.to_string())?,
-        ],
+    let e = |e: BackendError| e.to_string();
+    let cond = |arg: u8, op: Op, v: i64| Cond::new(arg, Len::Dword, op, v as u64).map_err(e);
+    let rule = |c: Vec<Result<Cond, String>>| -> Result<SeccompRule, String> {
+        SeccompRule::new(c.into_iter().collect::<Result<_, _>>()?).map_err(e)
     };
-    let rules = [
+    // An empty list refuses every socket(): a rule list that is empty matches always.
+    let mut refused_sockets = Vec::new();
+    if sockets == Sockets::Network {
+        let (inet, inet6) = (libc::AF_INET as i64, libc::AF_INET6 as i64);
+        // A family that is none of the three, or netlink of another protocol.
+        refused_sockets.push(rule(vec![
+            cond(0, Op::Ne, inet),
+            cond(0, Op::Ne, inet6),
+            cond(0, Op::Ne, libc::AF_NETLINK as i64),
+        ])?);
+        refused_sockets.push(rule(vec![
+            cond(0, Op::Eq, libc::AF_NETLINK as i64),
+            cond(2, Op::Ne, libc::NETLINK_ROUTE as i64),
+        ])?);
+        for family in [inet, inet6] {
+            // A protocol that is not the type's own, TCP or UDP: MPTCP, SCTP, ICMP.
+            refused_sockets.push(rule(vec![
+                cond(0, Op::Eq, family),
+                cond(2, Op::Ne, 0),
+                cond(2, Op::Ne, libc::IPPROTO_TCP as i64),
+                cond(2, Op::Ne, libc::IPPROTO_UDP as i64),
+            ])?);
+            // A type that is neither a stream nor a datagram, its flags aside: raw, RDM, SCTP's
+            // SOCK_SEQPACKET, DCCP, the old SOCK_PACKET.
+            for ty in [
+                libc::SOCK_RAW,
+                libc::SOCK_RDM,
+                libc::SOCK_SEQPACKET,
+                libc::SOCK_DCCP,
+                10, // SOCK_PACKET, which libc marks deprecated
+            ] {
+                refused_sockets.push(rule(vec![
+                    cond(0, Op::Eq, family),
+                    cond(1, Op::MaskedEq(0xf), ty as i64),
+                ])?);
+            }
+        }
+    }
+    let mut rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> = [
         (libc::SYS_socket, refused_sockets),
         (libc::SYS_io_uring_setup, Vec::new()),
     ]
     .into_iter()
     .collect();
+    if signals == Signals::Own {
+        let me = i64::from(std::process::id());
+        for sys in [
+            libc::SYS_kill,
+            libc::SYS_tgkill,
+            libc::SYS_rt_sigqueueinfo,
+            libc::SYS_rt_tgsigqueueinfo,
+        ] {
+            rules.insert(sys, vec![rule(vec![cond(0, Op::Ne, me)])?]);
+        }
+        // A thread id alone, which may be another process's; and a pidfd, which names any.
+        for sys in [
+            libc::SYS_tkill,
+            libc::SYS_pidfd_open,
+            libc::SYS_pidfd_send_signal,
+        ] {
+            rules.insert(sys, Vec::new());
+        }
+    }
     let arch =
         seccompiler::TargetArch::try_from(std::env::consts::ARCH).map_err(|e| e.to_string())?;
     SeccompFilter::new(
@@ -287,17 +349,17 @@ fn socket_filter(sockets: Sockets) -> Result<seccompiler::BpfProgram, String> {
     .map_err(|e| e.to_string())
 }
 
-/// Apply `built` and the socket filter for `sockets` to the calling thread, and say how much of
+/// Apply `built` and the filter for `sockets` and `signals` to the calling thread, and say how much of
 /// it the kernel enforces. A filter that cannot be applied leaves the process unconfined as far
 /// as sockets go, so it is `Unavailable`, which a confined process refuses to serve under unless
 /// told otherwise (`admit`).
 #[cfg(target_os = "linux")]
-fn seal(built: Built, sockets: Sockets) -> Posture {
+fn seal(built: Built, sockets: Sockets, signals: Signals) -> Posture {
     let posture = match built.and_then(|r| r.restrict_self()) {
         Ok(r) => classify(r.ruleset),
         Err(e) => return Posture::Unavailable(e.to_string()),
     };
-    match socket_filter(sockets)
+    match socket_filter(sockets, signals)
         .and_then(|f| seccompiler::apply_filter(&f).map_err(|e| e.to_string()))
     {
         Ok(()) => posture,
@@ -358,7 +420,11 @@ fn classify(s: RulesetStatus) -> Posture {
 /// get.
 #[cfg(target_os = "linux")]
 pub fn restrict_to(path: &Path, session: &Path) -> Posture {
-    seal(engine_ruleset(fs_abi(), path, session), Sockets::None)
+    seal(
+        engine_ruleset(fs_abi(), path, session),
+        Sockets::None,
+        Signals::Own,
+    )
 }
 
 /// [`restrict_to`]'s ruleset, built for filesystem ABI `abi` and not yet applied.
@@ -381,7 +447,11 @@ fn engine_ruleset(abi: ABI, path: &Path, session: &Path) -> Built {
 /// file it builds, so the staging directory is the smallest thing that can be granted.
 #[cfg(target_os = "linux")]
 pub fn restrict_loader(input: &Path, stage: &Path) -> Posture {
-    seal(loader_ruleset(fs_abi(), input, stage), Sockets::None)
+    seal(
+        loader_ruleset(fs_abi(), input, stage),
+        Sockets::None,
+        Signals::Any,
+    )
 }
 
 /// [`restrict_loader`]'s ruleset, built for filesystem ABI `abi` and not yet applied.
@@ -427,7 +497,11 @@ pub const RESOLVER_FILES: [&str; 5] = [
 /// handle; a reply too large for UDP would be retried over TCP to port 53, which is refused.
 #[cfg(target_os = "linux")]
 pub fn restrict_network_loader(stage: &Path, ports: &[u16]) -> Posture {
-    seal(network_ruleset(fs_abi(), stage, ports), Sockets::Network)
+    seal(
+        network_ruleset(fs_abi(), stage, ports),
+        Sockets::Network,
+        Signals::Any,
+    )
 }
 
 /// [`restrict_network_loader`]'s ruleset, built for filesystem ABI `abi` and not yet applied.
