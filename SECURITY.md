@@ -58,7 +58,11 @@ any of which may carry a prompt injection aimed at the agent.
 3. **The Landlock sandbox** (`src/sandbox.rs`, Linux only), load-bearing: the engine may read
    only its workspace, a file loader its one input, and a ClickHouse or HTTP loader its staging
    directory, the resolver's files and TCP to its source's port (REQ-3
-   `a_network_loader_reaches_only_its_source_and_its_staging`). Landlock confines only threads
+   `a_network_loader_reaches_only_its_source_and_its_staging`). Landlock handles TCP alone, so a
+   seccomp filter installed with it decides the sockets: the engine and a file loader may open
+   none, and a network loader only IPv4 and IPv6 (TCP to its port, UDP for DNS) and netlink's
+   route family for the resolver; no Unix socket, and no io_uring, which opens sockets past the
+   filter. A filter that cannot be applied counts as no sandbox. Landlock confines only threads
    started after it, so the engine confines itself while it is its only thread, and the workers
    `--threads` asks for are started after that (REQ-3
    `a_thread_already_running_is_never_confined_as_if_it_were_not`, REQ-7
