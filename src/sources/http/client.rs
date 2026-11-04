@@ -31,6 +31,28 @@ const CONNECT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Default)]
 pub struct Redact(Vec<String>);
 
+/// `value` as it stands inside a JSON string, quotes left off.
+fn json_inner(value: &str) -> String {
+    let quoted = serde_json::to_string(value).expect("a string serializes");
+    quoted[1..quoted.len() - 1].to_string()
+}
+
+/// `json` with every character past ASCII written as a `u` escape, a pair of them past the BMP.
+fn json_ascii(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for u in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+        }
+    }
+    out
+}
+
 /// `text` with the hex digits of each `%XX` escape uppercased: ASCII for ASCII, so every byte
 /// stays where it was.
 fn upper_escapes(text: &str) -> String {
@@ -68,6 +90,12 @@ impl Redact {
         for value in values.into_iter().filter(|v| !v.is_empty()) {
             out.push(value.to_string());
             out.push(paginate::encode(value));
+            // As a JSON string writes it, a connector's `log` event or an API's error body: its
+            // `"` and backslash escaped, `/` too where an encoder does that, and, as Python's
+            // `ensure_ascii` writes it, every character past ASCII as a `u` escape.
+            let json = json_inner(value);
+            let slashed = json.replace('/', "\\/");
+            out.extend([json_ascii(&json), json_ascii(&slashed), slashed, json]);
         }
         // Longest first, so a secret that contains another is masked whole.
         out.sort_by_key(|s| std::cmp::Reverse(s.len()));
@@ -97,6 +125,8 @@ impl Redact {
     /// fragments too, before trimming whitespace or shortening the diagnostic for display.
     pub(crate) fn window(&self, text: &str, cut_start: bool, cut_end: bool) -> String {
         let text = self.apply(text);
+        // An edge's escapes in either case, as `apply` reads them (PRJ-110).
+        let upper = upper_escapes(&text);
         let mut start = 0;
         let mut end = text.len();
         for secret in &self.0 {
@@ -105,13 +135,13 @@ impl Redact {
             for at in 1..secret.len() {
                 if cut_start {
                     let suffix = String::from_utf8_lossy(&secret.as_bytes()[at..]);
-                    if text.starts_with(suffix.as_ref()) {
+                    if text.starts_with(suffix.as_ref()) || upper.starts_with(suffix.as_ref()) {
                         start = start.max(suffix.len());
                     }
                 }
                 if cut_end {
                     let prefix = String::from_utf8_lossy(&secret.as_bytes()[..at]);
-                    if text.ends_with(prefix.as_ref()) {
+                    if text.ends_with(prefix.as_ref()) || upper.ends_with(prefix.as_ref()) {
                         end = end.min(text.len() - prefix.len());
                     }
                 }
@@ -948,6 +978,26 @@ mod tests {
         }
         // Text that only looks like an escape is left as it was.
         assert_eq!(r.apply("100% %zz 50%"), "100% %zz 50%");
+        // Cut by a read cap, a lowercase escape's start is masked as an uppercase one's is.
+        assert_eq!(
+            r.window("error: key=sibling%2fsec", false, true),
+            "error: key=***"
+        );
+    }
+
+    #[test]
+    fn a_secret_inside_a_json_string_is_masked() {
+        // PRJ-111's review: a connector's `log` event and an API's error body are JSON, which
+        // escapes the quote and the backslash and, by some encoders, `/` and all past ASCII.
+        let r = Redact::from_values(["tok/en\"q-é"]);
+        for echoed in [
+            r#"{"m":"tok/en\"q-é"}"#,
+            r#"{"m":"tok\/en\"q-é"}"#,
+            r#"{"m":"tok/en\"q-\u00e9"}"#,
+            r#"{"m":"tok\/en\"q-\u00e9"}"#,
+        ] {
+            assert_eq!(r.apply(echoed), r#"{"m":"***"}"#, "{echoed}");
+        }
     }
 
     #[test]

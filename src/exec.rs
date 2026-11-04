@@ -747,8 +747,13 @@ fn run_json(
     }
 }
 
-/// Ask the connector what it is. Pure by contract: no network, no credentials, no side effects.
+/// Ask the connector what it is. Pure by contract: no network, no credentials, no side effects;
+/// its environment is set all the same, so a refusal is masked as a fetch's is ([`masked`]).
 pub fn describe(src: &ExecSource) -> Result<Describe, Fault> {
+    masked(src, describe_unredacted(src))
+}
+
+fn describe_unredacted(src: &ExecSource) -> Result<Describe, Fault> {
     check_permissions(&src.command)?;
     let (out, err, ok) = run_json(
         src,
@@ -1025,11 +1030,15 @@ pub fn fetch_within(
     budget: &crate::admission::Budget,
     sink: &mut Sink,
 ) -> Result<Fetched, Fault> {
-    fetch_unredacted(src, n, run_id, budget, sink).map_err(|mut f| {
-        let redact =
-            crate::sources::http::client::Redact::from_values(src.env.values().map(String::as_str));
-        f.detail = redact.apply(&f.detail);
-        f
+    masked(src, fetch_unredacted(src, n, run_id, budget, sink))
+}
+
+/// `result`, its refusal's detail with every value of `src`'s `env` masked: what the connector
+/// wrote (its error event, its stderr) is relayed in it (PRJ-111).
+fn masked<T>(src: &ExecSource, result: Result<T, Fault>) -> Result<T, Fault> {
+    result.map_err(|f| {
+        crate::sources::http::client::Redact::from_values(src.env.values().map(String::as_str))
+            .fault(f)
     })
 }
 
