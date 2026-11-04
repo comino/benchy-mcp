@@ -1014,7 +1014,26 @@ fn input_document(src: &ExecSource, op: &str, run_id: &str, n: &Narrowing) -> se
 /// Each validated batch goes to `sink` as it arrives. A fetch that then fails — the connector
 /// reports an error, exits non-zero, or never sends its end-of-stream marker — has still sent
 /// the sink what came before: the caller decides nothing until this returns `Ok`.
+///
+/// A refusal's detail has every value of the connector's `env` masked, as an HTTP source's has
+/// its credentials: a connector that relays its API's error, or prints a token to stderr, would
+/// otherwise put it in the operator log and the error text (PRJ-111, SECURITY.md).
 pub fn fetch_within(
+    src: &ExecSource,
+    n: &Narrowing,
+    run_id: &str,
+    budget: &crate::admission::Budget,
+    sink: &mut Sink,
+) -> Result<Fetched, Fault> {
+    fetch_unredacted(src, n, run_id, budget, sink).map_err(|mut f| {
+        let redact =
+            crate::sources::http::client::Redact::from_values(src.env.values().map(String::as_str));
+        f.detail = redact.apply(&f.detail);
+        f
+    })
+}
+
+fn fetch_unredacted(
     src: &ExecSource,
     n: &Narrowing,
     run_id: &str,
