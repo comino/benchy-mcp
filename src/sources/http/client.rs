@@ -31,6 +31,23 @@ const CONNECT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Default)]
 pub struct Redact(Vec<String>);
 
+/// `text` with the hex digits of each `%XX` escape uppercased: ASCII for ASCII, so every byte
+/// stays where it was.
+fn upper_escapes(text: &str) -> String {
+    let mut b = text.as_bytes().to_vec();
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == b'%' && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+            b[i + 1] = b[i + 1].to_ascii_uppercase();
+            b[i + 2] = b[i + 2].to_ascii_uppercase();
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    String::from_utf8(b).expect("only ASCII bytes changed")
+}
+
 impl Redact {
     pub fn of(spec: &Spec) -> Redact {
         let mut values: Vec<String> = spec.env.values().cloned().collect();
@@ -63,6 +80,14 @@ impl Redact {
         for s in &self.0 {
             if t.contains(s.as_str()) {
                 t = t.replace(s.as_str(), "***");
+            }
+            // A percent-escape's hex digits in either case are the same octet (RFC 3986 §2.1):
+            // an API that echoes `%2f` echoes the `%2F` benchy wrote (PRJ-110). Found in a copy
+            // with every escape uppercased, which has the same length, at the same places.
+            if s.contains('%') {
+                while let Some(at) = upper_escapes(&t).find(s.as_str()) {
+                    t.replace_range(at..at + s.len(), "***");
+                }
             }
         }
         t
@@ -908,6 +933,22 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_echoed_with_escapes_in_either_case_is_masked() {
+        // PRJ-110: benchy writes `%2F`; .NET's UrlEncode echoes `%2f`, and a mix is the same octets.
+        let r = Redact::from_values(["sibling/secret:1"]);
+        for echoed in [
+            "key=sibling%2Fsecret%3A1",
+            "key=sibling%2fsecret%3a1",
+            "key=sibling%2fsecret%3A1",
+            "key=sibling/secret:1",
+        ] {
+            assert_eq!(r.apply(echoed), "key=***", "{echoed}");
+        }
+        // Text that only looks like an escape is left as it was.
+        assert_eq!(r.apply("100% %zz 50%"), "100% %zz 50%");
+    }
 
     #[test]
     fn a_credential_cut_inside_utf8_is_redacted_at_both_body_edges() {
