@@ -125,6 +125,9 @@ pub struct Server {
     stdin: Option<ChildStdin>,
     out: BufReader<ChildStdout>,
     n: u64,
+    /// Where the server's stderr goes, unless the test took it (`launch_logging`): read back when
+    /// the server goes away mid-call, so the failure says why (PRJ-126).
+    log: Option<std::path::PathBuf>,
 }
 
 impl Drop for Server {
@@ -145,7 +148,11 @@ impl Server {
 
     /// Any arguments, and extra environment on top of the test's own.
     pub fn launch(args: &[&str], envs: &[(&str, &std::path::Path)]) -> Server {
-        Server::launch_logging(args, envs, Stdio::null())
+        let dir = unique("server-log");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stderr.log");
+        let file = std::fs::File::create(&path).unwrap();
+        Server::launch_inner(args, envs, file.into(), Some(path))
     }
 
     /// The same, with the operator's log — the server's stderr — going to `log`.
@@ -153,6 +160,15 @@ impl Server {
         args: &[&str],
         envs: &[(&str, &std::path::Path)],
         log: impl Into<Stdio>,
+    ) -> Server {
+        Server::launch_inner(args, envs, log.into(), None)
+    }
+
+    fn launch_inner(
+        args: &[&str],
+        envs: &[(&str, &std::path::Path)],
+        log: Stdio,
+        path: Option<std::path::PathBuf>,
     ) -> Server {
         let mut child = spawn(
             Command::new(BIN)
@@ -171,6 +187,7 @@ impl Server {
             stdin,
             out,
             n: 0,
+            log: path,
         };
         s.call(
             "initialize",
@@ -216,6 +233,22 @@ impl Server {
         let _ = self.child.wait();
     }
 
+    /// How the server went, and the end of what it logged, for a failure message.
+    fn why_gone(&mut self) -> String {
+        let t = Instant::now();
+        let mut status = None;
+        while status.is_none() && t.elapsed() < Duration::from_secs(2) {
+            status = self.child.try_wait().ok().flatten();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let log = self.log.as_ref().map_or(String::new(), |p| {
+            let text = std::fs::read_to_string(p).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            lines[lines.len().saturating_sub(30)..].join("\n")
+        });
+        format!(": exit {status:?}; its log ends:\n{log}")
+    }
+
     pub fn notify(&mut self, method: &str) {
         let m = json!({"jsonrpc": "2.0", "method": method});
         self.send(&m);
@@ -228,7 +261,10 @@ impl Server {
         loop {
             let mut line = String::new();
             if self.out.read_line(&mut line).expect("readable") == 0 {
-                panic!("the server closed the pipe during {method}");
+                panic!(
+                    "the server closed the pipe during {method}{}",
+                    self.why_gone()
+                );
             }
             let v: Value = match serde_json::from_str(&line) {
                 Ok(v) => v,

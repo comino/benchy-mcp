@@ -347,3 +347,21 @@ fn version_json_says_what_a_pin_bump_checks() {
         );
     }
 }
+
+/// PRJ-126: a server that went away during a call said only "the server closed the pipe", its
+/// stderr discarded, and a flake on CI could not be told from a refusal. The failure now carries
+/// how it exited and the end of what it logged.
+#[test]
+fn a_server_that_exits_mid_call_says_why_in_the_failure() {
+    let failure = std::panic::catch_unwind(|| {
+        common::Server::launch(&["--no-such-flag"], &[]);
+    })
+    .expect_err("the server refuses an unknown option");
+    let said = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(said.contains("closed the pipe during initialize"), "{said}");
+    assert!(said.contains("exit Some("), "{said}");
+    assert!(said.contains("unknown option `--no-such-flag`"), "{said}");
+}
