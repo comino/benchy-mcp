@@ -81,11 +81,24 @@ pub fn unique(tag: &str) -> std::path::PathBuf {
 static FORKS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// Start `cmd`, unless a test holds [`no_forks`]; then once it lets go.
+///
+/// A program a test just wrote or copied may still be open for writing in a child another
+/// thread forked before the file was closed, until that child execs: the exec then fails with
+/// ETXTBSY. That is waited out, for up to about a second (PRJ-142).
 pub fn spawn(cmd: &mut Command) -> std::io::Result<Child> {
     let _starting = FORKS.read().unwrap_or_else(|p| p.into_inner());
     // `spawn` returns once the child has exec'd, so no copy of this process's descriptors is
     // left in a child that has not.
-    cmd.spawn()
+    let mut tries = 0;
+    loop {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && tries < 40 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            started => return started,
+        }
+    }
 }
 
 /// No process is started by this test binary while the guard is held, by [`spawn`].
