@@ -380,6 +380,7 @@ fn a_file_still_open_for_writing_elsewhere_is_run_once_it_is_closed() {
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .mode(0o755)
         .open(&script)
         .unwrap();
