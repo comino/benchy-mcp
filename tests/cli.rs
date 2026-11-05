@@ -365,3 +365,34 @@ fn a_server_that_exits_mid_call_says_why_in_the_failure() {
     assert!(said.contains("exit Some("), "{said}");
     assert!(said.contains("unknown option `--no-such-flag`"), "{said}");
 }
+
+/// PRJ-142: a file a test just wrote can still be open for writing in another thread's child,
+/// forked before the file was closed and not yet exec'd: running it then fails with ETXTBSY
+/// ("Text file busy"), as `a_job_the_loader_does_not_read_is_held_to_the_load_timeout` did on CI.
+/// `common::spawn` waits that out.
+#[test]
+fn a_file_still_open_for_writing_elsewhere_is_run_once_it_is_closed() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = common::unique("etxtbsy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("busy.sh");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o755)
+        .open(&script)
+        .unwrap();
+    f.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+    let closer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        drop(f);
+    });
+    let status = common::spawn(&mut Command::new(&script))
+        .expect("started once nothing holds it open for writing")
+        .wait()
+        .unwrap();
+    closer.join().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(status.success());
+}

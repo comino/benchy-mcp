@@ -1398,15 +1398,17 @@ fn a_job_the_loader_does_not_read_is_held_to_the_load_timeout() {
     let wedged = dir.join("wedged");
     std::fs::write(&wedged, "#!/bin/sh\nexec sleep 600\n").unwrap();
     std::fs::set_permissions(&wedged, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mut child = Command::new(&bin)
-        .arg("host")
-        .args(common::PLATFORM)
-        .args(["--load-timeout", "2"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    // Through common::spawn: `bin` was copied just now (PRJ-142).
+    let mut child = common::spawn(
+        Command::new(&bin)
+            .arg("host")
+            .args(common::PLATFORM)
+            .args(["--load-timeout", "2"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let mut h = Host {
         stdin: child.stdin.take().unwrap(),
         stdout: child.stdout.take().unwrap(),
